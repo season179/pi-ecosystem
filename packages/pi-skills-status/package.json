@@ -1,7 +1,7 @@
 {
-  "name": "@season179/pi-worktree",
-  "version": "26.5.2",
-  "description": "Adds a Claude Code-like --worktree flag to Pi.",
+  "name": "@season179/pi-skills-status",
+  "version": "26.5.0",
+  "description": "Shows the skills used in the current Pi session.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",
@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/season179/pi-ecosystem.git",
-    "directory": "packages/pi-worktree"
+    "directory": "packages/pi-skills-status"
   },
   "bugs": {
     "url": "https://github.com/season179/pi-ecosystem/issues"
@@ -18,12 +18,9 @@
     "pi",
     "pi-package",
     "pi-extension",
-    "worktree",
-    "git",
-    "git-worktree",
-    "claude-code",
-    "isolation",
-    "safety"
+    "skills",
+    "status",
+    "agent"
   ],
   "files": [
     "dist",
@@ -32,7 +29,7 @@
   ],
   "pi": {
     "extensions": [
-      "./dist/extensions/worktree.js"
+      "./dist/extensions/skills-status.js"
     ]
   },
   "scripts": {

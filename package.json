@@ -1,6 +1,6 @@
 {
   "name": "pi-ecosystem",
-  "version": "26.5.0",
+  "version": "26.5.2",
   "private": true,
   "type": "module",
   "description": "Season's Pi extensions and skills published as npm packages.",
@@ -11,7 +11,8 @@
     "build": "npm run build --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
     "pack:worktree": "npm pack --workspace @season179/pi-worktree",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run"
+    "pack:skills-status": "npm pack --workspace @season179/pi-skills-status",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run"
   },
   "engines": {
     "node": ">=22"

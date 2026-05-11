@@ -1,6 +1,18 @@
 # @season179/pi-worktree
 
-A Pi extension that adds a `--worktree` flag. When enabled, Pi creates an isolated git worktree for the session, redirects path-aware tool calls into that worktree, and prompts on quit before deleting or keeping the worktree.
+Add a `--worktree` flag to Pi.
+
+If you like Claude Code's `--worktree` behavior, this brings the same idea to Pi: start a session in a fresh git worktree, keep the agent's edits away from your current checkout, then choose whether to keep or delete the worktree when you exit.
+
+It is intentionally narrow. No task runner, no dashboard, no multi-agent framework. Just a safer place for Pi to work when you do not want it touching the branch or worktree you are using.
+
+## What It Does
+
+- Creates a temporary branch and git worktree for the Pi session.
+- Runs shell commands from that worktree.
+- Redirects Pi's path-aware file tools into the worktree when they target the original repo.
+- Blocks common escapes, including parent-directory traversal and writes outside the active worktree.
+- Prompts on exit before deleting the worktree, with a warning if it has uncommitted changes.
 
 ## Installation
 
@@ -14,11 +26,33 @@ pi install npm:@season179/pi-worktree
 pi --worktree
 ```
 
-The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `master` and places the worktree under:
+The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `master`, places the worktree under:
 
 ```txt
 <repo>/.pi/worktrees/
 ```
+
+and shows the active worktree in Pi's status area.
+
+While `--worktree` is active:
+
+- `bash` commands run from the created worktree.
+- `read`, `write`, and `edit` calls are redirected into that worktree when they target the original repo.
+- `grep`, `find`, and `ls` default to the worktree when no path is provided.
+- attempts to write outside the active worktree are blocked.
+
+On `quit`, the extension checks whether the worktree is dirty and asks whether to remove it. Keeping it leaves the branch and files in place so you can inspect, commit, diff, or merge manually.
+
+## When To Reach For It
+
+Use this when you want Pi to:
+
+- try a risky refactor without touching your current branch;
+- fix tests while your main checkout stays clean;
+- explore a change you may discard;
+- work in the same repo while you keep another branch open elsewhere.
+
+For multi-agent orchestration, task dashboards, or automated merge workflows, use a larger Pi workflow package. This is just the worktree safety layer.
 
 ## Included Resources
 
@@ -28,7 +62,8 @@ The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `m
 
 ```bash
 npm install
-npm run build --workspace @season179/pi-worktree
+cd packages/pi-worktree
+npm run build
 ```
 
 Test without publishing:
@@ -42,9 +77,9 @@ Because this package publishes compiled JavaScript, build before using `pi -e` f
 ## Tarball Validation
 
 ```bash
-npm pack --workspace @season179/pi-worktree
-tar -tf season179-pi-worktree-26.5.0.tgz
-pi install ./season179-pi-worktree-26.5.0.tgz
+npm pack
+tar -tf season179-pi-worktree-26.5.2.tgz
+pi install ./season179-pi-worktree-26.5.2.tgz
 ```
 
 The tarball should include:
@@ -60,7 +95,7 @@ package/dist/extensions/worktree.js
 
 ```bash
 npm login
-npm publish --workspace @season179/pi-worktree --access public
+npm publish --access public
 ```
 
 Scoped public packages require `--access public`.
@@ -74,11 +109,10 @@ Tested with:
 
 ## Security
 
-Pi extensions execute with your user permissions. This extension runs git commands, redirects tool paths, and can remove the temporary worktree on quit. Review the source before installing.
+Pi extensions execute with your user permissions. This extension runs git commands, redirects Pi tool paths, intercepts Pi/user shell execution, and can remove the temporary worktree on quit. It is a worktree guardrail, not an operating-system sandbox. Review the source before installing.
 
 ## Troubleshooting
 
 - If `pi --worktree` reports no base branch, make sure the repository has `main` or `master`.
 - If a worktree is kept, inspect it under `.pi/worktrees/`.
-- If package resources are not found during local testing, run `npm run build --workspace @season179/pi-worktree` first.
-
+- If package resources are not found during local testing, build the package first.
