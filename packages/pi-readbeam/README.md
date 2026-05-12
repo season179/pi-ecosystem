@@ -1,12 +1,13 @@
 # @season179/pi-readbeam
 
-A Pi extension that intercepts finalized assistant messages, segments them into prose and protected regions, and extracts linguistic spans for calm summary scanning.
+A Pi extension that intercepts finalized assistant messages, segments them into prose and protected regions, extracts linguistic spans, and renders them with terminal-safe ANSI formatting for calm summary scanning.
 
 ## What it does
 
 - Listens for `message_end` lifecycle events
 - Segments Markdown into **prose** (eligible for highlighting) and **protected** regions (code, URLs, paths, diffs, etc.)
 - Extracts **action verbs** and **noun phrases** from prose via a `LinguisticAnalyzer` adapter
+- Renders prose with ANSI formatting: **bold** for action verbs, <u>underline</u> for noun phrases
 - Preserves the assistant role and all other message properties (usage, etc.)
 - Skips user and tool result messages entirely
 - Includes an anti-recursion guard to prevent double-processing
@@ -17,7 +18,8 @@ A Pi extension that intercepts finalized assistant messages, segments them into 
 readbeam.ts          — Pi extension entry point (message_end hook)
 lib/segment.ts       — Content segmentation (prose vs. protected)
 lib/analyzer.ts      — Linguistic span extraction (action verbs, noun phrases)
-lib/__tests__/       — Unit tests for both layers
+lib/renderer.ts      — ANSI rendering of linguistic spans
+lib/__tests__/       — Unit tests + end-to-end pipeline tests
 ```
 
 ### Content segmentation (segment.ts)
@@ -34,6 +36,18 @@ Extracts typed spans from prose segments behind a `LinguisticAnalyzer` interface
 - **Noun phrases** — multi-word NPs preferred over single nouns when spans overlap. Determiners are stripped from the returned text. Generic single-word nouns ("things", "issue") are suppressed.
 
 Each span carries `start`/`end` character offsets into the original prose string.
+
+### Content renderer (renderer.ts)
+
+Takes raw Markdown text through the full pipeline: segment → analyze → render.
+
+- **Action verbs** → bold (`\x1b[1m…\x1b[22m`)
+- **Noun phrases** → underline (`\x1b[4m…\x1b[24m`)
+- **Protected segments** → pass through unchanged
+
+Both ANSI treatments are universally supported across modern terminals and remain readable when ANSI rendering is unavailable (escape codes are harmlessly ignored, leaving raw text intact). Stripping all ANSI codes from rendered output recovers the original text exactly.
+
+The renderer includes an idempotency guard: if the input already contains our ANSI formatting codes, it is returned unchanged.
 
 **NLP dependency:** [compromise](https://github.com/spencermountain/compromise) v14 — zero dependencies, ~100 KB, TypeScript-first. Provides POS tagging and noun-phrase chunking. Swap the body of `createAnalyzer()` to switch libraries; the `LinguisticAnalyzer` interface stays unchanged.
 
@@ -70,7 +84,7 @@ ln -s "$(pwd)/packages/pi-readbeam/dist/extensions/readbeam.js" \
 
 ## What to look for
 
-After sending a prompt, every assistant message in the TUI should show the placeholder text instead of the original response. User messages and tool results should be unaffected.
+After sending a prompt, every assistant message in the TUI should show the summary with **bold** action verbs and <u>underlined</u> noun phrases. Protected content (code, URLs, paths, diffs, etc.) passes through unchanged. User messages and tool results should be unaffected.
 
 ## Development
 
@@ -78,7 +92,7 @@ After sending a prompt, every assistant message in the TUI should show the place
 # Build
 npm run build --workspace @season179/pi-readbeam
 
-# Test (segmentation + linguistic analyzer)
+# Test (segmentation + linguistic analyzer + renderer + e2e)
 npm test --workspace @season179/pi-readbeam
 
 # Watch mode
@@ -91,10 +105,12 @@ npx tsc -p packages/pi-readbeam/tsconfig.json --watch
 import {
   segmentContent, isProtected, isProse,
   createAnalyzer, CompromiseAnalyzer,
+  renderContent,
 } from "@season179/pi-readbeam";
 
 import type {
   Segment, ProtectedSegment, ProseSegment, SegmentKind,
   LinguisticSpan, LinguisticAnalyzer, SpanKind,
+  RenderOptions,
 } from "@season179/pi-readbeam";
 ```
