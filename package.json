@@ -12,7 +12,8 @@
     "clean": "npm run clean --workspaces --if-present",
     "pack:worktree": "npm pack --workspace @season179/pi-worktree",
     "pack:skills-status": "npm pack --workspace @season179/pi-skills-status",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run"
+    "pack:readbeam": "npm pack --workspace @season179/pi-readbeam",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run"
   },
   "engines": {
     "node": ">=22"

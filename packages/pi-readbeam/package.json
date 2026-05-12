@@ -1,0 +1,41 @@
+{
+  "name": "@season179/pi-readbeam",
+  "version": "26.5.0",
+  "description": "Automatically intercepts finalized assistant messages and replaces them with highlighted placeholders to prove the message replacement extension path.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Season Saw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-readbeam"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "readbeam",
+    "highlighter",
+    "summary",
+    "message-replacement"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extensions/readbeam.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
