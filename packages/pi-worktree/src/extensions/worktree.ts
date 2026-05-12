@@ -67,6 +67,17 @@ interface WorktreeState {
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
+function getShellCommand(command: string): { file: string; args: string[] } {
+	if (process.platform === "win32") {
+		return {
+			file: process.env.ComSpec ?? "cmd.exe",
+			args: ["/d", "/s", "/c", command],
+		};
+	}
+
+	return { file: "/bin/sh", args: ["-c", command] };
+}
+
 function isToolCallEventType(
 	toolName: string,
 	event: ToolCallEvent,
@@ -79,10 +90,10 @@ function createLocalBashOperations(): BashOperations {
 		exec(command, cwd, options) {
 			return new Promise((resolve) => {
 				let settled = false;
-				const child = spawn(command, {
+				const shell = getShellCommand(command);
+				const child = spawn(shell.file, shell.args, {
 					cwd,
 					env: { ...process.env, ...options.env },
-					shell: true,
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 
@@ -109,7 +120,7 @@ function createLocalBashOperations(): BashOperations {
 						? setTimeout(() => {
 								kill();
 								finish(null);
-							}, options.timeout)
+							}, options.timeout * 1000)
 						: undefined;
 
 				child.stdout.on("data", options.onData);

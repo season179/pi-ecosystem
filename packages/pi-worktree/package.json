@@ -1,6 +1,6 @@
 {
   "name": "@season179/pi-worktree",
-  "version": "26.5.4",
+  "version": "26.5.5",
   "description": "Adds a Claude Code-like --worktree flag to Pi.",
   "type": "module",
   "license": "MIT",
@@ -39,5 +39,13 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }
