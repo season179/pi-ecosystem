@@ -16,6 +16,12 @@
  * segments, optimized for calm summary scanning. Uses compromise under the
  * hood behind a `LinguisticAnalyzer` adapter interface.
  *
+ * Renderer layer (issue #4):
+ * The renderer takes prose segments and their spans, then applies terminal-safe
+ * ANSI formatting: bold for action verbs, underline for noun phrases. Protected
+ * segments pass through unchanged. Includes an idempotency guard to prevent
+ * double-formatting.
+ *
  * Usage:
  *   pi -e ./dist/extensions/readbeam.js
  *
@@ -36,6 +42,12 @@ export type {
 	LinguisticAnalyzer,
 	SpanKind,
 } from "./lib/analyzer.js";
+
+import { renderContent } from "./lib/renderer.js";
+import type { RenderOptions } from "./lib/renderer.js";
+
+export { renderContent };
+export type { RenderOptions };
 
 interface ContentPart {
 	type: string;
@@ -68,21 +80,6 @@ function extractText(content: string | ContentPart[] | undefined): string {
 		.trim();
 }
 
-function buildPlaceholder(originalText: string): string {
-	const charCount = originalText.length;
-	const wordCount = originalText.split(/\s+/).filter(Boolean).length;
-
-	return [
-		READBEAM_MARKER,
-		"",
-		"This assistant message has been replaced by the readbeam extension.",
-		`Original message: ${wordCount} words, ${charCount} characters.`,
-		"",
-		"This is a placeholder demonstrating automatic message replacement.",
-		"The extension preserved the assistant role and replaced the content safely.",
-	].join("\n");
-}
-
 export default function readbeamExtension(pi: ExtensionAPI) {
 	pi.on("message_end", async (event: MessageEndEvent) => {
 		const { message } = event;
@@ -91,10 +88,12 @@ export default function readbeamExtension(pi: ExtensionAPI) {
 		const originalText = extractText(message.content);
 		if (!originalText || originalText.startsWith(READBEAM_MARKER)) return;
 
+		const rendered = renderContent(originalText);
+
 		return {
 			message: {
 				...message,
-				content: buildPlaceholder(originalText),
+				content: READBEAM_MARKER + "\n" + rendered,
 			},
 		};
 	});
