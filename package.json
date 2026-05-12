@@ -1,6 +1,6 @@
 {
   "name": "pi-ecosystem",
-  "version": "26.5.2",
+  "version": "26.5.3",
   "private": true,
   "type": "module",
   "description": "Season's Pi extensions and skills published as npm packages.",
