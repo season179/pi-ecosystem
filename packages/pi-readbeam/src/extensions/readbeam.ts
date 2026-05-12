@@ -11,13 +11,16 @@
  * Protected kinds: code-fence, inline-code, url, file-path, shell-command,
  * diff, stack-trace, log-output, heading, bullet, link, package-ref.
  *
+ * Linguistic span layer (issue #3):
+ * The analyzer extracts action verbs and meaningful noun phrases from prose
+ * segments, optimized for calm summary scanning. Uses compromise under the
+ * hood behind a `LinguisticAnalyzer` adapter interface.
+ *
  * Usage:
  *   pi -e ./dist/extensions/readbeam.js
  *
  * Or install as a pi package (see README).
  */
-
-import { segmentContent } from "./lib/segment.js";
 
 export { segmentContent, isProtected, isProse } from "./lib/segment.js";
 export type {
@@ -26,6 +29,13 @@ export type {
 	ProseSegment,
 	SegmentKind,
 } from "./lib/segment.js";
+
+export { createAnalyzer, CompromiseAnalyzer } from "./lib/analyzer.js";
+export type {
+	LinguisticSpan,
+	LinguisticAnalyzer,
+	SpanKind,
+} from "./lib/analyzer.js";
 
 interface ContentPart {
 	type: string;
@@ -80,10 +90,6 @@ export default function readbeamExtension(pi: ExtensionAPI) {
 
 		const originalText = extractText(message.content);
 		if (!originalText || originalText.startsWith(READBEAM_MARKER)) return;
-
-		// Segment the content to identify protected vs prose regions.
-		// The segmentation layer is now available for future highlighting passes.
-		const _segments = segmentContent(originalText);
 
 		return {
 			message: {
