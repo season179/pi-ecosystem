@@ -24,6 +24,8 @@ pi install npm:@season179/pi-worktree
 
 ```bash
 pi --worktree
+# or
+pi --wt
 ```
 
 The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `master`, places the worktree under:
@@ -34,7 +36,7 @@ The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `m
 
 and shows the active worktree in Pi's status area.
 
-While `--worktree` is active:
+While `--worktree` or `--wt` is active:
 
 - `bash` commands run from the created worktree.
 - `read`, `write`, and `edit` calls are redirected into that worktree when they target the original repo.
