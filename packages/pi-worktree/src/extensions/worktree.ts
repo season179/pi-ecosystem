@@ -7,6 +7,7 @@
  *
  * Usage:
  *   pi --worktree
+ *   pi --wt
  *
  * The worktree is created at <repo>/.pi/worktrees/<branch> with a branch
  * named pi-wt/<timestamp>-<pid> based on main (or master).
@@ -453,6 +454,11 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
+	pi.registerFlag("wt", {
+		description: "Alias for --worktree",
+		type: "boolean",
+		default: false,
+	});
 
 	pi.on("session_start", async (event, ctx) => {
 		const { code, stdout } = await git(["rev-parse", "--show-toplevel"]);
@@ -473,7 +479,12 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 			removeWorktreeMarker(repoRoot);
 		}
 
-		if (event.reason !== "startup" || !pi.getFlag("worktree")) return;
+		if (
+			event.reason !== "startup" ||
+			(!pi.getFlag("worktree") && !pi.getFlag("wt"))
+		) {
+			return;
+		}
 
 		const branchChecks = await Promise.all(
 			["main", "master"].map(async (branch) => ({
