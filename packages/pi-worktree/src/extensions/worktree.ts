@@ -15,15 +15,7 @@
  * worktree so it survives /new and /reload within the same pi process.
  */
 
-import type {
-	BashOperations,
-	ExtensionAPI,
-	ToolCallEvent,
-} from "@earendil-works/pi-coding-agent";
-import {
-	createLocalBashOperations,
-	isToolCallEventType,
-} from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -35,6 +27,38 @@ import {
 	type WorktreeInfo,
 } from "./lib/worktree-shared.js";
 
+interface BashOperations {
+	exec: (
+		command: string,
+		cwd: string,
+		options: {
+			onData: (data: Buffer) => void;
+			signal?: AbortSignal;
+			timeout?: number;
+			env?: NodeJS.ProcessEnv;
+		},
+	) => Promise<{ exitCode: number | null }>;
+}
+
+interface ExtensionAPI {
+	exec: (
+		command: string,
+		args: string[],
+		options: { timeout: number },
+	) => Promise<{ code: number; stdout: string; stderr: string }>;
+	registerFlag: (
+		name: string,
+		flag: { description: string; type: "boolean"; default: boolean },
+	) => void;
+	getFlag: (name: string) => boolean;
+	on: (event: string, handler: (...args: any[]) => unknown) => void;
+}
+
+interface ToolCallEvent {
+	toolName: string;
+	input: Record<string, unknown>;
+}
+
 interface WorktreeState {
 	info: WorktreeInfo;
 	repoRootPattern: RegExp;
@@ -42,6 +66,69 @@ interface WorktreeState {
 }
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+function isToolCallEventType(
+	toolName: string,
+	event: ToolCallEvent,
+): boolean {
+	return event.toolName === toolName;
+}
+
+function createLocalBashOperations(): BashOperations {
+	return {
+		exec(command, cwd, options) {
+			return new Promise((resolve) => {
+				let settled = false;
+				const child = spawn(command, {
+					cwd,
+					env: { ...process.env, ...options.env },
+					shell: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+
+				const finish = (exitCode: number | null) => {
+					if (settled) return;
+					settled = true;
+					if (timeout) clearTimeout(timeout);
+					options.signal?.removeEventListener("abort", abort);
+					resolve({ exitCode });
+				};
+
+				const kill = () => {
+					if (child.killed) return;
+					child.kill("SIGTERM");
+				};
+
+				const abort = () => {
+					kill();
+					finish(null);
+				};
+
+				const timeout =
+					options.timeout && options.timeout > 0
+						? setTimeout(() => {
+								kill();
+								finish(null);
+							}, options.timeout)
+						: undefined;
+
+				child.stdout.on("data", options.onData);
+				child.stderr.on("data", options.onData);
+				child.on("error", (error) => {
+					options.onData(Buffer.from(`${error.message}\n`));
+					finish(1);
+				});
+				child.on("close", (code) => finish(code));
+
+				if (options.signal?.aborted) {
+					abort();
+				} else {
+					options.signal?.addEventListener("abort", abort, { once: true });
+				}
+			});
+		},
+	};
+}
 
 export default function worktreeExtension(pi: ExtensionAPI) {
 	let worktreeState: WorktreeState | null = null;
@@ -309,6 +396,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		if (!worktreeState) return undefined;
 
 		if (isToolCallEventType("bash", event)) {
+			if (typeof event.input.command !== "string") return undefined;
 			const rewritten = rewriteBashCommand(event.input.command);
 			if ("block" in rewritten) return blockReason(rewritten.block);
 			event.input.command = `cd ${shellQuote(worktreeState.info.path)} && ${rewritten.command}`;

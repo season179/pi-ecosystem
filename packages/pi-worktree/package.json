@@ -1,18 +1,14 @@
 {
   "name": "@season179/pi-worktree",
-  "version": "26.5.3",
+  "version": "26.5.4",
   "description": "Adds a Claude Code-like --worktree flag to Pi.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",
-  "homepage": "https://github.com/season179/pi-ecosystem#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/season179/pi-ecosystem.git",
     "directory": "packages/pi-worktree"
-  },
-  "bugs": {
-    "url": "https://github.com/season179/pi-ecosystem/issues"
   },
   "keywords": [
     "pi",
@@ -40,14 +36,6 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run clean && npm run build"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0"
-  },
-  "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": {
-      "optional": true
-    }
   },
   "engines": {
     "node": ">=22"

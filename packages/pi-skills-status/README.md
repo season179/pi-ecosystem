@@ -66,8 +66,8 @@ Because this package publishes compiled JavaScript, build before using `pi -e` f
 
 ```bash
 npm pack --workspace @season179/pi-skills-status
-tar -tf season179-pi-skills-status-26.5.0.tgz
-pi install ./season179-pi-skills-status-26.5.0.tgz
+tar -tf season179-pi-skills-status-26.5.2.tgz
+pi install ./season179-pi-skills-status-26.5.2.tgz
 ```
 
 The tarball should include:

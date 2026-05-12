@@ -7,12 +7,46 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	parseSkillBlock,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type Skill,
-} from "@earendil-works/pi-coding-agent";
+
+interface ExtensionAPI {
+	on: (event: string, handler: (...args: any[]) => unknown) => void;
+	registerCommand: (
+		name: string,
+		command: {
+			description: string;
+			handler: (...args: any[]) => unknown;
+		},
+	) => void;
+}
+
+interface ExtensionContext {
+	cwd: string;
+	sessionManager: {
+		getBranch: () => Array<{
+			type: string;
+			message?: {
+				role: string;
+				content: unknown;
+			};
+		}>;
+	};
+	ui: {
+		theme: {
+			fg: (style: string, text: string) => string;
+		};
+		setStatus: (key: string, value: string | undefined) => void;
+		notify: (message: string, level: "info" | "warning" | "error") => void;
+	};
+}
+
+interface Skill {
+	name: string;
+	filePath: string;
+}
+
+interface ParsedSkillBlock {
+	name: string;
+}
 
 interface SkillUse {
 	name: string;
@@ -51,6 +85,14 @@ function getReadInputPath(input: Record<string, unknown>): string | undefined {
 	if (typeof input.path === "string") return input.path;
 	if (typeof input.file_path === "string") return input.file_path;
 	return undefined;
+}
+
+function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(
+		/^<skill name="([^"]+)" location="([^"]+)">\n[\s\S]*?\n<\/skill>(?:\n\n[\s\S]+)?$/,
+	);
+	if (!match) return null;
+	return { name: match[1] };
 }
 
 export default function skillsStatusExtension(pi: ExtensionAPI) {
@@ -125,6 +167,7 @@ export default function skillsStatusExtension(pi: ExtensionAPI) {
 	function scanBranchForSkillInvocations(ctx: ExtensionContext): void {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "message") continue;
+			if (!entry.message) continue;
 			if (entry.message.role !== "user") continue;
 			recordSkillBlock(extractText(entry.message));
 		}

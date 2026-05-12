@@ -2,6 +2,16 @@ name: Publish
 
 on:
   workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - pi-worktree
+          - pi-skills-status
 
 jobs:
   publish:
@@ -19,3 +29,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm publish --workspace @season179/pi-worktree --access public
+        if: ${{ inputs.package == 'all' || inputs.package == 'pi-worktree' }}
+      - run: npm publish --workspace @season179/pi-skills-status --access public
+        if: ${{ inputs.package == 'all' || inputs.package == 'pi-skills-status' }}
