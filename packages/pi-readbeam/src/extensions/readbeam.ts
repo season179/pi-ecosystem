@@ -2,21 +2,30 @@
  * Readbeam Extension
  *
  * Automatically intercepts finalized assistant messages after an agent turn
- * (via the `message_end` lifecycle hook) and replaces the assistant message
- * with a visibly marked placeholder version.
+ * (via the `message_end` lifecycle hook) and segments the content into
+ * prose (eligible for highlighting) and protected technical evidence
+ * (code, paths, URLs, diffs, stack traces, etc.) that passes through unchanged.
  *
- * This is a proof-of-concept to validate the message replacement extension path
- * before NLP work starts. It demonstrates:
- * - Automatic behavior (no slash command needed)
- * - Message replacement (not duplication)
- * - Preserving assistant role
- * - Safe anti-recursion guard
+ * Protected segment layer (issue #2):
+ * The segmenter splits Markdown into alternating prose and protected chunks.
+ * Protected kinds: code-fence, inline-code, url, file-path, shell-command,
+ * diff, stack-trace, log-output, heading, bullet, link, package-ref.
  *
  * Usage:
  *   pi -e ./dist/extensions/readbeam.js
  *
  * Or install as a pi package (see README).
  */
+
+import { segmentContent } from "./lib/segment.js";
+
+export { segmentContent, isProtected, isProse } from "./lib/segment.js";
+export type {
+	Segment,
+	ProtectedSegment,
+	ProseSegment,
+	SegmentKind,
+} from "./lib/segment.js";
 
 interface ContentPart {
 	type: string;
@@ -69,8 +78,12 @@ export default function readbeamExtension(pi: ExtensionAPI) {
 		const { message } = event;
 		if (message.role !== "assistant") return;
 
-		const originalText = extractText(message.content as string | ContentPart[] | undefined);
+		const originalText = extractText(message.content);
 		if (!originalText || originalText.startsWith(READBEAM_MARKER)) return;
+
+		// Segment the content to identify protected vs prose regions.
+		// The segmentation layer is now available for future highlighting passes.
+		const _segments = segmentContent(originalText);
 
 		return {
 			message: {
