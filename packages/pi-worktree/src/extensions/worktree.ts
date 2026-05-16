@@ -567,7 +567,12 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 
 		// Pi stops the TUI before final shutdown handlers run, so ctx.ui.confirm()
 		// is not visible here in interactive mode.
-		const shouldDelete = await confirmInTerminal(branch, wtPath, isDirty);
+		let shouldDelete = true;
+		if (isDirty) {
+			shouldDelete = await confirmInTerminal(branch, wtPath, isDirty);
+		} else {
+			terminalMessage("Cleaning up worktree (no pending changes)…");
+		}
 
 		if (shouldDelete) {
 			const removeArgs = isDirty
