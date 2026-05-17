@@ -6,6 +6,13 @@ export interface WorktreeInfo {
 	branch: string;
 	repoRoot: string;
 	pid: number;
+	/**
+	 * Commit SHA the worktree branch was created from. Used at shutdown to
+	 * count commits made inside the worktree without misattributing
+	 * pre-existing base-branch history. Optional for backwards compatibility
+	 * with markers written before this field existed.
+	 */
+	base?: string;
 }
 
 export function worktreeMarkerFile(
@@ -22,7 +29,8 @@ export function isWorktreeInfo(value: unknown): value is WorktreeInfo {
 		typeof candidate.path === "string" &&
 		typeof candidate.branch === "string" &&
 		typeof candidate.repoRoot === "string" &&
-		candidate.pid === process.pid
+		candidate.pid === process.pid &&
+		(candidate.base === undefined || typeof candidate.base === "string")
 	);
 }
 

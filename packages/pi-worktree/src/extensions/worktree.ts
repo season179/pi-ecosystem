@@ -66,6 +66,11 @@ interface WorktreeState {
 	bashOperations: BashOperations;
 }
 
+interface UnpushedCommits {
+	count: number;
+	samples: string[];
+}
+
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
 function getShellCommand(command: string): { file: string; args: string[] } {
@@ -299,12 +304,66 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 	}
 
+	async function detectUnpushedCommits(
+		info: WorktreeInfo,
+	): Promise<UnpushedCommits> {
+		const branchRef = `refs/heads/${info.branch}`;
+		const excludes: string[] = [];
+
+		if (info.base) {
+			const baseCheck = await git(
+				["rev-parse", "--verify", "--quiet", info.base],
+				info.repoRoot,
+			);
+			if (baseCheck.code === 0) excludes.push(`^${info.base}`);
+		} else {
+			for (const candidate of ["main", "master"]) {
+				if (candidate === info.branch) continue;
+				const check = await git(
+					["rev-parse", "--verify", `refs/heads/${candidate}`],
+					info.repoRoot,
+				);
+				if (check.code === 0) excludes.push(`^refs/heads/${candidate}`);
+			}
+		}
+
+		const upstream = await git(
+			["rev-parse", "--verify", "--quiet", `${branchRef}@{u}`],
+			info.repoRoot,
+		);
+		if (upstream.code === 0) excludes.push(`^${branchRef}@{u}`);
+
+		const countResult = await git(
+			["rev-list", "--count", branchRef, ...excludes],
+			info.repoRoot,
+		);
+		if (countResult.code !== 0) return { count: 0, samples: [] };
+		const count = Number.parseInt(countResult.stdout.trim(), 10);
+		if (!Number.isFinite(count) || count <= 0) return { count: 0, samples: [] };
+
+		const logResult = await git(
+			["log", "--oneline", "--max-count=5", branchRef, ...excludes],
+			info.repoRoot,
+		);
+		const samples =
+			logResult.code === 0
+				? logResult.stdout
+						.split("\n")
+						.map((line) => line.trim())
+						.filter((line) => line.length > 0)
+				: [];
+		return { count, samples };
+	}
+
 	async function confirmInTerminal(
 		branch: string,
 		wtPath: string,
 		isDirty: boolean,
+		unpushed: UnpushedCommits,
 	): Promise<boolean> {
-		if (!process.stdin.isTTY || !process.stderr.isTTY) return !isDirty;
+		const hasUnpushed = unpushed.count > 0;
+		const needsPrompt = isDirty || hasUnpushed;
+		if (!process.stdin.isTTY || !process.stderr.isTTY) return !needsPrompt;
 
 		if (process.stdin.isRaw) {
 			process.stdin.setRawMode(false);
@@ -316,13 +375,40 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		});
 
 		try {
-			const dirtyWarning = isDirty
-				? "Worktree has uncommitted changes.\nDeleting it will discard those changes.\n"
-				: "";
+			const warningLines: string[] = [];
+			if (isDirty) {
+				warningLines.push(
+					"Worktree has uncommitted changes.",
+					"Deleting it will discard those changes.",
+				);
+			}
+			if (hasUnpushed) {
+				const noun = unpushed.count === 1 ? "commit" : "commits";
+				warningLines.push(
+					`Worktree branch has ${unpushed.count} unpushed ${noun}:`,
+					...unpushed.samples.map((line) => `  ${line}`),
+				);
+				if (unpushed.count > unpushed.samples.length) {
+					warningLines.push(
+						`  …and ${unpushed.count - unpushed.samples.length} more`,
+					);
+				}
+			}
+			const warning =
+				warningLines.length > 0 ? `${warningLines.join("\n")}\n` : "";
+
+			// Default to keeping the worktree whenever committed work is at stake;
+			// dirty-only stays consistent with prior behavior and defaults to delete.
+			const defaultDelete = !hasUnpushed;
+			const promptHint = defaultDelete ? "[Y/n]" : "[y/N]";
 			const answer = await rl.question(
-				`${dirtyWarning}Delete worktree?\n"${branch}" at ${wtPath}\nRemove it? [Y/n] `,
+				`${warning}Delete worktree?\n"${branch}" at ${wtPath}\nRemove it? ${promptHint} `,
 			);
-			return !/^(n|no)$/i.test(answer.trim());
+			const trimmed = answer.trim();
+			if (trimmed === "") return defaultDelete;
+			if (/^(y|yes)$/i.test(trimmed)) return true;
+			if (/^(n|no)$/i.test(trimmed)) return false;
+			return defaultDelete;
 		} finally {
 			rl.close();
 		}
@@ -522,7 +608,20 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const info = { path: wtDir, branch, repoRoot, pid: process.pid };
+		const baseShaResult = await git(
+			["rev-parse", "--verify", `refs/heads/${base}`],
+			repoRoot,
+		);
+		const baseSha =
+			baseShaResult.code === 0 ? baseShaResult.stdout.trim() : undefined;
+
+		const info: WorktreeInfo = {
+			path: wtDir,
+			branch,
+			repoRoot,
+			pid: process.pid,
+			...(baseSha ? { base: baseSha } : {}),
+		};
 		activateWorktree(info);
 		saveWorktreeMarker(repoRoot, info);
 		ctx.ui.setStatus("worktree", `🌿 ${branch}`);
@@ -558,18 +657,30 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		}
 
 		const isDirty = statusResult.stdout.trim().length > 0;
+		const unpushed = await detectUnpushedCommits(worktreeState.info);
+		const hasUnpushed = unpushed.count > 0;
+		const needsConfirmation = isDirty || hasUnpushed;
 
-		if (isDirty) {
-			if (ctx.hasUI) {
-				ctx.ui.notify(`Worktree has uncommitted changes: ${branch}`, "warning");
+		if (ctx.hasUI) {
+			if (isDirty) {
+				ctx.ui.notify(
+					`Worktree has uncommitted changes: ${branch}`,
+					"warning",
+				);
+			} else if (hasUnpushed) {
+				const noun = unpushed.count === 1 ? "commit" : "commits";
+				ctx.ui.notify(
+					`Worktree has ${unpushed.count} unpushed ${noun}: ${branch}`,
+					"warning",
+				);
 			}
 		}
 
 		// Pi stops the TUI before final shutdown handlers run, so ctx.ui.confirm()
 		// is not visible here in interactive mode.
 		let shouldDelete = true;
-		if (isDirty) {
-			shouldDelete = await confirmInTerminal(branch, wtPath, isDirty);
+		if (needsConfirmation) {
+			shouldDelete = await confirmInTerminal(branch, wtPath, isDirty, unpushed);
 		} else {
 			terminalMessage("Cleaning up worktree (no pending changes)…");
 		}
@@ -588,7 +699,13 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const deleteBranchResult = await git(["branch", "-d", branch], repoRoot);
+			// User explicitly confirmed discarding committed work, so force-delete
+			// the branch instead of refusing on unmerged commits.
+			const deleteFlag = hasUnpushed ? "-D" : "-d";
+			const deleteBranchResult = await git(
+				["branch", deleteFlag, branch],
+				repoRoot,
+			);
 			if (deleteBranchResult.code === 0) {
 				terminalMessage("Worktree and branch deleted");
 			} else {
@@ -597,6 +714,11 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		} else {
 			if (isDirty) {
 				terminalMessage(`Worktree has uncommitted changes; kept at: ${wtPath}`);
+			} else if (hasUnpushed) {
+				const noun = unpushed.count === 1 ? "commit" : "commits";
+				terminalMessage(
+					`Worktree has ${unpushed.count} unpushed ${noun}; kept at: ${wtPath}`,
+				);
 			} else {
 				terminalMessage(`Kept at: ${wtPath}`);
 			}

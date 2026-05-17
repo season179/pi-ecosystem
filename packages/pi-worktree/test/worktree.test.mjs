@@ -98,9 +98,14 @@ function createHarness(repoRoot) {
 	return { ctx, handlers };
 }
 
-async function runSession(t, mutateWorktree) {
+async function runSession(t, options) {
+	const mutateWorktree =
+		typeof options === "function" ? options : options?.mutate;
+	const input =
+		typeof options === "object" && options?.input ? options.input : "n\n";
+
 	const repoRoot = await createRepo(t);
-	const terminal = installTerminal("n\n");
+	const terminal = installTerminal(input);
 	t.after(terminal.restore);
 
 	const { ctx, handlers } = createHarness(repoRoot);
@@ -111,7 +116,7 @@ async function runSession(t, mutateWorktree) {
 	await mutateWorktree?.(marker.path);
 
 	await handlers.session_shutdown({ reason: "quit" }, ctx);
-	return { marker, terminal };
+	return { marker, terminal, repoRoot };
 }
 
 describe("pi-worktree shutdown cleanup", () => {
@@ -132,5 +137,85 @@ describe("pi-worktree shutdown cleanup", () => {
 		assert.match(terminal.output(), /Worktree has uncommitted changes\./);
 		assert.match(terminal.output(), /Delete worktree\?/);
 		assert.doesNotMatch(terminal.output(), /Cleaning up worktree/);
+	});
+
+	it("prompts before deleting a clean worktree that has unpushed commits", async (t) => {
+		const { marker, terminal } = await runSession(t, async (worktreePath) => {
+			writeFileSync(path.join(worktreePath, "wt-work.txt"), "real work\n");
+			await git(["-C", worktreePath, "add", "wt-work.txt"]);
+			await git([
+				"-C",
+				worktreePath,
+				"commit",
+				"-m",
+				"work done in the worktree",
+			]);
+		});
+
+		assert.equal(
+			existsSync(marker.path),
+			true,
+			"worktree should be kept after declining the prompt",
+		);
+		assert.match(terminal.output(), /1 unpushed commit/);
+		assert.match(terminal.output(), /work done in the worktree/);
+		assert.match(terminal.output(), /Delete worktree\?/);
+		assert.match(terminal.output(), /\[y\/N\]/);
+		assert.doesNotMatch(terminal.output(), /Cleaning up worktree/);
+	});
+
+	it("force-deletes the branch when removing a worktree with unpushed commits", async (t) => {
+		const { marker, repoRoot } = await runSession(t, {
+			input: "y\n",
+			mutate: async (worktreePath) => {
+				writeFileSync(path.join(worktreePath, "wt-work.txt"), "real work\n");
+				await git(["-C", worktreePath, "add", "wt-work.txt"]);
+				await git([
+					"-C",
+					worktreePath,
+					"commit",
+					"-m",
+					"work done in the worktree",
+				]);
+			},
+		});
+
+		assert.equal(
+			existsSync(marker.path),
+			false,
+			"worktree should be removed after confirming the prompt",
+		);
+		const branchList = (
+			await git(["-C", repoRoot, "branch", "--list", marker.branch])
+		).stdout.trim();
+		assert.equal(
+			branchList,
+			"",
+			"branch with unpushed commits should be force-deleted on confirmation",
+		);
+	});
+
+	it("prompt lists both dirty changes and unpushed commits together", async (t) => {
+		const { marker, terminal } = await runSession(t, async (worktreePath) => {
+			writeFileSync(
+				path.join(worktreePath, "committed.txt"),
+				"committed work\n",
+			);
+			await git(["-C", worktreePath, "add", "committed.txt"]);
+			await git([
+				"-C",
+				worktreePath,
+				"commit",
+				"-m",
+				"committed worktree work",
+			]);
+			writeFileSync(path.join(worktreePath, "scratch.txt"), "still editing\n");
+		});
+
+		assert.equal(existsSync(marker.path), true);
+		const output = terminal.output();
+		assert.match(output, /Worktree has uncommitted changes\./);
+		assert.match(output, /1 unpushed commit/);
+		assert.match(output, /committed worktree work/);
 	});
 });

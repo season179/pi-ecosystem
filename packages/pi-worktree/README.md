@@ -43,7 +43,7 @@ While `--worktree` or `--wt` is active:
 - `grep`, `find`, and `ls` default to the worktree when no path is provided.
 - attempts to write outside the active worktree are blocked.
 
-On `quit`, the extension checks whether the worktree is dirty and asks whether to remove it. Keeping it leaves the branch and files in place so you can inspect, commit, diff, or merge manually.
+On `quit`, the extension prompts before removing the worktree whenever there are uncommitted changes **or** commits on the worktree branch that have not been pushed/merged. A clean worktree at the base ref is removed without prompting. The prompt lists the dirty state and a preview of any unpushed commits so you can decide knowingly. Defaults are conservative: dirty-only defaults to delete (`[Y/n]`), but anything involving committed work defaults to keep (`[y/N]`). Confirming removal force-deletes the branch (`git branch -D`) when it has unpushed commits; otherwise it uses the safe `git branch -d`. Keeping the worktree leaves the branch and files in place so you can inspect, commit, diff, or merge manually.
 
 ## When To Reach For It
 
