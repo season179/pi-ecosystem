@@ -8,9 +8,10 @@
  * Usage:
  *   pi --worktree
  *   pi --wt
+ *   pi --worktree --worktree-base current --worktree-include-dirty
  *
  * The worktree is created at <repo>/.pi/worktrees/<branch> with a branch
- * named pi-wt/<timestamp>-<pid> based on main (or master).
+ * named pi-wt/<timestamp>-<pid> based on main (or master) by default.
  *
  * A marker file at <repo>/.pi/worktree-active-<pid>.json tracks the active
  * worktree so it survives /new and /reload within the same pi process.
@@ -49,9 +50,13 @@ interface ExtensionAPI {
 	) => Promise<{ code: number; stdout: string; stderr: string }>;
 	registerFlag: (
 		name: string,
-		flag: { description: string; type: "boolean"; default: boolean },
+		flag: {
+			description: string;
+			type: "boolean" | "string";
+			default: boolean | string;
+		},
 	) => void;
-	getFlag: (name: string) => boolean;
+	getFlag: (name: string) => boolean | string | undefined;
 	on: (event: string, handler: (...args: any[]) => unknown) => void;
 }
 
@@ -65,6 +70,29 @@ interface WorktreeState {
 	repoRootPattern: RegExp;
 	bashOperations: BashOperations;
 }
+
+interface DirtyChanges {
+	tmpDir: string;
+	stagedPatchPath: string;
+	unstagedPatchPath: string;
+}
+
+type CaptureDirtyChangesResult =
+	| { ok: true; dirtyChanges: DirtyChanges }
+	| { ok: false; message: string };
+
+type DirtyPatchKind = "staged" | "unstaged";
+
+type ApplyDirtyChangesResult =
+	| { ok: true }
+	| {
+			ok: false;
+			failedPatch: DirtyPatchKind;
+			message: string;
+			partial: boolean;
+	  };
+
+type ResolveBaseResult = { ok: true; base: string } | { ok: false; error: string };
 
 interface UnpushedCommits {
 	count: number;
@@ -212,6 +240,210 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 	): Promise<{ code: number; stdout: string; stderr: string }> {
 		const fullArgs = cwd ? ["-C", cwd, ...args] : args;
 		return pi.exec("git", fullArgs, { timeout: 10_000 });
+	}
+
+	function getWorktreeBaseFlag(): string {
+		const value = pi.getFlag("worktree-base");
+		return typeof value === "string" && value.trim().length > 0
+			? value.trim()
+			: "default";
+	}
+
+	async function validateCommitRef(
+		ref: string,
+		repoRoot: string,
+	): Promise<boolean> {
+		const result = await git(
+			[
+				"rev-parse",
+				"--verify",
+				"--quiet",
+				"--end-of-options",
+				`${ref}^{commit}`,
+			],
+			repoRoot,
+		);
+		return result.code === 0;
+	}
+
+	async function resolveDefaultBase(repoRoot: string): Promise<ResolveBaseResult> {
+		const branchChecks = await Promise.all(
+			["main", "master"].map(async (branch) => ({
+				branch,
+				exists:
+					(
+						await git(
+							["rev-parse", "--verify", `refs/heads/${branch}`],
+							repoRoot,
+						)
+					).code === 0,
+			})),
+		);
+		const base = branchChecks.find(({ exists }) => exists)?.branch;
+		return base
+			? { ok: true, base }
+			: { ok: false, error: "No main or master branch found" };
+	}
+
+	async function resolveWorktreeBase(repoRoot: string): Promise<ResolveBaseResult> {
+		const requestedBase = getWorktreeBaseFlag();
+
+		if (requestedBase === "default" || requestedBase === "main-master") {
+			return resolveDefaultBase(repoRoot);
+		}
+
+		if (requestedBase === "current") {
+			const currentBranch = await git(["branch", "--show-current"], repoRoot);
+			if (currentBranch.code === 0) {
+				const branch = currentBranch.stdout.trim();
+				if (branch.length > 0) return { ok: true, base: `refs/heads/${branch}` };
+			}
+
+			return (await validateCommitRef("HEAD", repoRoot))
+				? { ok: true, base: "HEAD" }
+				: { ok: false, error: "Could not resolve current branch or HEAD" };
+		}
+
+		return (await validateCommitRef(requestedBase, repoRoot))
+			? { ok: true, base: requestedBase }
+			: { ok: false, error: `Invalid worktree base ref: ${requestedBase}` };
+	}
+
+	async function captureDirtyChanges(
+		repoRoot: string,
+	): Promise<CaptureDirtyChangesResult> {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-dirty-"));
+		const stagedPatchPath = path.join(tmpDir, "staged.patch");
+		const unstagedPatchPath = path.join(tmpDir, "unstaged.patch");
+		const dirtyChanges = { tmpDir, stagedPatchPath, unstagedPatchPath };
+
+		const statusBefore = await git(
+			["status", "--porcelain", "--untracked-files=no"],
+			repoRoot,
+		);
+		if (statusBefore.code !== 0) {
+			cleanupDirtyChanges(dirtyChanges);
+			return {
+				ok: false,
+				message:
+					statusBefore.stderr.trim() ||
+					statusBefore.stdout.trim() ||
+					"git status failed before dirty-change capture",
+			};
+		}
+
+		const staged = await git(
+			["diff", "--cached", "--binary", `--output=${stagedPatchPath}`],
+			repoRoot,
+		);
+		if (staged.code !== 0) {
+			cleanupDirtyChanges(dirtyChanges);
+			return {
+				ok: false,
+				message:
+					staged.stderr.trim() ||
+					staged.stdout.trim() ||
+					"git diff --cached failed during dirty-change capture",
+			};
+		}
+
+		const unstaged = await git(
+			["diff", "--binary", `--output=${unstagedPatchPath}`],
+			repoRoot,
+		);
+		if (unstaged.code !== 0) {
+			cleanupDirtyChanges(dirtyChanges);
+			return {
+				ok: false,
+				message:
+					unstaged.stderr.trim() ||
+					unstaged.stdout.trim() ||
+					"git diff failed during dirty-change capture",
+			};
+		}
+
+		const statusAfter = await git(
+			["status", "--porcelain", "--untracked-files=no"],
+			repoRoot,
+		);
+		if (
+			statusAfter.code !== 0 ||
+			statusAfter.stdout !== statusBefore.stdout
+		) {
+			cleanupDirtyChanges(dirtyChanges);
+			return {
+				ok: false,
+				message:
+					statusAfter.stderr.trim() ||
+					"source checkout changed during dirty-change capture",
+			};
+		}
+
+		return { ok: true, dirtyChanges };
+	}
+
+	function cleanupDirtyChanges(dirtyChanges: DirtyChanges): void {
+		try {
+			fs.rmSync(dirtyChanges.tmpDir, { recursive: true, force: true });
+		} catch {}
+	}
+
+	async function applyPatchFile(
+		wtDir: string,
+		patchPath: string,
+		args: string[],
+	): Promise<{ code: number; stdout: string; stderr: string }> {
+		return git(["apply", "--binary", ...args, patchPath], wtDir);
+	}
+
+	function fileHasContent(filePath: string): boolean {
+		try {
+			return fs.statSync(filePath).size > 0;
+		} catch {
+			return false;
+		}
+	}
+
+	async function applyDirtyChanges(
+		wtDir: string,
+		dirtyChanges: DirtyChanges,
+	): Promise<ApplyDirtyChangesResult> {
+		const hasStagedPatch = fileHasContent(dirtyChanges.stagedPatchPath);
+		const hasUnstagedPatch = fileHasContent(dirtyChanges.unstagedPatchPath);
+
+		if (hasStagedPatch) {
+			const stagedResult = await applyPatchFile(
+				wtDir,
+				dirtyChanges.stagedPatchPath,
+				["--index"],
+			);
+			if (stagedResult.code !== 0) {
+				return {
+					ok: false,
+					failedPatch: "staged",
+					message: stagedResult.stderr.trim() || stagedResult.stdout.trim(),
+					partial: false,
+				};
+			}
+		}
+
+		if (hasUnstagedPatch) {
+			const unstagedResult = await applyPatchFile(
+				wtDir,
+				dirtyChanges.unstagedPatchPath,
+				[],
+			);
+			if (unstagedResult.code !== 0) {
+				return {
+					ok: false,
+					failedPatch: "unstaged",
+					message: unstagedResult.stderr.trim() || unstagedResult.stdout.trim(),
+					partial: hasStagedPatch,
+				};
+			}
+		}
+
+		return { ok: true };
 	}
 
 	function escapeRegExp(value: string): string {
@@ -545,6 +777,18 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
+	pi.registerFlag("worktree-base", {
+		description:
+			"Base ref for the temporary worktree: default, main-master, current, HEAD, or any commit-ish ref",
+		type: "string",
+		default: "default",
+	});
+	pi.registerFlag("worktree-include-dirty", {
+		description:
+			"Copy staged and unstaged changes from the source checkout into the temporary worktree",
+		type: "boolean",
+		default: false,
+	});
 
 	pi.on("session_start", async (event, ctx) => {
 		const { code, stdout } = await git(["rev-parse", "--show-toplevel"]);
@@ -572,23 +816,26 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const branchChecks = await Promise.all(
-			["main", "master"].map(async (branch) => ({
-				branch,
-				exists:
-					(
-						await git(
-							["rev-parse", "--verify", `refs/heads/${branch}`],
-							repoRoot,
-						)
-					).code === 0,
-			})),
-		);
-		const base = branchChecks.find(({ exists }) => exists)?.branch;
-		if (!base) {
-			ctx.ui.notify("No main or master branch found", "error");
+		const baseResult = await resolveWorktreeBase(repoRoot);
+		if (!baseResult.ok) {
+			ctx.ui.notify(baseResult.error, "error");
 			return;
 		}
+
+		const includeDirty = pi.getFlag("worktree-include-dirty") === true;
+		const dirtyChangesResult = includeDirty
+			? await captureDirtyChanges(repoRoot)
+			: null;
+		if (dirtyChangesResult && !dirtyChangesResult.ok) {
+			ctx.ui.notify(
+				`Failed to capture source checkout dirty changes: ${dirtyChangesResult.message}`,
+				"error",
+			);
+			return;
+		}
+		const dirtyChanges = dirtyChangesResult?.ok
+			? dirtyChangesResult.dirtyChanges
+			: null;
 
 		const worktreeId = `${timestamp()}-${process.pid}`;
 		const branch = `pi-wt/${worktreeId}`;
@@ -600,16 +847,36 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		);
 
 		const res = await git(
-			["worktree", "add", "-b", branch, wtDir, base],
+			["worktree", "add", "--no-track", "-b", branch, wtDir, baseResult.base],
 			repoRoot,
 		);
 		if (res.code !== 0) {
+			if (dirtyChanges) cleanupDirtyChanges(dirtyChanges);
 			ctx.ui.notify(`Failed to create worktree: ${res.stderr}`, "error");
 			return;
 		}
 
+		if (dirtyChanges) {
+			let shouldCleanupDirtyChanges = true;
+			try {
+				const applyResult = await applyDirtyChanges(wtDir, dirtyChanges);
+				if (!applyResult.ok) {
+					shouldCleanupDirtyChanges = false;
+					const partialNote = applyResult.partial
+						? " Some staged changes may already be applied in the worktree."
+						: "";
+					ctx.ui.notify(
+						`Worktree created and activated, but failed to apply ${applyResult.failedPatch} dirty changes.${partialNote} Inspect ${wtDir}; patch files were kept at ${dirtyChanges.tmpDir}. Git said: ${applyResult.message}`,
+						"error",
+					);
+				}
+			} finally {
+				if (shouldCleanupDirtyChanges) cleanupDirtyChanges(dirtyChanges);
+			}
+		}
+
 		const baseShaResult = await git(
-			["rev-parse", "--verify", `refs/heads/${base}`],
+			["rev-parse", "--verify", baseResult.base],
 			repoRoot,
 		);
 		const baseSha =

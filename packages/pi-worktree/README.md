@@ -36,6 +36,25 @@ The extension creates a branch named `pi-wt/<timestamp>-<pid>` from `main` or `m
 
 and shows the active worktree in Pi's status area.
 
+By default, `--worktree` keeps the original safe base-ref behavior: use `main`, falling back to `master`. You can override that base with:
+
+```bash
+pi --worktree --worktree-base current
+pi --worktree --worktree-base HEAD
+pi --worktree --worktree-base main
+pi --worktree --worktree-base origin/some-feature-branch
+```
+
+`--worktree-base default` and `--worktree-base main-master` are aliases for the default `main`/`master` lookup. `--worktree-base current` uses the checked-out branch, falling back to `HEAD` when detached. Any other value is validated as a commit-ish git ref before the worktree is created; the temporary branch starts from that commit and is created with `--no-track` so it does not track the source ref.
+
+To also carry staged and unstaged tracked-file changes from your current checkout into the new worktree, use:
+
+```bash
+pi --worktree --worktree-base current --worktree-include-dirty
+```
+
+This applies staged changes as staged in the new worktree and unstaged changes as unstaged. It is safest with `--worktree-base current` or `--worktree-base HEAD`, because the patches are captured from your current checkout. If applying the patches fails against a different base, the worktree is kept and activated; Pi reports which dirty patch failed and keeps the patch files so you can inspect or port changes manually. Untracked files are not copied.
+
 While `--worktree` or `--wt` is active:
 
 - `bash` commands run from the created worktree.
@@ -108,6 +127,7 @@ Tested with:
 
 - Pi: 0.74.0
 - Node.js: >=22
+- Git: >=2.24
 
 ## Security
 
