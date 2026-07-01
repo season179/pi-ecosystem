@@ -19,6 +19,8 @@ import {
 	appendGuidanceAsTrailingTurn,
 	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
+	buildReferenceThinkingHeader,
+	buildReferenceThinkingSection,
 	buildReferenceThinkingText,
 	extractAssistantText,
 	injectGuidanceAsSystem,
@@ -102,6 +104,7 @@ export function streamMoA(
 		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(
 			preset.referenceModels.length,
 		);
+		let hasPrefilledOutput = false;
 		for (const [index, slot] of preset.referenceModels.entries()) {
 			const referenceModel = resolveUnderlyingModel(registry, slot);
 			if (referenceModel) {
@@ -116,6 +119,7 @@ export function streamMoA(
 				throw new Error(output.errorMessage);
 			}
 			prefilledOutputs[index] = output;
+			hasPrefilledOutput = true;
 		}
 
 		const aggregatorModel = resolveUnderlyingModel(registry, preset.aggregator);
@@ -153,6 +157,33 @@ export function streamMoA(
 		const strippedContext = stripPriorMoAGuidanceMessages(context);
 
 		const referenceContext = renderReferenceContext(strippedContext, preset);
+
+		// Progressive reference streaming reveals the reference thinking block as it
+		// fills in — the header immediately (before any reference finishes) and each
+		// reference's advice the moment it settles — instead of one atomic burst after
+		// the whole reference phase completes. This closes the reference-phase feedback
+		// gap (the phase otherwise shows nothing until its slowest reference returns),
+		// complementing streamAggregator's answer streaming. It is display-only: the
+		// persisted `done` message is still built atomically below, so the streamed
+		// prelude never changes what re-enters model context. Opt-in and unset by
+		// default. Scoped to the clean case — no quorum (dropped references would leave
+		// gaps in the slot-ordered reveal) and no prefilled model-not-found failures
+		// (their slots shift the merged output order) — otherwise the atomic prelude
+		// runs, so those paths are byte-identical.
+		const useProgressiveReferenceStream =
+			preset.streamReferences === true &&
+			preset.referenceQuorum === undefined &&
+			!hasPrefilledOutput &&
+			referenceTasks.length > 0;
+		const progressiveReferenceStream = useProgressiveReferenceStream
+			? beginProgressiveReferenceThinking(
+					outerStream,
+					model,
+					preset,
+					referenceTasks.length,
+				)
+			: undefined;
+
 		const resolvedReferenceOutputs = await runReferenceTasks({
 			presetName,
 			preset,
@@ -161,6 +192,7 @@ export function streamMoA(
 			refContext: referenceContext,
 			options,
 			registry,
+			onReferenceSettled: progressiveReferenceStream?.reveal,
 		});
 		const referenceOutputs = mergeReferenceOutputs(
 			preset,
@@ -210,7 +242,15 @@ export function streamMoA(
 			type: "thinking",
 			thinking: buildReferenceThinkingText(preset, referenceOutputs),
 		};
-		emitReferenceThinkingPrelude(outerStream, model, referenceThinking);
+		if (progressiveReferenceStream) {
+			// The header + every settled section were already streamed live; close the
+			// block on the canonical full text (which equals what was accumulated in
+			// this scoped case, and reconciles the display if anything was left
+			// unrevealed) instead of re-emitting the whole prelude.
+			progressiveReferenceStream.finish(referenceThinking.thinking);
+		} else {
+			emitReferenceThinkingPrelude(outerStream, model, referenceThinking);
+		}
 
 		// Guidance rides on the tail of the latest user message (matches hermes and
 		// keeps the aggregator's stable system-prompt prefix cacheable across turns).
@@ -461,6 +501,11 @@ async function runReferenceTasks(args: {
 	refContext: Context;
 	options: SimpleStreamOptions | undefined;
 	registry: ModelRegistry;
+	// Invoked with (task index, output) the moment a reference records its result,
+	// so the progressive-streaming path can reveal it live. Only wired up when
+	// quorum is unset, so every task records exactly once and this fires once per
+	// reference; superseded-by-quorum references never record and so never fire it.
+	onReferenceSettled?: (index: number, output: ReferenceOutput) => void;
 }): Promise<ReferenceOutput[]> {
 	const concurrency = Math.min(
 		getReferenceConcurrency(args.preset),
@@ -514,6 +559,7 @@ async function runReferenceTasks(args: {
 				return;
 			}
 			results[index] = output;
+			args.onReferenceSettled?.(index, output);
 			if (
 				output.success &&
 				quorum !== undefined &&
@@ -883,6 +929,90 @@ function emitReferenceThinkingPrelude(
 		content: text,
 		partial: partial([referenceThinking]),
 	});
+}
+
+// The progressive counterpart to emitReferenceThinkingPrelude: instead of pushing
+// the whole reference thinking block at once after the reference phase, it pushes
+// the header immediately (before any reference finishes) and then one section per
+// reference as each settles, so the block fills in live. Sections are revealed in
+// slot order (a reference that finishes ahead of an earlier slot is buffered until
+// that slot reveals) so the streamed order matches the atomic block, and the
+// accumulated text is byte-identical to buildReferenceThinkingText. The events are
+// display-only — the outer stream's result() is fixed by the aggregator's later
+// `done` event — so this never affects the persisted message or model context.
+export function beginProgressiveReferenceThinking(
+	outerStream: AssistantMessageEventStream,
+	model: Model<Api>,
+	preset: MoAPreset,
+	referenceCount: number,
+): {
+	reveal: (index: number, output: ReferenceOutput) => void;
+	finish: (fullText: string) => void;
+} {
+	const base = (): Omit<AssistantMessage, "content"> => ({
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: EMPTY_USAGE,
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+	const thinkingPartial = (thinking: string): AssistantMessage => ({
+		...base(),
+		content: [{ type: "thinking", thinking }],
+	});
+
+	const header = buildReferenceThinkingHeader(preset, referenceCount);
+	let accumulated = header;
+	const settled: Array<ReferenceOutput | undefined> = new Array(referenceCount);
+	let revealPointer = 0;
+
+	outerStream.push({ type: "start", partial: { ...base(), content: [] } });
+	outerStream.push({
+		type: "thinking_start",
+		contentIndex: 0,
+		partial: thinkingPartial(""),
+	});
+	outerStream.push({
+		type: "thinking_delta",
+		contentIndex: 0,
+		delta: header,
+		partial: thinkingPartial(accumulated),
+	});
+
+	return {
+		reveal(index, output) {
+			settled[index] = output;
+			while (
+				revealPointer < settled.length &&
+				settled[revealPointer] !== undefined
+			) {
+				const section = buildReferenceThinkingSection(
+					preset,
+					revealPointer,
+					settled[revealPointer] as ReferenceOutput,
+				);
+				const delta = `\n\n${section}`;
+				accumulated += delta;
+				outerStream.push({
+					type: "thinking_delta",
+					contentIndex: 0,
+					delta,
+					partial: thinkingPartial(accumulated),
+				});
+				revealPointer += 1;
+			}
+		},
+		finish(fullText) {
+			outerStream.push({
+				type: "thinking_end",
+				contentIndex: 0,
+				content: fullText,
+				partial: thinkingPartial(fullText),
+			});
+		},
+	};
 }
 
 function pushFatalError(

@@ -281,34 +281,54 @@ export function buildReferenceThinkingText(
 	preset: MoAPreset,
 	referenceOutputs: ReferenceOutput[],
 ): string {
-	const maxReferenceOutputChars = getMaxReferenceOutputChars(preset);
-	const count = referenceOutputs.length;
+	// Composed from the same header/section builders the progressive streaming path
+	// uses, so a header followed by `\n\n`-joined sections reproduces this text
+	// byte-for-byte (the atomic burst and the streamed reveal are interchangeable).
+	const header = buildReferenceThinkingHeader(preset, referenceOutputs.length);
+	const sections = referenceOutputs.map((output, index) =>
+		buildReferenceThinkingSection(preset, index, output),
+	);
+	return [header, ...sections].join("\n\n");
+}
+
+/**
+ * The first line of the reference thinking block: the sentinel marker, the model
+ * count, and the aggregator. Known before any reference finishes, so the
+ * progressive streaming path emits it immediately as the reference phase's first
+ * visible feedback.
+ */
+export function buildReferenceThinkingHeader(
+	preset: MoAPreset,
+	count: number,
+): string {
 	const aggregator = `${preset.aggregator.provider}/${preset.aggregator.model}`;
-	const lines = [
-		`${MOA_REFERENCE_THINKING_MARKER} · ${count} model${count === 1 ? "" : "s"} · aggregator ${aggregator}`,
-	];
-	referenceOutputs.forEach((output, index) => {
-		const name = `${output.slot.provider}/${output.slot.model}`;
-		if (output.success) {
-			lines.push(
-				"",
-				`▍ Reference ${index + 1} — ${name}`,
-				truncateReferenceOutput(output.text, maxReferenceOutputChars),
-			);
-		} else {
-			const fallbackErrorText =
-				output.errorMessage ?? output.text ?? "Unknown reference failure";
-			lines.push(
-				"",
-				`▍ Reference ${index + 1} — ${name} (failed)`,
-				truncateReferenceOutput(
-					redactErrorMessage(fallbackErrorText),
-					FAILED_REFERENCE_ERROR_CHARS,
-				),
-			);
-		}
-	});
-	return lines.join("\n");
+	return `${MOA_REFERENCE_THINKING_MARKER} · ${count} model${count === 1 ? "" : "s"} · aggregator ${aggregator}`;
+}
+
+/**
+ * One reference's section of the thinking block (its `▍ Reference N — provider/model`
+ * label line followed by its truncated advice or redacted error). The progressive
+ * streaming path emits these one at a time as each reference settles; joining the
+ * header and every section with `\n\n` yields exactly `buildReferenceThinkingText`.
+ */
+export function buildReferenceThinkingSection(
+	preset: MoAPreset,
+	index: number,
+	output: ReferenceOutput,
+): string {
+	const name = `${output.slot.provider}/${output.slot.model}`;
+	if (output.success) {
+		return `▍ Reference ${index + 1} — ${name}\n${truncateReferenceOutput(
+			output.text,
+			getMaxReferenceOutputChars(preset),
+		)}`;
+	}
+	const fallbackErrorText =
+		output.errorMessage ?? output.text ?? "Unknown reference failure";
+	return `▍ Reference ${index + 1} — ${name} (failed)\n${truncateReferenceOutput(
+		redactErrorMessage(fallbackErrorText),
+		FAILED_REFERENCE_ERROR_CHARS,
+	)}`;
 }
 
 export function buildGuidanceBlock(args: {

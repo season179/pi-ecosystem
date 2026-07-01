@@ -27,6 +27,7 @@ export interface MoAPreset {
 	aggregatorTemperature?: number;
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	streamAggregator?: boolean;
+	streamReferences?: boolean;
 	failOnReferenceError?: boolean;
 }
 

@@ -169,6 +169,9 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
 	}
+	if (value.streamReferences !== undefined && typeof value.streamReferences !== "boolean") {
+		throw new Error(`MoA preset "${presetName}": "streamReferences" must be a boolean`);
+	}
 	if (value.failOnReferenceError !== undefined && typeof value.failOnReferenceError !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "failOnReferenceError" must be a boolean`);
 	}

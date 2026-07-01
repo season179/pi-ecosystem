@@ -3,6 +3,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	type completeSimple,
+	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
@@ -33,6 +34,7 @@ import {
 import setup, { buildSyntheticModels } from "../src/extensions/moa.js";
 import {
 	__resetTrailingPlacementCacheForTests,
+	beginProgressiveReferenceThinking,
 	streamMoA,
 } from "../src/extensions/orchestrator.js";
 import type {
@@ -249,6 +251,15 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/streamAggregator/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						streamReferences: "yes" as unknown as MoAPreset["streamReferences"],
+					}),
+				),
+			),
+		).toThrow(/streamReferences/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1287,6 +1298,210 @@ describe("MoA orchestration", () => {
 				(done[0] as Extract<AssistantMessageEvent, { type: "done" }>).message,
 			),
 		).toContain("the final answer");
+	});
+
+	it("reveals reference sections in slot order even when a later slot settles first", async () => {
+		// Unit-test the progressive reveal directly (no timing dependency): drive the
+		// reveal callback out of slot order and assert the emitted deltas still fill
+		// the block in slot order — slot 1 finishing before slot 0 must be buffered
+		// until slot 0 reveals, so the streamed order matches the atomic block.
+		const preset = basePreset();
+		const model = makeSyntheticMoAModel(
+			registerFaux("agg", "main").getModel("main")!,
+		);
+		const stream = createAssistantMessageEventStream();
+		const progressive = beginProgressiveReferenceThinking(stream, model, preset, 2);
+
+		const outputA = {
+			slot: { provider: "ref-a", model: "a" },
+			success: true,
+			text: "advice from A",
+		};
+		const outputB = {
+			slot: { provider: "ref-b", model: "b" },
+			success: true,
+			text: "advice from B",
+		};
+		// Slot 1 (B) settles first — it must NOT be emitted before slot 0.
+		progressive.reveal(1, outputB);
+		progressive.reveal(0, outputA);
+		const fullText = buildReferenceThinkingText(preset, [outputA, outputB]);
+		progressive.finish(fullText);
+		stream.end();
+
+		const deltas: string[] = [];
+		let lastPartialThinking = "";
+		for await (const event of stream) {
+			if (event.type === "thinking_delta") {
+				deltas.push(event.delta);
+				const block = event.partial.content[0];
+				if (block?.type === "thinking") lastPartialThinking = block.thinking;
+			}
+		}
+		// First delta is the header alone (immediate feedback before any reference).
+		expect(deltas[0].startsWith(MOA_REFERENCE_THINKING_MARKER)).toBe(true);
+		expect(deltas[0]).not.toContain("advice from");
+		// Reference 1 (slot 0, A) is revealed before Reference 2 (slot 1, B), despite
+		// B settling first — the buffer preserves slot order.
+		const aIndex = deltas.findIndex((delta) => delta.includes("advice from A"));
+		const bIndex = deltas.findIndex((delta) => delta.includes("advice from B"));
+		expect(aIndex).toBeGreaterThan(0);
+		expect(bIndex).toBeGreaterThan(aIndex);
+		// The accumulated deltas reconstruct exactly the atomic block byte-for-byte.
+		expect(deltas.join("")).toBe(fullText);
+		expect(lastPartialThinking).toBe(fullText);
+	});
+
+	it("streams the reference thinking block progressively when streamReferences is enabled", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		refB.setResponses([fauxAssistantMessage("advice B")]);
+		agg.setResponses([fauxAssistantMessage("the final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const stream = streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(basePreset({ streamReferences: true })),
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const thinkingDeltas = events.filter(
+			(
+				event,
+			): event is Extract<AssistantMessageEvent, { type: "thinking_delta" }> =>
+				event.type === "thinking_delta" && event.contentIndex === 0,
+		);
+		// Progressive: the header plus one section per reference — more than the single
+		// full-text delta the atomic prelude emits.
+		expect(thinkingDeltas.length).toBe(3);
+		// The first delta is the header alone, emitted before any reference finished.
+		expect(thinkingDeltas[0].delta.startsWith(MOA_REFERENCE_THINKING_MARKER)).toBe(
+			true,
+		);
+		expect(thinkingDeltas[0].delta).not.toContain("advice");
+		// The later deltas carry the reference advice, in slot order.
+		expect(thinkingDeltas[1].delta).toContain("Reference 1 — ref-a/a");
+		expect(thinkingDeltas[2].delta).toContain("Reference 2 — ref-b/b");
+
+		// The final `done` message is byte-identical to the buffered path: reference
+		// thinking at content index 0, aggregator answer following — and it equals the
+		// reassembled stream, so nothing about the persisted message changed.
+		const done = events.find(
+			(event): event is Extract<AssistantMessageEvent, { type: "done" }> =>
+				event.type === "done",
+		);
+		expect(done).toBeDefined();
+		const finalThinking = thinkingFromResult(done!.message);
+		expect(thinkingDeltas.map((event) => event.delta).join("")).toBe(
+			finalThinking,
+		);
+		expect(finalThinking).toContain("advice A");
+		expect(finalThinking).toContain("advice B");
+		expect(textFromResult(done!.message)).toContain("the final answer");
+	});
+
+	it("composes progressive references with aggregator streaming (one start, disjoint indices)", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		refB.setResponses([fauxAssistantMessage("advice B")]);
+		agg.setResponses([fauxAssistantMessage("the streamed final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const stream = streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ streamReferences: true, streamAggregator: true }),
+			),
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// Exactly one `start` — the progressive prelude's; the aggregator's own start
+		// is skipped so no duplicate assistant message is pushed to the consumer.
+		expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+		// Reference thinking streams at content index 0; the aggregator answer streams
+		// at index 1+. The two never collide.
+		const thinkingDeltas = events.filter(
+			(event) => event.type === "thinking_delta",
+		);
+		const textDeltas = events.filter(
+			(
+				event,
+			): event is Extract<AssistantMessageEvent, { type: "text_delta" }> =>
+				event.type === "text_delta",
+		);
+		expect(thinkingDeltas.every((event) => event.contentIndex === 0)).toBe(true);
+		expect(textDeltas.length).toBeGreaterThan(0);
+		expect(textDeltas.every((event) => event.contentIndex >= 1)).toBe(true);
+		expect(textDeltas.map((event) => event.delta).join("")).toBe(
+			"the streamed final answer",
+		);
+		const done = events.find(
+			(event): event is Extract<AssistantMessageEvent, { type: "done" }> =>
+				event.type === "done",
+		);
+		expect(done!.message.content[0]?.type).toBe("thinking");
+		expect(textFromResult(done!.message)).toContain("the streamed final answer");
+	});
+
+	it("emits the reference thinking as one atomic delta when streamReferences is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		refB.setResponses([fauxAssistantMessage("advice B")]);
+		agg.setResponses([fauxAssistantMessage("the final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const stream = streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(basePreset()),
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// The default prelude emits the whole reference block in a single thinking
+		// delta after the phase completes — the byte-identical baseline the progressive
+		// path reconciles to.
+		const thinkingDeltas = events.filter(
+			(event) => event.type === "thinking_delta" && event.contentIndex === 0,
+		);
+		expect(thinkingDeltas).toHaveLength(1);
+		const done = events.find(
+			(event): event is Extract<AssistantMessageEvent, { type: "done" }> =>
+				event.type === "done",
+		);
+		expect(thinkingFromResult(done!.message)).toContain("advice A");
+		expect(thinkingFromResult(done!.message)).toContain("advice B");
 	});
 
 	it("places guidance as a trailing turn (cache-friendly) without mutating the task message in a tool loop", async () => {

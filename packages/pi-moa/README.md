@@ -141,3 +141,26 @@ once. On a long answer this pause is the dominant *perceived* latency of the tur
   final message. It is **unset by default** (buffered), so the default behavior is byte-identical
   — the *final* persisted message is the same either way; only the live display differs. Enable
   it for a snappier feel with a streaming-capable UI.
+
+### Streaming the reference thinking block (reference-phase feedback)
+
+By default the reference outputs are shown as a **single burst** too: MoA runs the whole
+reference phase, then emits the complete reference thinking block at once, then the aggregator
+runs. While the references are being generated the turn shows nothing — and the reference phase
+is the second-largest cost after the aggregator. `streamAggregator` only streams the *answer*; it
+does not touch this earlier gap.
+
+- `streamReferences: true` reveals the reference thinking block **as it fills in**: the header
+  (which models, which aggregator) is emitted immediately — before any reference finishes — and
+  each reference's advice is appended the moment that reference settles, so the phase gives
+  continuous feedback instead of a silent wait. Sections are revealed in **slot order** (a
+  reference that finishes ahead of an earlier slot is buffered until that slot reveals), so the
+  streamed order matches the final block and the accumulated text is byte-identical to the
+  buffered prelude. Like `streamAggregator`, it is **display-only**: the persisted `done` message
+  is still built atomically, so what re-enters model context is unchanged. It is **unset by
+  default** (single burst), so default behavior is byte-identical. It composes with
+  `streamAggregator` (reference thinking streams at content index 0, the answer at index 1+).
+  It is scoped to the common case — it falls back to the single burst (no live reveal) when
+  `referenceQuorum` is set (dropped references would leave gaps in the slot-ordered reveal) or a
+  reference model can't be found (a missing slot shifts the output order); those paths stay
+  byte-identical.
