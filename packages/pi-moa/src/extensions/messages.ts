@@ -60,6 +60,21 @@ export function renderReferenceContext(
 ): Context {
 	const toolNamesById = new Map<string, string>();
 
+	// How much of each tool result the reference advisors see. Tool results
+	// (file dumps, command output) are usually the bulkiest, least-advice-relevant
+	// content in an agentic transcript, and they drive the reference's prefill —
+	// which sits on the aggregator-blocking critical path. `referenceToolResultMaxChars`
+	// bounds the leading portion kept per tool result (a fixed tail is always also
+	// kept so the reference still sees the outcome); unset it falls back to the
+	// default head budget so the rendered view is byte-identical. This is a finer
+	// lever than referenceMaxContextChars: rather than eliding whole middle TURNS
+	// (which loses the sequence of actions), it keeps every turn but compresses each
+	// verbose result — which is exactly what an advisor needs (see WHAT was done,
+	// not every byte of output).
+	const toolResultHeadChars =
+		preset.referenceToolResultMaxChars ??
+		TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS;
+
 	// Render the transcript into plain user/assistant text turns. Tool results
 	// are NOT the user's words, so folding each into the preceding assistant turn
 	// (rather than emitting it as a "user" message) keeps the advisor framing:
@@ -85,7 +100,12 @@ export function renderReferenceContext(
 				],
 			});
 		} else {
-			foldToolResultIntoPrevious(rendered, message, toolNamesById);
+			foldToolResultIntoPrevious(
+				rendered,
+				message,
+				toolNamesById,
+				toolResultHeadChars,
+			);
 		}
 	}
 
@@ -423,15 +443,13 @@ function renderAssistantForReference(
 function renderToolResultBlock(
 	message: ToolResultMessage,
 	toolNamesById: Map<string, string>,
+	headChars: number,
 ): string {
 	const toolName =
 		toolNamesById.get(message.toolCallId) ??
 		message.toolName ??
 		message.toolCallId;
-	const renderedContent = renderToolResult(
-		message.content,
-		TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS,
-	);
+	const renderedContent = renderToolResult(message.content, headChars);
 	return `[Tool result: ${toolName} -> ${renderedContent}]`;
 }
 
@@ -439,8 +457,9 @@ function foldToolResultIntoPrevious(
 	rendered: Message[],
 	message: ToolResultMessage,
 	toolNamesById: Map<string, string>,
+	headChars: number,
 ): void {
-	const block = renderToolResultBlock(message, toolNamesById);
+	const block = renderToolResultBlock(message, toolNamesById, headChars);
 	const previous = rendered[rendered.length - 1];
 	if (previous?.role === "assistant" && previous.content[0]?.type === "text") {
 		const textBlock = previous.content[0];

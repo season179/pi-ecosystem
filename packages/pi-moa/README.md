@@ -109,6 +109,19 @@ sits on the aggregator-blocking path. `referenceMaxContextChars` bounds it:
   whole transcript, exactly as before). Set it when reference latency on long transcripts
   matters more than giving the advisors full history.
 
+- `referenceToolResultMaxChars` is the finer-grained companion to `referenceMaxContextChars`.
+  In an agentic transcript the bulkiest, least-advice-relevant content is usually the **tool
+  results** (file dumps, command output), and those drive the reference's prefill. This knob
+  bounds the leading portion of **each tool result the references see** (a short tail is always
+  also kept so the advisor still sees the outcome). Unlike `referenceMaxContextChars`, which
+  elides whole middle *turns* (losing the sequence of actions), it keeps **every turn** and
+  just compresses each verbose result — which is exactly what an advisor needs (see *what* was
+  done, not every byte of output). As with the other reference-input levers the **aggregator
+  always receives the full, untrimmed tool results**, so this only shrinks the advisory view.
+  It is **unset by default** (references see the default per-result budget, exactly as before),
+  and composes with `referenceMaxContextChars` (shrinking each result first leaves fewer whole
+  turns to elide). Set it on tool-heavy transcripts where reference prefill dominates.
+
 Every knob above bounds the reference's *generation* (length, cost, time, thinking, input).
 One critical-path cost sits *below* generation, in the network layer: when a reference's
 request hits a transient error (a 429 rate limit or a 5xx), the underlying SDK retries it

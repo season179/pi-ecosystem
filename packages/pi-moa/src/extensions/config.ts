@@ -158,6 +158,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
 	readOptionalMinimumInteger(value.referenceMaxContextChars, presetName, "referenceMaxContextChars", 500);
+	readOptionalMinimumInteger(value.referenceToolResultMaxChars, presetName, "referenceToolResultMaxChars", 200);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
 	// maxRetries of 0 (disable client-side retries entirely) is meaningful, so this

@@ -250,6 +250,11 @@ describe("MoA config", () => {
 		).toThrow(/referenceMaxContextChars/);
 		expect(() =>
 			validateMoAConfig(
+				baseConfig(basePreset({ referenceToolResultMaxChars: 199 })),
+			),
+		).toThrow(/referenceToolResultMaxChars/);
+		expect(() =>
+			validateMoAConfig(
 				baseConfig(
 					basePreset({
 						referenceReasoning: "off" as unknown as MoAPreset["referenceReasoning"],
@@ -709,6 +714,58 @@ describe("MoA message shaping", () => {
 		expect(uncappedSerialized).toContain("old middle");
 		expect(uncappedSerialized).toContain("more middle");
 		expect(uncappedSerialized).not.toContain("omitted to bound reference latency");
+	});
+
+	it("bounds each tool result to referenceToolResultMaxChars while keeping every turn", () => {
+		const bulkyToolResult = `HEAD${"x".repeat(5000)}TAIL`;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "run the build", timestamp: 1 },
+				fauxAssistantMessage([
+					fauxToolCall("bash", { cmd: "build" }, { id: "t1" }),
+				]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "bash",
+					content: [{ type: "text", text: bulkyToolResult }],
+					isError: false,
+					timestamp: 2,
+				},
+				fauxAssistantMessage("build finished"),
+				{ role: "user", content: "what next?", timestamp: 4 },
+			],
+		};
+
+		// A small per-tool-result budget shrinks the bulky output but preserves the
+		// full action sequence: the tool call, a short head+tail of its result, and
+		// every surrounding turn all survive (unlike referenceMaxContextChars, which
+		// would elide whole middle turns).
+		const capped = buildReferenceContext(
+			context,
+			basePreset({ referenceToolResultMaxChars: 300 }),
+		);
+		const cappedSerialized = JSON.stringify(capped.messages);
+		expect(cappedSerialized).toContain("[Tool call: bash(");
+		expect(cappedSerialized).toContain("[Tool result: bash ->");
+		expect(cappedSerialized).toContain("...[truncated 5008 chars]...");
+		expect(cappedSerialized).toContain("HEAD");
+		expect(cappedSerialized).toContain("TAIL");
+		// The middle of the bulky result is dropped, so the rendered tool result is
+		// far smaller than the raw 5008 chars.
+		const cappedToolTurn = JSON.stringify(capped.messages[1]);
+		expect(cappedToolTurn.length).toBeLessThan(1500);
+		// Every turn is still present — the action sequence is intact.
+		expect(cappedSerialized).toContain("run the build");
+		expect(cappedSerialized).toContain("build finished");
+		expect(cappedSerialized).toContain("what next?");
+
+		// Unset (default) keeps the wider default head budget, so more of the result
+		// survives — proving the knob is what shrank it, not some other trimming.
+		const uncapped = buildReferenceContext(context, basePreset());
+		const uncappedToolTurn = JSON.stringify(uncapped.messages[1]);
+		expect(uncappedToolTurn).toContain("...[truncated 5008 chars]...");
+		expect(uncappedToolTurn.length).toBeGreaterThan(cappedToolTurn.length + 1500);
 	});
 
 	it("merges the advisory turn into a trailing user message and never emits consecutive same-role turns", () => {
@@ -2006,6 +2063,78 @@ describe("MoA orchestration", () => {
 		const aggregatorSerialized = JSON.stringify(aggregatorContext?.messages);
 		expect(aggregatorSerialized).toContain("bulky middle");
 		expect(aggregatorSerialized).not.toContain("omitted to bound reference latency");
+	});
+
+	it("bounds each reference tool result to referenceToolResultMaxChars while the aggregator keeps the full result", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceContext: Context | undefined;
+		let aggregatorContext: Context | undefined;
+		refA.setResponses([
+			(context) => {
+				referenceContext = context;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const bulkyToolResult = `HEAD-MARKER${"q".repeat(6000)}TAIL-MARKER`;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "inspect the logs", timestamp: 1 },
+				fauxAssistantMessage([
+					fauxToolCall("cat", { file: "log" }, { id: "t1" }),
+				]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "cat",
+					content: [{ type: "text", text: bulkyToolResult }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceToolResultMaxChars: 300,
+				}),
+			),
+		).result();
+
+		// The reference's view of the tool result is shrunk to the head budget: the
+		// action (tool call) and outcome (head+tail markers) survive, but the bulky
+		// middle is elided — smaller prefill on the aggregator-blocking critical path.
+		const referenceSerialized = JSON.stringify(referenceContext?.messages);
+		expect(referenceSerialized).toContain("[Tool result: cat ->");
+		expect(referenceSerialized).toContain("HEAD-MARKER");
+		expect(referenceSerialized).toContain("TAIL-MARKER");
+		expect(referenceSerialized).toContain("...[truncated 6022 chars]...");
+		expect(referenceSerialized).not.toContain("q".repeat(1000));
+
+		// The aggregator — the acting model — always receives the raw, untrimmed tool
+		// result, so shrinking the reference's view never hides output from the answer.
+		const aggregatorContent = JSON.stringify(
+			aggregatorContext?.messages.find(
+				(message) => message.role === "toolResult",
+			),
+		);
+		expect(aggregatorContent).toContain("q".repeat(6000));
+		expect(aggregatorContent).not.toContain("...[truncated");
 	});
 
 	it("aborts a reference once its output reaches the kept budget", async () => {
