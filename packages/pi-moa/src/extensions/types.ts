@@ -13,6 +13,7 @@ export interface MoAPreset {
 	maxReferences?: number;
 	maxReferenceOutputChars?: number;
 	referenceMaxTokens?: number;
+	referenceTimeoutMs?: number;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	failOnReferenceError?: boolean;

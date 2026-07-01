@@ -36,3 +36,15 @@ verbose references off the critical path:
   ever lowers a caller-supplied limit; presets that omit it run uncapped. The built-in
   `default` preset sets it to `1024` (well above the ~500 tokens kept), so the kept
   text is unchanged while runaway references stop early even before the char budget.
+
+Both mechanisms above bound reference *length/cost*, not *time*. A separate, opt-in
+`referenceTimeoutMs` bounds each reference's *wall-clock* time so a stalled or slow
+provider cannot hold the turn hostage:
+
+- `referenceTimeoutMs` sets a per-reference deadline in milliseconds. At the deadline
+  the reference's request is aborted and the advice it has produced so far is handed to
+  the aggregator (as a truncated reference); if it produced no text yet, it fails
+  gracefully like any other reference error (or fails the turn when
+  `failOnReferenceError` is set). It is **unset by default** — presets that omit it wait
+  for every reference to finish, exactly as before. Set it when you would rather trade a
+  slow reference's tail for a faster, bounded turn.

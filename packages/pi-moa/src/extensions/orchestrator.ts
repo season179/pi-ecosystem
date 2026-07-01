@@ -408,6 +408,7 @@ async function runSingleReference(args: {
 			args.refContext,
 			referenceOptions,
 			getMaxReferenceOutputChars(args.preset),
+			args.preset.referenceTimeoutMs,
 		);
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(
@@ -447,11 +448,19 @@ async function runSingleReference(args: {
 // only the truncation marker's reported total reflects the early stop rather
 // than the full would-be length. This complements the referenceMaxTokens cap:
 // the token cap is an upper bound, this stops precisely at the kept budget.
+//
+// When `timeoutMs` is set, also bound the reference's wall-clock time: at the
+// deadline the request is aborted and the advice produced so far is surfaced as
+// success (or the reference fails gracefully if it produced no text). This is
+// the only lever that caps reference TIME rather than length/cost, so a stalled
+// or slow provider can no longer hold the whole turn hostage. It is opt-in and
+// unset by default, so default behavior is unchanged.
 async function streamReferenceUntilBudget(
 	model: Model<Api>,
 	refContext: Context,
 	referenceOptions: SimpleStreamOptions,
 	keptOutputChars: number,
+	timeoutMs?: number,
 ): Promise<AssistantMessage> {
 	const parentSignal = referenceOptions.signal;
 	const controller = new AbortController();
@@ -464,8 +473,13 @@ async function streamReferenceUntilBudget(
 	let keptTextChars = 0;
 	let sawToolCall = false;
 	let budgetReached = false;
+	let deadlineReached = false;
 	let latestPartial: AssistantMessage | undefined;
-	try {
+
+	// Consume the reference stream to its budget/abort. Shares the mutable state
+	// above with the deadline timer (single-threaded, so no data race) so a
+	// timeout can surface the partial advice produced up to that point.
+	const consume = async (): Promise<AssistantMessage> => {
 		const stream = streamSimple(model, refContext, {
 			...referenceOptions,
 			signal: controller.signal,
@@ -475,10 +489,11 @@ async function streamReferenceUntilBudget(
 				return event.message;
 			}
 			if (event.type === "error") {
-				// A budget abort is our own doing and yields a complete-enough
-				// reference, so surface the accumulated partial as success. Every
-				// other error — including a genuine parent abort — propagates.
-				if (budgetReached && latestPartial) {
+				// A budget or deadline abort is our own doing and yields a
+				// complete-enough reference, so surface the accumulated partial as
+				// success. Every other error — including a genuine parent abort —
+				// propagates.
+				if ((budgetReached || deadlineReached) && latestPartial) {
 					return finalizeBudgetedReference(latestPartial);
 				}
 				throw new Error(
@@ -510,7 +525,40 @@ async function streamReferenceUntilBudget(
 			return latestPartial;
 		}
 		throw new Error("Reference produced no output before the stream ended");
+	};
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		if (timeoutMs === undefined) {
+			return await consume();
+		}
+		const consumePromise = consume();
+		// The consume promise may settle after the deadline wins the race; swallow
+		// any late rejection so it never surfaces as an unhandled rejection.
+		consumePromise.catch(() => {});
+		const deadline = new Promise<AssistantMessage>((resolve, reject) => {
+			timer = setTimeout(() => {
+				deadlineReached = true;
+				controller.abort();
+				// Surface partial advice as success only when the reference actually
+				// produced text; a stall with no output fails gracefully instead of
+				// injecting an empty reference.
+				if (keptTextChars > 0 && latestPartial) {
+					resolve(finalizeBudgetedReference(latestPartial));
+				} else {
+					reject(
+						new Error(
+							`Reference exceeded referenceTimeoutMs (${timeoutMs}ms) before producing output`,
+						),
+					);
+				}
+			}, timeoutMs);
+		});
+		return await Promise.race([consumePromise, deadline]);
 	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
 		parentSignal?.removeEventListener("abort", forwardAbort);
 	}
 }

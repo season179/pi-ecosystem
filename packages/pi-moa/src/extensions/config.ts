@@ -136,6 +136,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
+	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,

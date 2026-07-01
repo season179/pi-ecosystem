@@ -202,6 +202,9 @@ describe("MoA config", () => {
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceMaxTokens: 0 }))),
 		).toThrow(/referenceMaxTokens/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceTimeoutMs: 0 }))),
+		).toThrow(/referenceTimeoutMs/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -800,6 +803,50 @@ describe("MoA orchestration", () => {
 		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain(
 			"TAIL-SENTINEL",
 		);
+	});
+
+	it("bounds a stalled reference by referenceTimeoutMs so the aggregator still runs", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		// refA answers promptly; refB hangs forever (its responder never resolves,
+		// so it never even begins streaming). Without a deadline the aggregator —
+		// which waits for the slowest reference — would hang on refB indefinitely.
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		refB.setResponses([() => new Promise<never>(() => {})]);
+		let aggregatorContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(basePreset({ referenceTimeoutMs: 50 })),
+		).result();
+
+		// The turn completed (did not hang on the stalled reference): the aggregator
+		// ran with the fast reference's advice, and the stalled one failed gracefully
+		// with a deadline error rather than blocking the turn.
+		expect(textFromResult(result)).toContain("final answer");
+		const references = thinkingFromResult(result);
+		expect(references).toContain("ref-a/a");
+		expect(references).toContain("advice A");
+		expect(references).toContain("ref-b/b (failed)");
+		expect(references).toContain("referenceTimeoutMs");
+		const aggMessages = JSON.stringify(aggregatorContext?.messages);
+		expect(aggMessages).toContain("advice A");
+		expect(aggMessages).toContain("referenceTimeoutMs");
 	});
 
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {
