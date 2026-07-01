@@ -194,6 +194,11 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"aggregatorCacheRetention",
 	);
+	readOptionalOpenRouterRouting(
+		value.aggregatorProviderRouting,
+		presetName,
+		"aggregatorProviderRouting",
+	);
 	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
 	}
@@ -292,6 +297,29 @@ function readOptionalCacheRetention(value: unknown, presetName: string, field: s
 	if (typeof value !== "string" || !CACHE_RETENTIONS.includes(value as never)) {
 		throw new Error(
 			`MoA preset "${presetName}": "${field}" must be one of ${CACHE_RETENTIONS.join(", ")}`,
+		);
+	}
+}
+
+// The aggregator-provider-routing knob steers OpenRouter's upstream provider
+// selection for the aggregator's request (a speed lever: `sort: "throughput"` /
+// `"latency"` route to a faster backend). It is a passthrough to pi-ai's typed
+// `OpenRouterRouting` field, so validation is deliberately light — confirm it is an
+// object and, when the speed-relevant `sort` is given as a string, that it is one of
+// the OpenRouter sort metrics (a silent typo there would just be ignored upstream).
+// Every other routing field flows through and is validated by pi-ai/OpenRouter at
+// request time rather than duplicated (and kept in sync) here.
+const OPENROUTER_SORTS = ["price", "throughput", "latency"] as const;
+
+function readOptionalOpenRouterRouting(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (!isRecord(value)) {
+		throw new Error(`MoA preset "${presetName}": "${field}" must be an object`);
+	}
+	const sort = value.sort;
+	if (typeof sort === "string" && !OPENROUTER_SORTS.includes(sort as never)) {
+		throw new Error(
+			`MoA preset "${presetName}": "${field}.sort" must be one of ${OPENROUTER_SORTS.join(", ")}`,
 		);
 	}
 }

@@ -5,6 +5,7 @@ import {
 	type Context,
 	createAssistantMessageEventStream,
 	type Model,
+	type OpenRouterRouting,
 	type SimpleStreamOptions,
 	streamSimple,
 	type ThinkingContent,
@@ -265,6 +266,29 @@ export function streamMoA(
 			aggregatorOptions.cacheRetention = preset.aggregatorCacheRetention;
 		}
 
+		// Steer OpenRouter's provider routing for the aggregator's request. OpenRouter
+		// fronts several upstream providers per model and, by default, balances routing
+		// (weighted by price/uptime) — which can land the aggregator on a slow backend.
+		// The aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
+		// references, which quorum/timeout/output caps already bound), so pinning it to a
+		// high-throughput / low-latency backend is the most direct latency lever left:
+		// `sort: "throughput"` routes to the fastest tokens/sec provider, `sort:
+		// "latency"` to the lowest time-to-first-token, and preferred_min_throughput /
+		// preferred_max_latency set explicit floors/ceilings. This lives on the model's
+		// `compat` (not the stream options), and pi-ai's openai-completions provider
+		// applies it ONLY when the model's baseUrl points at OpenRouter — so it is a safe
+		// no-op for a non-openrouter aggregator. Aggregator-scoped (references keep their
+		// own routing) and unset by default. Kept opt-in — not shipped in the default
+		// preset — because a different backend can differ in quantization or behavior and
+		// so could subtly shift the answer, unlike a pure cache/TTL hint.
+		const aggregatorStreamModel =
+			preset.aggregatorProviderRouting !== undefined
+				? withOpenRouterRouting(
+						aggregatorModel,
+						preset.aggregatorProviderRouting,
+					)
+				: aggregatorModel;
+
 		// Emit the reference outputs as a leading, display-only thinking block so
 		// they render ABOVE the aggregator's answer (and during its compute pause).
 		// The block is persisted on the assistant message for the human to see;
@@ -319,7 +343,7 @@ export function streamMoA(
 		}
 		const streamIncremental = preset.streamAggregator === true;
 		const primaryResult = await forwardAggregatorStream({
-			model: aggregatorModel,
+			model: aggregatorStreamModel,
 			context: primaryContext,
 			options: aggregatorOptions,
 			outerStream,
@@ -341,7 +365,7 @@ export function streamMoA(
 				guidanceBlock,
 			);
 			const systemResult = await forwardAggregatorStream({
-				model: aggregatorModel,
+				model: aggregatorStreamModel,
 				context: systemContext,
 				options: aggregatorOptions,
 				outerStream,
@@ -871,6 +895,23 @@ function finalizeBudgetedReference(
 		content: structuredClone(partial.content),
 		stopReason: "length",
 	};
+}
+
+// Return a shallow clone of the model with OpenRouter provider routing merged into
+// its `compat`. The registry hands out a SHARED model object, so this never mutates
+// it in place (which would leak the routing to every other caller of that model);
+// it clones and layers the routing on top of any existing compat. The provider only
+// reads `compat.openRouterRouting` for OpenRouter-hosted models, so a non-openrouter
+// model carries it harmlessly. The cast bridges pi-ai's conditional `compat` type
+// (which varies by api) for this openrouter-shaped augmentation.
+function withOpenRouterRouting(
+	model: Model<Api>,
+	routing: OpenRouterRouting,
+): Model<Api> {
+	return {
+		...model,
+		compat: { ...model.compat, openRouterRouting: routing },
+	} as Model<Api>;
 }
 
 function resolveUnderlyingModel(

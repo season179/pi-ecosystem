@@ -281,6 +281,27 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/aggregatorReasoning/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorProviderRouting:
+							"throughput" as unknown as MoAPreset["aggregatorProviderRouting"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorProviderRouting/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorProviderRouting: {
+							sort: "fastest",
+						} as unknown as MoAPreset["aggregatorProviderRouting"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorProviderRouting.*sort/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1179,6 +1200,87 @@ describe("MoA orchestration", () => {
 		// With no preset override the aggregator inherits the caller's retention
 		// exactly as before — zero behavioral change by default.
 		expect(aggregatorCacheRetention).toBe("long");
+	});
+
+	it("applies aggregatorProviderRouting to the aggregator model only, leaving references unrouted", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceRouting: unknown;
+		let aggregatorRouting: unknown;
+		// The faux responder's 4th arg is the exact model object pi-moa handed to
+		// streamSimple, so `model.compat.openRouterRouting` reflects the routing that
+		// would reach OpenRouter's `provider` payload field.
+		refA.setResponses([
+			(_context, _options, _state, model) => {
+				referenceRouting = model.compat?.openRouterRouting;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, _options, _state, model) => {
+				aggregatorRouting = model.compat?.openRouterRouting;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorProviderRouting: { sort: "throughput" },
+				}),
+			),
+		).result();
+		// The aggregator (the dominant, unbounded per-turn cost) is pinned to the
+		// fastest-throughput OpenRouter backend, while the reference stays unrouted —
+		// the knob is aggregator-scoped and never touches reference requests.
+		expect(aggregatorRouting).toEqual({ sort: "throughput" });
+		expect(referenceRouting).toBeUndefined();
+	});
+
+	it("leaves the aggregator model unrouted when aggregatorProviderRouting is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let aggregatorRouting: unknown = "sentinel";
+		let sawCompat: unknown = "sentinel";
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([
+			(_context, _options, _state, model) => {
+				sawCompat = model.compat;
+				aggregatorRouting = model.compat?.openRouterRouting;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no preset override the aggregator model is passed through untouched —
+		// no synthetic compat is injected, so the request is byte-identical to before.
+		expect(aggregatorRouting).toBeUndefined();
+		expect(sawCompat).toBeUndefined();
 	});
 
 	it("bounds reference input to referenceMaxContextChars while the aggregator keeps the full context", async () => {

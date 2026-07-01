@@ -166,6 +166,27 @@ default. `aggregatorReasoning` decouples them (the aggregator-side mirror of
   reasoning shapes the *final answer*, this trades answer quality for latency directly — a
   sharper trade-off than the reference knobs — so it stays opt-in.
 
+### Steering OpenRouter provider routing for the aggregator
+
+The reasoning/retention/placement knobs tune *how* the aggregator runs; this one tunes
+*which upstream backend* serves it. OpenRouter fronts several providers per model and, by
+default, balances routing (weighted by price/uptime) — which can land the aggregator on a
+slow backend. Because the aggregator's generation is the dominant, **un-bounded** per-turn
+cost (references are already bounded by quorum/timeout/output caps), routing it to a faster
+backend is a direct latency lever:
+
+- `aggregatorProviderRouting` passes an OpenRouter [provider-routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+  object through to the aggregator's request. The speed-relevant fields are
+  `sort: "throughput"` (route to the highest tokens/sec provider), `sort: "latency"` (lowest
+  time-to-first-token), and `preferred_min_throughput` / `preferred_max_latency` (explicit
+  floors/ceilings). It applies **only to the aggregator** (references keep their own routing)
+  and — since routing lives on the model's `compat`, which the provider reads only for
+  OpenRouter-hosted models — it is a safe **no-op for a non-openrouter aggregator**. It is
+  **unset by default** and, unlike the pure cache/TTL hints, is **not** shipped in the
+  `default` preset: a different backend can differ in quantization or behavior and so could
+  subtly shift the answer, so it stays opt-in (constrain it with `quantizations` / `only` /
+  `ignore` if that matters). Example: `"aggregatorProviderRouting": { "sort": "throughput" }`.
+
 ### Streaming the aggregator answer (time-to-first-token)
 
 By default the aggregator's answer is delivered to the UI in a **single burst** once it has

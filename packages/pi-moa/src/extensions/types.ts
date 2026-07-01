@@ -3,6 +3,7 @@ import type {
 	CacheRetention,
 	Context,
 	Model,
+	OpenRouterRouting,
 	ThinkingLevel,
 	Usage,
 } from "@earendil-works/pi-ai";
@@ -29,6 +30,7 @@ export interface MoAPreset {
 	aggregatorReasoning?: ThinkingLevel;
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	aggregatorCacheRetention?: CacheRetention;
+	aggregatorProviderRouting?: OpenRouterRouting;
 	streamAggregator?: boolean;
 	streamReferences?: boolean;
 	failOnReferenceError?: boolean;
