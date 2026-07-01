@@ -43,6 +43,26 @@ const EMPTY_USAGE: AssistantMessage["usage"] = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+// Aggregator providers observed to reject a *trailing* user turn placed after
+// tool results (a role-alternation error) during this process, keyed by provider
+// id. Whether a provider's API accepts that sequence is a stable property of the
+// API — not a transient failure — so caching it process-wide is correct: once a
+// provider rejects the cache-friendly "trailing-message" placement we skip that
+// doomed attempt on every later turn and go straight to the always-valid
+// system-prompt fallback. This bounds the wasted-request cost of trailing-message
+// on a strict provider to one failed request per process instead of one on every
+// tool-loop turn. It stays empty (so behavior is byte-identical) unless the opt-in
+// trailing-message placement is used against a provider that rejects the trailing
+// turn; the default "latest-user" placement never attempts a trailing turn and so
+// never touches this cache.
+const trailingPlacementUnsupported = new Set<string>();
+
+// Test-only hook: clears the process-wide trailing-placement rejection cache so
+// tests that exercise the memoization can start from a known-empty state.
+export function __resetTrailingPlacementCacheForTests(): void {
+	trailingPlacementUnsupported.clear();
+}
+
 interface ReferenceTask {
 	slot: ModelSlot;
 	model: Model<Api>;
@@ -175,22 +195,48 @@ export function streamMoA(
 		// so the whole prior transcript stays a byte-stable prefix the aggregator's
 		// provider can reuse from its prompt cache across tool-loop turns (the
 		// latest-user default would mutate the early task message and bust that cache).
-		const tailContext =
-			preset.aggregatorGuidancePlacement === "trailing-message"
-				? appendGuidanceAsTrailingTurn(strippedContext, guidanceBlock)
-				: appendGuidanceToLatestUser(strippedContext, guidanceBlock);
-		const tailResult = await forwardAggregatorStream({
+		//
+		// A few strict providers reject a trailing user turn after tool results. That
+		// is a stable property of the provider's API, so once we have seen it we skip
+		// the doomed trailing attempt on later turns (see trailingPlacementUnsupported)
+		// and go straight to the system-prompt placement, which touches no message
+		// roles — turning trailing-message's worst case on a strict provider from a
+		// wasted request every tool-loop turn into one wasted request per process.
+		const aggregatorProviderKey = preset.aggregator.provider;
+		const wantsTrailing =
+			preset.aggregatorGuidancePlacement === "trailing-message";
+		const attemptTrailing =
+			wantsTrailing && !trailingPlacementUnsupported.has(aggregatorProviderKey);
+		let primaryContext: Context;
+		if (attemptTrailing) {
+			primaryContext = appendGuidanceAsTrailingTurn(
+				strippedContext,
+				guidanceBlock,
+			);
+		} else if (wantsTrailing) {
+			// Trailing requested, but this provider already rejected it this process:
+			// skip straight to the always-valid system-prompt placement.
+			primaryContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
+		} else {
+			primaryContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
+		}
+		const primaryResult = await forwardAggregatorStream({
 			model: aggregatorModel,
-			context: tailContext,
+			context: primaryContext,
 			options: aggregatorOptions,
 			outerStream,
 			referenceThinking,
 		});
 
-		if (tailResult.kind === "consecutive-user-rejected") {
-			// A few strict providers reject a user turn whose tail we extended as a
-			// role-alternation error. Fall back to folding the guidance into the
-			// system prompt, which touches no message roles.
+		if (primaryResult.kind === "consecutive-user-rejected") {
+			// Only the trailing-message placement can trigger this — appending to an
+			// existing user turn (latest-user) or the system prompt never creates
+			// consecutive user turns. Remember the provider so future turns skip the
+			// trailing attempt, then fall back to folding the guidance into the system
+			// prompt, which touches no message roles.
+			if (attemptTrailing) {
+				trailingPlacementUnsupported.add(aggregatorProviderKey);
+			}
 			const systemContext = injectGuidanceAsSystem(
 				strippedContext,
 				guidanceBlock,
@@ -215,8 +261,8 @@ export function streamMoA(
 				);
 				return;
 			}
-		} else if (tailResult.kind === "error") {
-			outerStream.end(tailResult.error);
+		} else if (primaryResult.kind === "error") {
+			outerStream.end(primaryResult.error);
 			return;
 		}
 		outerStream.end();

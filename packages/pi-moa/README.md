@@ -115,3 +115,11 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   sequence. On strict Anthropic-style alternation a trailing user turn after tool results can
   be rejected; the existing consecutive-user fallback then folds the guidance into the system
   prompt, so correctness is preserved regardless of provider.
+
+  Because whether a provider accepts a trailing user turn is a **stable property of its API**
+  (not a transient failure), the first such rejection for a given aggregator provider is
+  remembered for the rest of the process: subsequent turns skip the doomed trailing attempt and
+  go straight to the system-prompt placement. This bounds the worst case of `trailing-message`
+  on a strict provider to **one wasted request per process** instead of one on every tool-loop
+  turn. Providers that accept the trailing turn are never recorded, so their behavior is
+  unchanged, and the default `latest-user` placement never attempts a trailing turn at all.

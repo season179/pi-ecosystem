@@ -29,7 +29,10 @@ import {
 	stripPriorMoAGuidanceMessages,
 } from "../src/extensions/messages.js";
 import setup, { buildSyntheticModels } from "../src/extensions/moa.js";
-import { streamMoA } from "../src/extensions/orchestrator.js";
+import {
+	__resetTrailingPlacementCacheForTests,
+	streamMoA,
+} from "../src/extensions/orchestrator.js";
 import type {
 	MoAConfig,
 	MoAPreset,
@@ -1603,6 +1606,103 @@ describe("MoA orchestration", () => {
 		);
 		expect(aggregatorContexts[1].systemPrompt).toContain(MOA_GUIDANCE_MARKER);
 		expect(aggregatorContexts[1].systemPrompt).toContain("advice");
+	});
+
+	it("remembers a provider that rejects the trailing turn and skips it on later turns", async () => {
+		__resetTrailingPlacementCacheForTests();
+		const refA = registerFaux("ref-a", "a");
+		// A distinct provider so the process-wide rejection cache this test populates
+		// cannot leak into other tests (which use provider "agg").
+		const strictAgg = registerFaux("strict-agg", "main");
+		refA.setResponses([
+			fauxAssistantMessage("advice"),
+			fauxAssistantMessage("advice"),
+		]);
+		const aggContexts: Context[] = [];
+		// One responder reused for every aggregator call: it rejects (as a strict
+		// role-alternation error) exactly when the guidance arrives as a *trailing*
+		// user turn, and succeeds when it arrives folded into the system prompt.
+		const dispatch = (context: Context) => {
+			aggContexts.push(context);
+			const last = context.messages[context.messages.length - 1];
+			const guidanceIsTrailingUserTurn =
+				last?.role === "user" &&
+				JSON.stringify(last.content).includes(MOA_GUIDANCE_MARKER);
+			if (guidanceIsTrailingUserTurn) {
+				throw new Error(
+					"messages must alternate between user and assistant roles; got user after user",
+				);
+			}
+			return fauxAssistantMessage("final answer");
+		};
+		// Turn 1 makes two aggregator calls (rejected trailing, then system);
+		// turn 2 should make only one (system, trailing skipped). Three total.
+		strictAgg.setResponses([dispatch, dispatch, dispatch]);
+
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: strictAgg.getModel("main")! },
+		]);
+		// A tool-loop transcript: ends on a tool result, so trailing-message appends a
+		// NEW trailing user turn (the sequence a strict provider rejects).
+		const toolLoopContext = (): Context => ({
+			messages: [
+				{ role: "user", content: "TASK: fix the bug", timestamp: 1 },
+				fauxAssistantMessage([
+					fauxToolCall("echo", { text: "run" }, { id: "t1" }),
+				]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "echo",
+					content: [{ type: "text", text: "tool output" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		});
+		const runTurn = () =>
+			streamMoA(
+				makeSyntheticMoAModel(strictAgg.getModel("main")!),
+				toolLoopContext(),
+				undefined,
+				registry,
+				baseConfig(
+					basePreset({
+						referenceModels: [{ provider: "ref-a", model: "a" }],
+						aggregator: { provider: "strict-agg", model: "main" },
+						aggregatorGuidancePlacement: "trailing-message",
+					}),
+				),
+			).result();
+
+		// Turn 1: trailing attempted, rejected, then the system fallback succeeds.
+		const first = await runTurn();
+		expect(textFromResult(first)).toContain("final answer");
+		expect(strictAgg.state.callCount).toBe(2);
+		// The first call carried a trailing guidance user turn; the fallback moved the
+		// guidance into the system prompt.
+		expect(aggContexts[0].messages[aggContexts[0].messages.length - 1]?.role).toBe(
+			"user",
+		);
+		expect(JSON.stringify(aggContexts[0].messages)).toContain(MOA_GUIDANCE_MARKER);
+		expect(aggContexts[1].systemPrompt).toContain(MOA_GUIDANCE_MARKER);
+		expect(JSON.stringify(aggContexts[1].messages)).not.toContain(
+			MOA_GUIDANCE_MARKER,
+		);
+
+		// Turn 2: the provider is now known to reject the trailing turn, so the
+		// doomed attempt is skipped entirely — a single aggregator call that goes
+		// straight to the system-prompt placement (no wasted trailing request).
+		const second = await runTurn();
+		expect(textFromResult(second)).toContain("final answer");
+		expect(strictAgg.state.callCount).toBe(3);
+		const turn2Context = aggContexts[2];
+		expect(turn2Context.systemPrompt).toContain(MOA_GUIDANCE_MARKER);
+		expect(JSON.stringify(turn2Context.messages)).not.toContain(
+			MOA_GUIDANCE_MARKER,
+		);
+		__resetTrailingPlacementCacheForTests();
 	});
 
 	it("passes through aggregator tool call messages", async () => {
