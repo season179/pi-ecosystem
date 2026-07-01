@@ -188,6 +188,11 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"aggregatorGuidancePlacement",
 	);
+	readOptionalCacheRetention(
+		value.aggregatorCacheRetention,
+		presetName,
+		"aggregatorCacheRetention",
+	);
 	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
 	}
@@ -266,6 +271,24 @@ function readOptionalGuidancePlacement(value: unknown, presetName: string, field
 	if (typeof value !== "string" || !GUIDANCE_PLACEMENTS.includes(value as never)) {
 		throw new Error(
 			`MoA preset "${presetName}": "${field}" must be one of ${GUIDANCE_PLACEMENTS.join(", ")}`,
+		);
+	}
+}
+
+// The aggregator-cache-retention knob sets how long the aggregator's provider is
+// asked to keep its prompt cache alive. It maps to the provider's cache-TTL hint
+// (Anthropic-style `cache_control.ttl: "1h"`, OpenAI `prompt_cache_retention`),
+// so "long" survives longer gaps between aggregator turns than the provider
+// default "short" — cutting time-to-first-token when a tool run or a review pause
+// exceeds the short TTL. It is a pure cache-TTL hint: the generated answer is
+// byte-identical regardless.
+const CACHE_RETENTIONS = ["none", "short", "long"] as const;
+
+function readOptionalCacheRetention(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || !CACHE_RETENTIONS.includes(value as never)) {
+		throw new Error(
+			`MoA preset "${presetName}": "${field}" must be one of ${CACHE_RETENTIONS.join(", ")}`,
 		);
 	}
 }

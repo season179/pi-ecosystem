@@ -231,6 +231,22 @@ export function streamMoA(
 		if (typeof preset.aggregatorTemperature === "number") {
 			aggregatorOptions.temperature = preset.aggregatorTemperature;
 		}
+		// Ask the aggregator's provider to keep its prompt cache alive for the
+		// configured retention (a cache-TTL hint mapped to Anthropic `cache_control.ttl`
+		// / OpenAI `prompt_cache_retention`). The aggregator re-prefills its whole
+		// transcript every tool-loop turn; prompt caching avoids that only while the
+		// cache lives, and the provider default ("short") can expire between turns when
+		// a tool run or a review pause exceeds the short TTL, forcing a full re-prefill.
+		// "long" survives those gaps so the next turn is a cache hit (lower TTFT). Set
+		// AFTER the caller-options spread so the preset governs the aggregator's
+		// retention; the references keep the caller/provider default (they are
+		// single-turn advisory calls that never re-hit their own cache, so paying the
+		// pricier long-cache write for them would be wasted). Unset by default, so the
+		// aggregator inherits the caller's retention exactly as before — and this is a
+		// pure TTL hint, so the persisted answer is byte-identical regardless.
+		if (preset.aggregatorCacheRetention !== undefined) {
+			aggregatorOptions.cacheRetention = preset.aggregatorCacheRetention;
+		}
 
 		// Emit the reference outputs as a leading, display-only thinking block so
 		// they render ABOVE the aggregator's answer (and during its compute pause).

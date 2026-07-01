@@ -1,5 +1,6 @@
 import type {
 	Api,
+	CacheRetention,
 	Context,
 	Model,
 	ThinkingLevel,
@@ -26,6 +27,7 @@ export interface MoAPreset {
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
+	aggregatorCacheRetention?: CacheRetention;
 	streamAggregator?: boolean;
 	streamReferences?: boolean;
 	failOnReferenceError?: boolean;

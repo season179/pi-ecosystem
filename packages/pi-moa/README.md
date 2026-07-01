@@ -124,6 +124,27 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   turn. Providers that accept the trailing turn are never recorded, so their behavior is
   unchanged, and the default `latest-user` placement never attempts a trailing turn at all.
 
+`aggregatorGuidancePlacement` keeps the prefix **byte-stable** so the cache *can* be reused;
+`aggregatorCacheRetention` controls how **long** that cache lives:
+
+- `aggregatorCacheRetention: "long"` asks the aggregator's provider to keep its prompt cache
+  alive for its long-retention window (Anthropic-style `cache_control.ttl: "1h"`, OpenAI
+  `prompt_cache_retention`) instead of the provider default `"short"` (~5 min on Anthropic).
+  Prompt caching only avoids the aggregator's per-turn re-prefill *while the cache lives*: when
+  a long-running tool or a review pause between turns exceeds the short TTL, the cache expires
+  and the next turn re-prefills the **whole transcript**. `"long"` survives those gaps so the
+  next turn stays a cache hit — dropping its time-to-first-token. Accepts `"none" | "short" |
+  "long"`. It is applied **only to the aggregator**, not the references: references are
+  single-turn advisory calls that never re-hit their own cache, so paying the pricier
+  long-retention cache-*write* for them would be wasted. It is set **after** the caller's
+  options, so a preset governs the aggregator's retention regardless of the caller. It is a
+  pure cache-TTL hint — the generated answer is **byte-identical** either way — and **unset by
+  default** (the aggregator inherits the caller/provider retention exactly as before). The
+  trade-off that keeps it opt-in: long-retention cache writes cost more per token (on Anthropic
+  a 1h write is ~2× base input vs ~1.25× for 5 min), so it only pays off when turn gaps
+  routinely exceed the short TTL. Providers that don't support long retention ignore it (safe
+  no-op).
+
 ### Streaming the aggregator answer (time-to-first-token)
 
 By default the aggregator's answer is delivered to the UI in a **single burst** once it has
