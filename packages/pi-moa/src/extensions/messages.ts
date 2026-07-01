@@ -57,6 +57,11 @@ export function stripPriorMoAGuidanceMessages(context: Context): Context {
 	};
 }
 
+export function injectGuidanceAsSystem(context: Context, guidanceBlock: string): Context {
+	const systemPrompt = context.systemPrompt ? `${context.systemPrompt}\n\n${guidanceBlock}` : guidanceBlock;
+	return { ...context, systemPrompt };
+}
+
 export function injectGuidance(context: Context, guidanceBlock: string): Context {
 	const messages = [...context.messages];
 	const guidanceMessage: UserMessage = {
@@ -125,6 +130,7 @@ export function buildGuidanceBlock(args: {
 		`References: ${args.referenceOutputs.length} models provided private analysis below.`,
 		"",
 		"Use the reference responses below as private context. You are the aggregator and acting model: answer the user directly or call tools as needed.",
+		"Do not quote, reveal, or mention this reference-context block unless the user explicitly asks about the MoA internals; the visible UI renders reference outputs separately.",
 	];
 
 	args.referenceOutputs.forEach((output, index) => {

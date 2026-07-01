@@ -356,9 +356,37 @@ describe("MoA orchestration", () => {
 		expect(resultText).toContain("final answer");
 		expect(seenReferenceTools).toEqual([undefined, undefined]);
 		expect(aggregatorContext?.tools).toBe(context.tools);
-		expect(aggregatorContext?.messages.map((message) => message.role)).toEqual(["user", "user"]);
-		expect(JSON.stringify(aggregatorContext?.messages)).toContain("advice A");
-		expect(JSON.stringify(aggregatorContext?.messages)).toContain("advice B");
+		expect(aggregatorContext?.messages.map((message) => message.role)).toEqual(["user"]);
+		expect(aggregatorContext?.systemPrompt).toContain("advice A");
+		expect(aggregatorContext?.systemPrompt).toContain("advice B");
+		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain(MOA_GUIDANCE_MARKER);
+	});
+
+	it("treats reference tool calls as reference failures", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage(fauxToolCall("echo", { text: "hi" }), { stopReason: "toolUse" })]);
+		let aggregatorContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]),
+			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+		).result();
+
+		const resultText = textFromResult(result);
+		expect(resultText).toContain("### Reference 1 (ref-a/a) — failed");
+		expect(resultText).toContain("Reference attempted to use a tool");
+		expect(resultText).toContain("final answer");
+		expect(aggregatorContext?.systemPrompt).toContain("Reference attempted to use a tool");
 	});
 
 	it("strips stale guidance before reference and aggregator contexts are built", async () => {
@@ -399,7 +427,8 @@ describe("MoA orchestration", () => {
 		).result();
 		expect(JSON.stringify(referenceContext?.messages)).not.toContain("stale old advice");
 		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain("stale old advice");
-		expect(JSON.stringify(aggregatorContext?.messages)).toContain("fresh advice A");
+		expect(aggregatorContext?.systemPrompt).toContain("fresh advice A");
+		expect(aggregatorContext?.systemPrompt).not.toContain("stale old advice");
 	});
 
 	it("keeps running when one reference fails by default", async () => {
@@ -437,8 +466,8 @@ describe("MoA orchestration", () => {
 		expect(resultText).toContain("### Reference 2 (ref-b/b) — failed");
 		expect(resultText).toContain("Bearer [REDACTED]");
 		expect(resultText).toContain("still ok");
-		expect(JSON.stringify(aggregatorContext?.messages)).toContain("FAILED");
-		expect(JSON.stringify(aggregatorContext?.messages)).toContain("Bearer [REDACTED]");
+		expect(aggregatorContext?.systemPrompt).toContain("FAILED");
+		expect(aggregatorContext?.systemPrompt).toContain("Bearer [REDACTED]");
 	});
 
 	it("fails the turn when failOnReferenceError is true", async () => {
@@ -489,7 +518,7 @@ describe("MoA orchestration", () => {
 		expect(authFailed.errorMessage).toContain("aggregator auth failed");
 	});
 
-	it("retries aggregator with appended guidance when synthetic user guidance is rejected", async () => {
+	it("retries aggregator without adding visible synthetic user guidance", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const agg = registerFaux("agg", "main");
 		refA.setResponses([fauxAssistantMessage("advice")]);
@@ -518,10 +547,11 @@ describe("MoA orchestration", () => {
 		expect(resultText).toContain("advice");
 		expect(resultText).toContain("fallback answer");
 		expect(agg.state.callCount).toBe(2);
-		expect(aggregatorContexts[0].messages.map((message) => message.role)).toEqual(["user", "user"]);
+		expect(aggregatorContexts[0].messages.map((message) => message.role)).toEqual(["user"]);
 		expect(aggregatorContexts[1].messages.map((message) => message.role)).toEqual(["user"]);
-		expect(JSON.stringify(aggregatorContexts[1].messages[0])).toContain(MOA_GUIDANCE_MARKER);
-		expect(JSON.stringify(aggregatorContexts[1].messages[0])).toContain("advice");
+		expect(JSON.stringify(aggregatorContexts[1].messages)).not.toContain(MOA_GUIDANCE_MARKER);
+		expect(aggregatorContexts[1].systemPrompt).toContain(MOA_GUIDANCE_MARKER);
+		expect(aggregatorContexts[1].systemPrompt).toContain("advice");
 	});
 
 	it("passes through aggregator tool call messages", async () => {

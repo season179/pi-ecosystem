@@ -13,12 +13,12 @@ import {
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { getPreset, getReferenceConcurrency } from "./config.js";
 import {
-	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
 	buildReferenceContext,
 	buildReferenceDisplayBlock,
 	extractAssistantText,
 	injectGuidance,
+	injectGuidanceAsSystem,
 	redactErrorMessage,
 	stripPriorMoAGuidanceMessages,
 } from "./messages.js";
@@ -117,7 +117,7 @@ export function streamMoA(
 			aggregatorOptions.temperature = preset.aggregatorTemperature;
 		}
 
-		const injectedContext = injectGuidance(strippedContext, guidanceBlock);
+		const injectedContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
 		const injectedResult = await forwardAggregatorStream({
 			model: aggregatorModel,
 			context: injectedContext,
@@ -127,10 +127,10 @@ export function streamMoA(
 		});
 
 		if (injectedResult.kind === "consecutive-user-rejected") {
-			const appendedContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
+			const retriedContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
 			const appendedResult = await forwardAggregatorStream({
 				model: aggregatorModel,
-				context: appendedContext,
+				context: retriedContext,
 				options: aggregatorOptions,
 				outerStream,
 				prefixText: referenceDisplayBlock,
@@ -283,6 +283,9 @@ async function runSingleReference(args: {
 		const message = await completeSimple(args.task.model, args.refContext, referenceOptions);
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(message.errorMessage ?? `Reference stopped with ${message.stopReason}`);
+		}
+		if (message.stopReason === "toolUse" || message.content.some((block) => block.type === "toolCall")) {
+			throw new Error("Reference attempted to use a tool, but MoA reference models run without tools");
 		}
 		return {
 			slot: args.task.slot,
