@@ -373,6 +373,27 @@ describe("MoA config", () => {
 			validateMoAConfig(
 				baseConfig(
 					basePreset({
+						aggregatorGatewayRouting:
+							"anthropic" as unknown as MoAPreset["aggregatorGatewayRouting"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorGatewayRouting/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceGatewayRouting: {
+							order: ["anthropic", 5],
+						} as unknown as MoAPreset["referenceGatewayRouting"],
+					}),
+				),
+			),
+		).toThrow(/referenceGatewayRouting.*order/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
 						aggregatorPrewarm:
 							"yes" as unknown as MoAPreset["aggregatorPrewarm"],
 					}),
@@ -1956,6 +1977,106 @@ describe("MoA orchestration", () => {
 		// synthetic compat is injected, so the reference request is byte-identical.
 		expect(referenceRouting).toBeUndefined();
 		expect(sawCompat).toBeUndefined();
+	});
+
+	it("applies aggregatorGatewayRouting to the aggregator model only, leaving references unrouted", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceGateway: unknown = "sentinel";
+		let aggregatorGateway: unknown;
+		// The faux responder's 4th arg is the exact model object pi-moa handed to
+		// streamSimple, so `model.compat.vercelGatewayRouting` reflects the routing that
+		// would reach Vercel AI Gateway's `providerOptions.gateway` payload field.
+		refA.setResponses([
+			(_context, _options, _state, model) => {
+				referenceGateway = model.compat?.vercelGatewayRouting;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, _options, _state, model) => {
+				aggregatorGateway = model.compat?.vercelGatewayRouting;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorGatewayRouting: { order: ["anthropic", "bedrock"] },
+				}),
+			),
+		).result();
+		// The aggregator is pinned to a preferred Vercel-gateway provider order while the
+		// reference stays unrouted — the knob is aggregator-scoped and, being a distinct
+		// compat field from the OpenRouter knob, never populates openRouterRouting either.
+		expect(aggregatorGateway).toEqual({ order: ["anthropic", "bedrock"] });
+		expect(referenceGateway).toBeUndefined();
+	});
+
+	it("applies referenceGatewayRouting to reference models only, leaving the aggregator unrouted", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		const referenceGateways: unknown[] = [];
+		let aggregatorGateway: unknown = "sentinel";
+		refA.setResponses([
+			(_context, _options, _state, model) => {
+				referenceGateways.push(model.compat?.vercelGatewayRouting);
+				return fauxAssistantMessage("advice a");
+			},
+		]);
+		refB.setResponses([
+			(_context, _options, _state, model) => {
+				referenceGateways.push(model.compat?.vercelGatewayRouting);
+				return fauxAssistantMessage("advice b");
+			},
+		]);
+		agg.setResponses([
+			(_context, _options, _state, model) => {
+				aggregatorGateway = model.compat?.vercelGatewayRouting;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [
+						{ provider: "ref-a", model: "a" },
+						{ provider: "ref-b", model: "b" },
+					],
+					referenceGatewayRouting: { only: ["anthropic"] },
+				}),
+			),
+		).result();
+		// Every reference is restricted to the chosen Vercel-gateway provider while the
+		// aggregator stays unrouted — the knob is reference-scoped and never touches the
+		// aggregator request.
+		expect(referenceGateways).toEqual([{ only: ["anthropic"] }, { only: ["anthropic"] }]);
+		expect(aggregatorGateway).toBeUndefined();
 	});
 
 	it("pre-warms the aggregator's prompt cache over the guidance-free prefix during the reference phase", async () => {

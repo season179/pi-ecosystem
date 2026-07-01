@@ -219,6 +219,16 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"referenceProviderRouting",
 	);
+	readOptionalVercelGatewayRouting(
+		value.aggregatorGatewayRouting,
+		presetName,
+		"aggregatorGatewayRouting",
+	);
+	readOptionalVercelGatewayRouting(
+		value.referenceGatewayRouting,
+		presetName,
+		"referenceGatewayRouting",
+	);
 	if (value.aggregatorPrewarm !== undefined && typeof value.aggregatorPrewarm !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "aggregatorPrewarm" must be a boolean`);
 	}
@@ -377,6 +387,31 @@ function readOptionalOpenRouterRouting(value: unknown, presetName: string, field
 		throw new Error(
 			`MoA preset "${presetName}": "${field}.sort" must be one of ${OPENROUTER_SORTS.join(", ")}`,
 		);
+	}
+}
+
+// The Vercel-AI-Gateway routing knobs are the sibling of the OpenRouter routing knobs
+// for models hosted on Vercel AI Gateway (ai-gateway.vercel.sh): pi-ai reads them from a
+// DISTINCT `compat` field (`vercelGatewayRouting`, not `openRouterRouting`) and applies
+// them only for that gateway's baseUrl. `aggregatorGatewayRouting` pins the aggregator's
+// request; `referenceGatewayRouting` pins every reference's request. The routing shape is
+// `order`/`only` provider-slug lists (prefer / restrict to a faster provider) — no `sort`
+// metric like OpenRouter — so validation confirms it is an object and that `order`/`only`,
+// when present, are arrays of strings. Every other field flows through to pi-ai's typed
+// `VercelGatewayRouting` and is validated at request time rather than duplicated here.
+function readOptionalVercelGatewayRouting(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (!isRecord(value)) {
+		throw new Error(`MoA preset "${presetName}": "${field}" must be an object`);
+	}
+	for (const key of ["order", "only"] as const) {
+		const list = value[key];
+		if (list === undefined) continue;
+		if (!Array.isArray(list) || list.some((slug) => typeof slug !== "string")) {
+			throw new Error(
+				`MoA preset "${presetName}": "${field}.${key}" must be an array of provider slug strings`,
+			);
+		}
 	}
 }
 

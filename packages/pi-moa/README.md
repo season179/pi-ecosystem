@@ -259,33 +259,42 @@ with finer granularity than the five discrete effort levels.
   a little answer quality for latency, so it is **unset by default** (the aggregator
   inherits the caller's budgets exactly as before).
 
-### Steering OpenRouter provider routing
+### Steering provider routing (which upstream backend serves the request)
 
 The reasoning/retention/placement knobs tune *how* a request runs; these tune *which
-upstream backend* serves it. OpenRouter fronts several providers per model and, by default,
+upstream backend* serves it. A gateway fronts several providers per model and, by default,
 balances routing (weighted by price/uptime) — which can land a request on a slow backend.
-Two symmetric knobs steer that selection, one per role:
+Symmetric knobs steer that selection, one per role, per gateway:
 
-- `aggregatorProviderRouting` pins the **aggregator's** request. Its generation is the
-  dominant, **un-bounded** per-turn cost (references are already bounded by
-  quorum/timeout/output caps), so routing it to a faster backend is a direct latency lever.
-- `referenceProviderRouting` pins **every reference's** request. References sit on the
-  aggregator-blocking critical path — the aggregator waits for the slowest (or the quorum-th
-  fastest) reference — so routing them for lowest time-to-first-token / highest throughput
-  directly shortens that phase.
+- `aggregatorProviderRouting` / `referenceProviderRouting` steer **OpenRouter**.
+- `aggregatorGatewayRouting` / `referenceGatewayRouting` steer **Vercel AI Gateway**.
 
-Both pass an OpenRouter [provider-routing](https://openrouter.ai/docs/guides/routing/provider-selection)
-object through to the relevant request. The speed-relevant fields are `sort: "throughput"`
-(route to the highest tokens/sec provider), `sort: "latency"` (lowest time-to-first-token),
-and `preferred_min_throughput` / `preferred_max_latency` (explicit floors/ceilings). Each is
-**role-scoped** (the aggregator knob never touches references and vice versa) and — since
-routing lives on the model's `compat`, which the provider reads only for OpenRouter-hosted
-models — a safe **no-op for a non-openrouter model**. Both are **unset by default** and,
-unlike the pure cache/TTL hints, are **not** shipped in the `default` preset: a different
+The aggregator knobs pin the **aggregator's** request — its generation is the dominant,
+**un-bounded** per-turn cost (references are already bounded by quorum/timeout/output caps),
+so routing it to a faster backend is a direct latency lever. The reference knobs pin **every
+reference's** request — references sit on the aggregator-blocking critical path (the
+aggregator waits for the slowest, or the quorum-th fastest, reference), so routing them for
+lowest time-to-first-token / highest throughput directly shortens that phase.
+
+- **OpenRouter** knobs pass an [provider-routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+  object through to the request. The speed-relevant fields are `sort: "throughput"` (route to
+  the highest tokens/sec provider), `sort: "latency"` (lowest time-to-first-token), and
+  `preferred_min_throughput` / `preferred_max_latency` (explicit floors/ceilings). Applied by
+  pi-ai **only for models whose baseUrl is `openrouter.ai`**.
+  Example: `"referenceProviderRouting": { "sort": "latency" }`.
+- **Vercel AI Gateway** knobs pass an `order` / `only` provider-slug list (prefer, or
+  restrict to, a specific — presumably faster — upstream provider). Applied by pi-ai **only
+  for models whose baseUrl is `ai-gateway.vercel.sh`**.
+  Example: `"aggregatorGatewayRouting": { "order": ["anthropic", "bedrock"] }`.
+
+Each knob is **role-scoped** (the aggregator knob never touches references and vice versa)
+and, since routing lives on a gateway-specific field of the model's `compat`, a safe
+**no-op for a model on the other gateway** (or on neither). All four are **unset by default**
+and, unlike the pure cache/TTL hints, are **not** shipped in the `default` preset: a different
 backend can differ in quantization or behavior and so could subtly shift the aggregator's
-answer (directly, or — for `referenceProviderRouting` — via the reference advice it feeds
-into the aggregator), so they stay opt-in (constrain with `quantizations` / `only` / `ignore`
-if that matters). Example: `"referenceProviderRouting": { "sort": "latency" }`.
+answer (directly, or — for the reference knobs — via the reference advice it feeds into the
+aggregator), so they stay opt-in (constrain with OpenRouter's `quantizations` / `only` /
+`ignore`, or the gateway's `only`, if that matters).
 
 ### Pre-warming the aggregator's prompt cache (overlapping prefill with the reference phase)
 

@@ -7,6 +7,7 @@ import type {
 	ThinkingBudgets,
 	ThinkingLevel,
 	Usage,
+	VercelGatewayRouting,
 } from "@earendil-works/pi-ai";
 
 export interface ModelSlot {
@@ -30,6 +31,7 @@ export interface MoAPreset {
 	referenceReasoning?: ThinkingLevel;
 	referenceThinkingBudgets?: ThinkingBudgets;
 	referenceProviderRouting?: OpenRouterRouting;
+	referenceGatewayRouting?: VercelGatewayRouting;
 	referenceMaxRetries?: number;
 	referenceCacheRetention?: CacheRetention;
 	referenceTemperature?: number;
@@ -39,6 +41,7 @@ export interface MoAPreset {
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	aggregatorCacheRetention?: CacheRetention;
 	aggregatorProviderRouting?: OpenRouterRouting;
+	aggregatorGatewayRouting?: VercelGatewayRouting;
 	aggregatorPrewarm?: boolean;
 	streamAggregator?: boolean;
 	streamReferences?: boolean;

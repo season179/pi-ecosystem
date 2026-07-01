@@ -9,6 +9,7 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 	type ThinkingContent,
+	type VercelGatewayRouting,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
@@ -130,30 +131,32 @@ export function streamMoA(
 			);
 		}
 
-		// Steer OpenRouter's provider routing for the aggregator's request. OpenRouter
-		// fronts several upstream providers per model and, by default, balances routing
-		// (weighted by price/uptime) — which can land the aggregator on a slow backend.
-		// The aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
+		// Steer the aggregator's request to a faster upstream backend. A gateway fronts
+		// several upstream providers per model and, by default, balances routing (weighted
+		// by price/uptime) — which can land the aggregator on a slow backend. The
+		// aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
 		// references, which quorum/timeout/output caps already bound), so pinning it to a
-		// high-throughput / low-latency backend is the most direct latency lever left:
-		// `sort: "throughput"` routes to the fastest tokens/sec provider, `sort:
-		// "latency"` to the lowest time-to-first-token, and preferred_min_throughput /
-		// preferred_max_latency set explicit floors/ceilings. This lives on the model's
-		// `compat` (not the stream options), and pi-ai's openai-completions provider
-		// applies it ONLY when the model's baseUrl points at OpenRouter — so it is a safe
-		// no-op for a non-openrouter aggregator. Aggregator-scoped (references keep their
-		// own routing) and unset by default. Kept opt-in — not shipped in the default
-		// preset — because a different backend can differ in quantization or behavior and
-		// so could subtly shift the answer, unlike a pure cache/TTL hint. Computed up here
-		// (before auth/references) so the optional prompt-cache pre-warm below hits the
-		// exact same routed backend as the real aggregator request.
-		const aggregatorStreamModel =
-			preset.aggregatorProviderRouting !== undefined
-				? withOpenRouterRouting(
-						aggregatorModel,
-						preset.aggregatorProviderRouting,
-					)
-				: aggregatorModel;
+		// faster backend is the most direct latency lever left. Two gateways are covered,
+		// each via its own knob and its own `compat` field (not the stream options):
+		//   - aggregatorProviderRouting → OpenRouter (`sort: "throughput"` = fastest
+		//     tokens/sec, `sort: "latency"` = lowest TTFT, preferred_min_throughput /
+		//     preferred_max_latency = explicit floors/ceilings); applied by pi-ai ONLY when
+		//     the model's baseUrl points at openrouter.ai.
+		//   - aggregatorGatewayRouting → Vercel AI Gateway (`order`/`only` provider lists
+		//     to prefer/restrict a faster provider); applied ONLY when the baseUrl points
+		//     at ai-gateway.vercel.sh.
+		// Each is therefore a safe no-op for a model on the other gateway (or on neither).
+		// Aggregator-scoped (references keep their own routing) and unset by default. Kept
+		// opt-in — not shipped in the default preset — because a different backend can
+		// differ in quantization or behavior and so could subtly shift the answer, unlike a
+		// pure cache/TTL hint. Computed up here (before auth/references) so the optional
+		// prompt-cache pre-warm below hits the exact same routed backend as the real
+		// aggregator request.
+		const aggregatorStreamModel = withProviderRouting(
+			aggregatorModel,
+			preset.aggregatorProviderRouting,
+			preset.aggregatorGatewayRouting,
+		);
 
 		// Resolve auth for the aggregator AND every reference concurrently, up front —
 		// before building the reference context and before any reference streams.
@@ -855,26 +858,26 @@ async function runSingleReference(args: {
 		if (args.preset.referenceCacheRetention !== undefined) {
 			referenceOptions.cacheRetention = args.preset.referenceCacheRetention;
 		}
-		// Steer OpenRouter's provider routing for this reference's request, mirroring
-		// aggregatorProviderRouting on the reference side. References sit on the
+		// Steer this reference's request to a faster upstream backend, mirroring the
+		// aggregator's routing knobs on the reference side. References sit on the
 		// aggregator-blocking critical path — the aggregator waits for the slowest (or
-		// the quorum-th fastest) reference — so pinning them to a low-latency /
-		// high-throughput OpenRouter backend (`sort: "latency"` / `"throughput"`)
-		// directly shortens that phase, the same which-backend lever iteration 20 gave
-		// the aggregator. Routing lives on the model's `compat` (not the stream
-		// options), so clone the model rather than mutate the shared registry object,
-		// and pi-ai applies it ONLY for OpenRouter-hosted models — a safe no-op for a
-		// non-openrouter reference. Opt-in and unset by default; kept opt-in (not
-		// shipped in the default preset) because a different backend can differ in
-		// quantization/behavior and so could subtly shift the reference advice that
-		// feeds the aggregator's persisted answer.
-		const referenceStreamModel =
-			args.preset.referenceProviderRouting !== undefined
-				? withOpenRouterRouting(
-						args.task.model,
-						args.preset.referenceProviderRouting,
-					)
-				: args.task.model;
+		// the quorum-th fastest) reference — so pinning them to a faster backend directly
+		// shortens that phase, the same which-backend lever iteration 20 gave the
+		// aggregator. Two gateways are covered: referenceProviderRouting steers OpenRouter
+		// (`sort: "latency"` / `"throughput"`, applied only for openrouter.ai models) and
+		// referenceGatewayRouting steers Vercel AI Gateway (`order`/`only` provider lists,
+		// applied only for ai-gateway.vercel.sh models). Routing lives on the model's
+		// `compat` (not the stream options), so clone the model rather than mutate the
+		// shared registry object; each is a safe no-op for a reference on the other
+		// gateway (or on neither). Opt-in and unset by default; kept opt-in (not shipped
+		// in the default preset) because a different backend can differ in
+		// quantization/behavior and so could subtly shift the reference advice that feeds
+		// the aggregator's persisted answer.
+		const referenceStreamModel = withProviderRouting(
+			args.task.model,
+			args.preset.referenceProviderRouting,
+			args.preset.referenceGatewayRouting,
+		);
 		const message = await streamReferenceUntilBudget(
 			referenceStreamModel,
 			args.refContext,
@@ -1064,6 +1067,45 @@ function withOpenRouterRouting(
 		...model,
 		compat: { ...model.compat, openRouterRouting: routing },
 	} as Model<Api>;
+}
+
+// The Vercel AI Gateway counterpart of withOpenRouterRouting: return a shallow clone
+// of the model with Vercel-gateway provider routing merged into its `compat`. pi-ai
+// reads `compat.vercelGatewayRouting` (an `order`/`only` provider list) ONLY for models
+// whose baseUrl points at ai-gateway.vercel.sh — a different field and a different
+// baseUrl gate than OpenRouter's `openRouterRouting` — so this is a safe no-op for a
+// non-Vercel-gateway model, and cloning (rather than mutating the shared registry
+// object) keeps the routing from leaking to every other caller of that model. The cast
+// bridges pi-ai's conditional `compat` type for this Vercel-gateway-shaped augmentation.
+function withVercelGatewayRouting(
+	model: Model<Api>,
+	routing: VercelGatewayRouting,
+): Model<Api> {
+	return {
+		...model,
+		compat: { ...model.compat, vercelGatewayRouting: routing },
+	} as Model<Api>;
+}
+
+// Apply whichever role-scoped provider-routing knobs are set to a model. OpenRouter
+// routing and Vercel AI Gateway routing live on DISTINCT `compat` fields that the
+// provider reads only for a matching baseUrl (openrouter.ai vs ai-gateway.vercel.sh),
+// so a given model has at most one that actually applies and setting both is harmless —
+// this composes them without conflict. When neither knob is set the model is returned
+// untouched (no clone, no synthetic compat), so the request stays byte-identical.
+function withProviderRouting(
+	model: Model<Api>,
+	openRouterRouting: OpenRouterRouting | undefined,
+	gatewayRouting: VercelGatewayRouting | undefined,
+): Model<Api> {
+	let routed = model;
+	if (openRouterRouting !== undefined) {
+		routed = withOpenRouterRouting(routed, openRouterRouting);
+	}
+	if (gatewayRouting !== undefined) {
+		routed = withVercelGatewayRouting(routed, gatewayRouting);
+	}
+	return routed;
 }
 
 // Best-effort prompt-cache pre-warm for the aggregator, fired at the top of the
