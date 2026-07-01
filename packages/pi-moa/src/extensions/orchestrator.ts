@@ -101,6 +101,11 @@ export function streamMoA(
 		}
 
 		const referenceContext = buildReferenceContext(strippedContext, preset);
+		// Aggregator auth depends on nothing the reference phase produces, so resolve
+		// it concurrently with the (network-bound) references instead of after them.
+		// getApiKeyAndHeaders is side-effect-free and catches its own errors, so this
+		// overlap is safe and takes one serial round-trip off the critical path.
+		const aggregatorAuthPromise = registry.getApiKeyAndHeaders(aggregatorModel);
 		const resolvedReferenceOutputs = await runReferenceTasks({
 			presetName,
 			preset,
@@ -130,7 +135,7 @@ export function streamMoA(
 			preset,
 			referenceOutputs,
 		});
-		const aggregatorAuth = await registry.getApiKeyAndHeaders(aggregatorModel);
+		const aggregatorAuth = await aggregatorAuthPromise;
 		if (!aggregatorAuth.ok) {
 			throw new Error(
 				`MoA aggregator auth failed for ${preset.aggregator.provider}: ${redactErrorMessage(aggregatorAuth.error)}`,
