@@ -244,12 +244,14 @@ export function streamMoA(
 		} else {
 			primaryContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
 		}
+		const streamIncremental = preset.streamAggregator === true;
 		const primaryResult = await forwardAggregatorStream({
 			model: aggregatorModel,
 			context: primaryContext,
 			options: aggregatorOptions,
 			outerStream,
 			referenceThinking,
+			streamIncremental,
 		});
 
 		if (primaryResult.kind === "consecutive-user-rejected") {
@@ -271,6 +273,7 @@ export function streamMoA(
 				options: aggregatorOptions,
 				outerStream,
 				referenceThinking,
+				streamIncremental,
 			});
 			if (systemResult.kind === "error") {
 				outerStream.end(systemResult.error);
@@ -323,6 +326,10 @@ async function forwardAggregatorStream(args: {
 	options: SimpleStreamOptions;
 	outerStream: AssistantMessageEventStream;
 	referenceThinking: ThinkingContent;
+	// When true, forward the aggregator's incremental content events so its answer
+	// streams to the user token-by-token (time-to-first-token) instead of appearing
+	// in one burst on `done`. Off by default, so the default path is byte-identical.
+	streamIncremental: boolean;
 }): Promise<AggregatorForwardResult> {
 	const innerStream = streamSimple(args.model, args.context, args.options);
 	let isFirstEvent = true;
@@ -350,9 +357,53 @@ async function forwardAggregatorStream(args: {
 			args.outerStream.push({ ...event, error });
 			return { kind: "error", error };
 		}
+		// event is now `start` or an incremental content event.
+		if (args.streamIncremental && event.type !== "start") {
+			// Forward the aggregator's content deltas live. Skip its own `start` — the
+			// reference-thinking prelude already emitted one to the outer stream, and a
+			// second would push a duplicate assistant message into the consumer. Offset
+			// each content index by +1 to reserve index 0 for that prelude, and prepend
+			// the prelude to every partial so the streamed message shape matches the
+			// final `done` message (reference thinking at 0, aggregator content at 1+).
+			args.outerStream.push({
+				...event,
+				contentIndex: event.contentIndex + 1,
+				partial: withReferenceThinkingPrelude(
+					event.partial,
+					args.referenceThinking,
+				),
+			});
+		}
 	}
 
 	return { kind: "completed" };
+}
+
+// Prepend the display-only reference thinking block to a streaming partial so the
+// live-streamed aggregator message matches the final `done` message's shape
+// (reference thinking at content index 0, aggregator content shifted to 1+). Any
+// COMPLETE private-guidance block the aggregator echoed is stripped so it never
+// flashes mid-stream, mirroring the final message's sanitization; empty blocks are
+// deliberately NOT filtered here (unlike the final message) so the partial's
+// content indices stay aligned with the forwarded contentIndex.
+function withReferenceThinkingPrelude(
+	partial: AssistantMessage,
+	referenceThinking: ThinkingContent,
+): AssistantMessage {
+	const content: AssistantMessage["content"] = [referenceThinking];
+	for (const block of partial.content) {
+		if (block.type === "text") {
+			content.push({ ...block, text: stripPrivateMoAGuidance(block.text) });
+		} else if (block.type === "thinking") {
+			content.push({
+				...block,
+				thinking: stripPrivateMoAGuidance(block.thinking),
+			});
+		} else {
+			content.push(block);
+		}
+	}
+	return { ...partial, content };
 }
 
 function prepareAggregatorMessage(

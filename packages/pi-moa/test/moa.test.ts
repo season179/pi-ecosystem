@@ -1,5 +1,6 @@
 import {
 	type Api,
+	type AssistantMessageEvent,
 	type Context,
 	type completeSimple,
 	fauxAssistantMessage,
@@ -239,6 +240,15 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/aggregatorGuidancePlacement/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						streamAggregator: "yes" as unknown as MoAPreset["streamAggregator"],
+					}),
+				),
+			),
+		).toThrow(/streamAggregator/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1177,6 +1187,106 @@ describe("MoA orchestration", () => {
 		const aggMessages = JSON.stringify(aggregatorContext?.messages);
 		expect(aggMessages).toContain("advice A");
 		expect(aggMessages).not.toContain("ref-b/b");
+	});
+
+	it("streams the aggregator answer incrementally when streamAggregator is enabled", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		agg.setResponses([
+			fauxAssistantMessage("the final answer streams in many small chunks"),
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const stream = streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					streamAggregator: true,
+				}),
+			),
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// The aggregator's answer arrives as incremental text_delta events (live
+		// streaming / time-to-first-token) — not just the final `done` burst.
+		const textDeltas = events.filter(
+			(event): event is Extract<AssistantMessageEvent, { type: "text_delta" }> =>
+				event.type === "text_delta",
+		);
+		expect(textDeltas.length).toBeGreaterThan(1);
+		// Reassembled deltas reconstruct exactly the aggregator's answer.
+		expect(textDeltas.map((event) => event.delta).join("")).toBe(
+			"the final answer streams in many small chunks",
+		);
+		// Content is shifted to index 1+ (index 0 is reserved for the reference
+		// thinking prelude), and every streamed partial carries that prelude at 0 so
+		// the live message shape matches the final `done` message.
+		expect(textDeltas.every((event) => event.contentIndex >= 1)).toBe(true);
+		expect(
+			textDeltas.every((event) => {
+				const first = event.partial.content[0];
+				return (
+					first?.type === "thinking" &&
+					first.thinking.startsWith(MOA_REFERENCE_THINKING_MARKER)
+				);
+			}),
+		).toBe(true);
+		// A single `done` still closes the stream, and its final message equals the
+		// buffered behavior (reference thinking at 0, aggregator answer following).
+		const done = events.filter((event) => event.type === "done");
+		expect(done).toHaveLength(1);
+		const finalMessage = (
+			done[0] as Extract<AssistantMessageEvent, { type: "done" }>
+		).message;
+		expect(finalMessage.content[0]?.type).toBe("thinking");
+		expect(textFromResult(finalMessage)).toContain(
+			"the final answer streams in many small chunks",
+		);
+	});
+
+	it("does not stream aggregator content incrementally by default", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		agg.setResponses([fauxAssistantMessage("the final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const stream = streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// With the knob unset the aggregator's answer is NOT streamed — no text_delta
+		// events reach the outer stream; the answer arrives only in the final `done`.
+		expect(events.some((event) => event.type === "text_delta")).toBe(false);
+		const done = events.filter((event) => event.type === "done");
+		expect(done).toHaveLength(1);
+		expect(
+			textFromResult(
+				(done[0] as Extract<AssistantMessageEvent, { type: "done" }>).message,
+			),
+		).toContain("the final answer");
 	});
 
 	it("places guidance as a trailing turn (cache-friendly) without mutating the task message in a tool loop", async () => {

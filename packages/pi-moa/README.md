@@ -123,3 +123,21 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   on a strict provider to **one wasted request per process** instead of one on every tool-loop
   turn. Providers that accept the trailing turn are never recorded, so their behavior is
   unchanged, and the default `latest-user` placement never attempts a trailing turn at all.
+
+### Streaming the aggregator answer (time-to-first-token)
+
+By default the aggregator's answer is delivered to the UI in a **single burst** once it has
+finished generating: MoA consumes the aggregator's stream internally and only forwards the
+final message. The reference outputs stream in first (as the leading thinking block), then
+there is a pause for the whole aggregator generation, then the complete answer appears at
+once. On a long answer this pause is the dominant *perceived* latency of the turn.
+
+- `streamAggregator: true` forwards the aggregator's incremental content events as they are
+  generated, so its answer streams into the UI token-by-token — time-to-first-token drops from
+  the full generation time to the first token. Each forwarded event's content index is offset
+  by one to sit after the reference-thinking block (index 0), and every streamed partial
+  carries that block, so the live message shape matches the final one. Any complete private
+  guidance the aggregator echoes is stripped from the streamed partials just as it is from the
+  final message. It is **unset by default** (buffered), so the default behavior is byte-identical
+  — the *final* persisted message is the same either way; only the live display differs. Enable
+  it for a snappier feel with a streaming-capable UI.
