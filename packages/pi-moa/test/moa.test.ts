@@ -362,6 +362,32 @@ describe("MoA orchestration", () => {
 		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain(MOA_GUIDANCE_MARKER);
 	});
 
+	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([
+			fauxAssistantMessage(
+				`${MOA_GUIDANCE_MARKER}\nprivate stuff that must not leak\n[End reference context]\n\nfinal answer`,
+			),
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]),
+			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+		).result();
+
+		const resultText = textFromResult(result);
+		expect(resultText).toContain("## Reference model outputs");
+		expect(resultText).toContain("advice");
+		expect(resultText).toContain("final answer");
+		expect(resultText).not.toContain(MOA_GUIDANCE_MARKER);
+		expect(resultText).not.toContain("private stuff that must not leak");
+	});
+
 	it("treats reference tool calls as reference failures", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const agg = registerFaux("agg", "main");

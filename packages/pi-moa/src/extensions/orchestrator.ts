@@ -1,7 +1,6 @@
 import {
 	type Api,
 	type AssistantMessage,
-	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
 	type Context,
 	completeSimple,
@@ -20,6 +19,7 @@ import {
 	injectGuidance,
 	injectGuidanceAsSystem,
 	redactErrorMessage,
+	stripPrivateMoAGuidance,
 	stripPriorMoAGuidanceMessages,
 } from "./messages.js";
 import type { MoAConfig, MoAPreset, ModelSlot, ReferenceOutput } from "./types.js";
@@ -184,44 +184,35 @@ async function forwardAggregatorStream(args: {
 		if (isFirstEvent && event.type === "error" && isConsecutiveUserRejection(event.error)) {
 			return { kind: "consecutive-user-rejected" };
 		}
-
 		isFirstEvent = false;
-		const forwardedEvent = args.prefixText ? prependTextToEvent(event, args.prefixText) : event;
-		args.outerStream.push(forwardedEvent);
-		if (forwardedEvent.type === "error") {
-			return { kind: "error", error: forwardedEvent.error };
+
+		if (event.type === "done") {
+			const message = prepareAggregatorMessage(event.message, args.prefixText);
+			args.outerStream.push({ ...event, message });
+			return { kind: "completed" };
+		}
+		if (event.type === "error") {
+			const error = prepareAggregatorMessage(event.error, args.prefixText);
+			args.outerStream.push({ ...event, error });
+			return { kind: "error", error };
 		}
 	}
 
 	return { kind: "completed" };
 }
 
-function prependTextToEvent(event: AssistantMessageEvent, text: string): AssistantMessageEvent {
-	const prependMessage = (message: AssistantMessage): AssistantMessage => ({
-		...message,
-		content: [{ type: "text", text }, ...message.content],
-	});
-	const prependPartial = (partial: AssistantMessage): AssistantMessage => prependMessage(partial);
-	const shiftContentIndex = (contentIndex: number): number => contentIndex + 1;
+function prepareAggregatorMessage(message: AssistantMessage, prefixText?: string): AssistantMessage {
+	const sanitizedContent = message.content
+		.map((block) => {
+			if (block.type !== "text") return block;
+			return { ...block, text: stripPrivateMoAGuidance(block.text).trimStart() };
+		})
+		.filter((block) => block.type !== "text" || block.text.length > 0);
 
-	switch (event.type) {
-		case "start":
-			return { ...event, partial: prependPartial(event.partial) };
-		case "text_start":
-		case "text_delta":
-		case "text_end":
-		case "thinking_start":
-		case "thinking_delta":
-		case "thinking_end":
-		case "toolcall_start":
-		case "toolcall_delta":
-		case "toolcall_end":
-			return { ...event, contentIndex: shiftContentIndex(event.contentIndex), partial: prependPartial(event.partial) };
-		case "done":
-			return { ...event, message: prependMessage(event.message) };
-		case "error":
-			return { ...event, error: prependMessage(event.error) };
-	}
+	return {
+		...message,
+		content: prefixText ? [{ type: "text", text: prefixText }, ...sanitizedContent] : sanitizedContent,
+	};
 }
 
 function isConsecutiveUserRejection(error: AssistantMessage): boolean {

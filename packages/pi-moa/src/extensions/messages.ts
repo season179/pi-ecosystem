@@ -164,6 +164,10 @@ export function extractAssistantText(message: AssistantMessage): string {
 		.trim();
 }
 
+export function stripPrivateMoAGuidance(text: string): string {
+	return stripDelimitedBlock(text, MOA_GUIDANCE_MARKER, "[End reference context]");
+}
+
 export function redactErrorMessage(message: string): string {
 	return message
 		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
@@ -278,13 +282,17 @@ function stripVisibleReferenceBlocksFromMessage(message: Message): Message {
 }
 
 function stripVisibleReferenceBlocks(text: string): string {
+	return stripDelimitedBlock(text, MOA_VISIBLE_REFERENCES_START, MOA_VISIBLE_REFERENCES_END);
+}
+
+function stripDelimitedBlock(text: string, startMarker: string, endMarker: string): string {
 	let stripped = text;
 	while (true) {
-		const start = stripped.indexOf(MOA_VISIBLE_REFERENCES_START);
+		const start = stripped.indexOf(startMarker);
 		if (start === -1) return stripped;
-		const end = stripped.indexOf(MOA_VISIBLE_REFERENCES_END, start);
+		const end = stripped.indexOf(endMarker, start);
 		if (end === -1) return stripped.slice(0, start);
-		stripped = `${stripped.slice(0, start)}${stripped.slice(end + MOA_VISIBLE_REFERENCES_END.length)}`;
+		stripped = `${stripped.slice(0, start)}${stripped.slice(end + endMarker.length)}`;
 	}
 }
 
