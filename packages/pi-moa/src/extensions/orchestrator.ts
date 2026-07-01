@@ -8,21 +8,27 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 	streamSimple,
+	type ThinkingContent,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { getPreset, getReferenceConcurrency } from "./config.js";
 import {
+	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
 	buildReferenceContext,
-	buildReferenceDisplayDetails,
+	buildReferenceThinkingText,
 	extractAssistantText,
-	injectGuidance,
 	injectGuidanceAsSystem,
 	redactErrorMessage,
-	stripPrivateMoAGuidance,
 	stripPriorMoAGuidanceMessages,
+	stripPrivateMoAGuidance,
 } from "./messages.js";
-import type { MoAConfig, MoAPreset, MoAStreamHooks, ModelSlot, ReferenceOutput } from "./types.js";
+import type {
+	MoAConfig,
+	MoAPreset,
+	ModelSlot,
+	ReferenceOutput,
+} from "./types.js";
 
 const EMPTY_USAGE: AssistantMessage["usage"] = {
 	input: 0,
@@ -49,13 +55,17 @@ export function streamMoA(
 	options: SimpleStreamOptions | undefined,
 	registry: ModelRegistry,
 	config: MoAConfig,
-	hooks?: MoAStreamHooks,
 ): AssistantMessageEventStream {
 	const outerStream = createAssistantMessageEventStream();
 
 	(async () => {
 		if (options?.signal?.aborted) {
-			pushFatalError(outerStream, model, "MoA request aborted before references started", "aborted");
+			pushFatalError(
+				outerStream,
+				model,
+				"MoA request aborted before references started",
+				"aborted",
+			);
 			return;
 		}
 
@@ -64,14 +74,19 @@ export function streamMoA(
 		const strippedContext = stripPriorMoAGuidanceMessages(context);
 
 		const referenceTasks: ReferenceTask[] = [];
-		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(preset.referenceModels.length);
+		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(
+			preset.referenceModels.length,
+		);
 		for (const [index, slot] of preset.referenceModels.entries()) {
 			const referenceModel = resolveUnderlyingModel(registry, slot);
 			if (referenceModel) {
 				referenceTasks.push({ slot, model: referenceModel });
 				continue;
 			}
-			const output = failedReferenceOutput(slot, `Model not found: ${slot.provider}/${slot.model}`);
+			const output = failedReferenceOutput(
+				slot,
+				`Model not found: ${slot.provider}/${slot.model}`,
+			);
 			if (preset.failOnReferenceError) {
 				throw new Error(output.errorMessage);
 			}
@@ -80,7 +95,9 @@ export function streamMoA(
 
 		const aggregatorModel = resolveUnderlyingModel(registry, preset.aggregator);
 		if (!aggregatorModel) {
-			throw new Error(`MoA aggregator model not found: ${preset.aggregator.provider}/${preset.aggregator.model}`);
+			throw new Error(
+				`MoA aggregator model not found: ${preset.aggregator.provider}/${preset.aggregator.model}`,
+			);
 		}
 
 		const referenceContext = buildReferenceContext(strippedContext, preset);
@@ -92,19 +109,27 @@ export function streamMoA(
 			options,
 			registry,
 		});
-		const referenceOutputs = mergeReferenceOutputs(preset, prefilledOutputs, resolvedReferenceOutputs);
+		const referenceOutputs = mergeReferenceOutputs(
+			preset,
+			prefilledOutputs,
+			resolvedReferenceOutputs,
+		);
 
 		if (options?.signal?.aborted) {
-			pushFatalError(outerStream, model, "MoA request aborted during reference phase", "aborted");
+			pushFatalError(
+				outerStream,
+				model,
+				"MoA request aborted during reference phase",
+				"aborted",
+			);
 			return;
 		}
 
-		// Hand the reference outputs to the extension, which surfaces them as a
-		// display-only custom message once the turn is idle. Not baked into the
-		// aggregator's answer text, so nothing has to be stripped back out later.
-		hooks?.onReferenceOutputs?.(buildReferenceDisplayDetails(presetName, preset, referenceOutputs));
-
-		const guidanceBlock = buildGuidanceBlock({ presetName, preset, referenceOutputs });
+		const guidanceBlock = buildGuidanceBlock({
+			presetName,
+			preset,
+			referenceOutputs,
+		});
 		const aggregatorAuth = await registry.getApiKeyAndHeaders(aggregatorModel);
 		if (!aggregatorAuth.ok) {
 			throw new Error(
@@ -122,37 +147,72 @@ export function streamMoA(
 			aggregatorOptions.temperature = preset.aggregatorTemperature;
 		}
 
-		const injectedContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
-		const injectedResult = await forwardAggregatorStream({
+		// Emit the reference outputs as a leading, display-only thinking block so
+		// they render ABOVE the aggregator's answer (and during its compute pause).
+		// The block is persisted on the assistant message for the human to see;
+		// the `context` handler strips it (by its sentinel marker) before any model
+		// is called again, so it never re-enters model context. The aggregator
+		// receives the references as private guidance on its own turn (below).
+		const referenceThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: buildReferenceThinkingText(preset, referenceOutputs),
+		};
+		emitReferenceThinkingPrelude(outerStream, model, referenceThinking);
+
+		// Guidance rides on the tail of the latest user message (matches hermes and
+		// keeps the aggregator's stable system-prompt prefix cacheable across turns).
+		const tailContext = appendGuidanceToLatestUser(
+			strippedContext,
+			guidanceBlock,
+		);
+		const tailResult = await forwardAggregatorStream({
 			model: aggregatorModel,
-			context: injectedContext,
+			context: tailContext,
 			options: aggregatorOptions,
 			outerStream,
+			referenceThinking,
 		});
 
-		if (injectedResult.kind === "consecutive-user-rejected") {
-			const retriedContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
-			const appendedResult = await forwardAggregatorStream({
+		if (tailResult.kind === "consecutive-user-rejected") {
+			// A few strict providers reject a user turn whose tail we extended as a
+			// role-alternation error. Fall back to folding the guidance into the
+			// system prompt, which touches no message roles.
+			const systemContext = injectGuidanceAsSystem(
+				strippedContext,
+				guidanceBlock,
+			);
+			const systemResult = await forwardAggregatorStream({
 				model: aggregatorModel,
-				context: retriedContext,
+				context: systemContext,
 				options: aggregatorOptions,
 				outerStream,
+				referenceThinking,
 			});
-			if (appendedResult.kind === "error") {
-				outerStream.end(appendedResult.error);
+			if (systemResult.kind === "error") {
+				outerStream.end(systemResult.error);
 				return;
 			}
-			if (appendedResult.kind === "consecutive-user-rejected") {
-				pushFatalError(outerStream, model, "MoA aggregator rejected consecutive user guidance fallback", "error");
+			if (systemResult.kind === "consecutive-user-rejected") {
+				pushFatalError(
+					outerStream,
+					model,
+					"MoA aggregator rejected guidance in both tail-user and system placements",
+					"error",
+				);
 				return;
 			}
-		} else if (injectedResult.kind === "error") {
-			outerStream.end(injectedResult.error);
+		} else if (tailResult.kind === "error") {
+			outerStream.end(tailResult.error);
 			return;
 		}
 		outerStream.end();
 	})().catch((error: unknown) => {
-		pushFatalError(outerStream, model, redactErrorMessage(errorToString(error)), "error");
+		pushFatalError(
+			outerStream,
+			model,
+			redactErrorMessage(errorToString(error)),
+			"error",
+		);
 	});
 
 	return outerStream;
@@ -178,18 +238,26 @@ async function forwardAggregatorStream(args: {
 	context: Context;
 	options: SimpleStreamOptions;
 	outerStream: AssistantMessageEventStream;
+	referenceThinking: ThinkingContent;
 }): Promise<AggregatorForwardResult> {
 	const innerStream = streamSimple(args.model, args.context, args.options);
 	let isFirstEvent = true;
 
 	for await (const event of innerStream) {
-		if (isFirstEvent && event.type === "error" && isConsecutiveUserRejection(event.error)) {
+		if (
+			isFirstEvent &&
+			event.type === "error" &&
+			isConsecutiveUserRejection(event.error)
+		) {
 			return { kind: "consecutive-user-rejected" };
 		}
 		isFirstEvent = false;
 
 		if (event.type === "done") {
-			const message = prepareAggregatorMessage(event.message);
+			const message = prepareAggregatorMessage(
+				event.message,
+				args.referenceThinking,
+			);
 			args.outerStream.push({ ...event, message });
 			return { kind: "completed" };
 		}
@@ -203,23 +271,49 @@ async function forwardAggregatorStream(args: {
 	return { kind: "completed" };
 }
 
-function prepareAggregatorMessage(message: AssistantMessage): AssistantMessage {
-	// Strip any private MoA guidance the aggregator may have echoed. Reference
-	// outputs are surfaced separately as a custom message, so the aggregator's
-	// answer is left as-is otherwise.
+function prepareAggregatorMessage(
+	message: AssistantMessage,
+	referenceThinking?: ThinkingContent,
+): AssistantMessage {
+	// Strip any private MoA guidance the aggregator may have echoed. A reasoning
+	// aggregator can restate the guidance inside its own thinking, not just its
+	// text, so sanitize both text-bearing block kinds and drop any that strip to
+	// empty. The references render separately as the leading thinking block.
 	const sanitizedContent = message.content
 		.map((block) => {
-			if (block.type !== "text") return block;
-			return { ...block, text: stripPrivateMoAGuidance(block.text).trimStart() };
+			if (block.type === "text") {
+				return {
+					...block,
+					text: stripPrivateMoAGuidance(block.text).trimStart(),
+				};
+			}
+			if (block.type === "thinking") {
+				return {
+					...block,
+					thinking: stripPrivateMoAGuidance(block.thinking).trimStart(),
+				};
+			}
+			return block;
 		})
-		.filter((block) => block.type !== "text" || block.text.length > 0);
+		.filter((block) => {
+			if (block.type === "text") return block.text.length > 0;
+			if (block.type === "thinking") return block.thinking.length > 0;
+			return true;
+		});
 
-	return { ...message, content: sanitizedContent };
+	// Prepend the reference thinking block so it persists (and renders) above the
+	// aggregator's answer. Only on the success path — error messages stay bare.
+	const content = referenceThinking
+		? [referenceThinking, ...sanitizedContent]
+		: sanitizedContent;
+	return { ...message, content };
 }
 
 function isConsecutiveUserRejection(error: AssistantMessage): boolean {
 	const message = error.errorMessage ?? "";
-	return /consecutive|alternat|user.*user|expected.*assistant.*got.*user|roles? must/i.test(message);
+	return /consecutive|alternat|user.*user|expected.*assistant.*got.*user|roles? must/i.test(
+		message,
+	);
 }
 
 async function runReferenceTasks(args: {
@@ -230,7 +324,10 @@ async function runReferenceTasks(args: {
 	options: SimpleStreamOptions | undefined;
 	registry: ModelRegistry;
 }): Promise<ReferenceOutput[]> {
-	const concurrency = Math.min(getReferenceConcurrency(args.preset), Math.max(1, args.referenceTasks.length));
+	const concurrency = Math.min(
+		getReferenceConcurrency(args.preset),
+		Math.max(1, args.referenceTasks.length),
+	);
 	const results: ReferenceOutput[] = new Array(args.referenceTasks.length);
 	let nextIndex = 0;
 
@@ -245,7 +342,9 @@ async function runReferenceTasks(args: {
 	}
 
 	await Promise.all(Array.from({ length: concurrency }, () => worker()));
-	return results.filter((output): output is ReferenceOutput => output !== undefined);
+	return results.filter(
+		(output): output is ReferenceOutput => output !== undefined,
+	);
 }
 
 async function runSingleReference(args: {
@@ -262,14 +361,20 @@ async function runSingleReference(args: {
 		}
 		const auth = await args.registry.getApiKeyAndHeaders(args.task.model);
 		if (!auth.ok) {
-			throw new Error(`Authentication failed for ${args.task.slot.provider}: ${auth.error}`);
+			throw new Error(
+				`Authentication failed for ${args.task.slot.provider}: ${auth.error}`,
+			);
 		}
 		// Drop the payload-mutation hooks before forwarding options to a reference.
 		// `onPayload` runs against the raw provider payload right before send and
 		// could inject tool schemas (the one path by which a reference could still
 		// receive tools even though the Context carries none); `onResponse` is an
 		// acting-agent concern. References are advisory and must stay tool-free.
-		const { onPayload: _onPayload, onResponse: _onResponse, ...forwardableOptions } = args.options ?? {};
+		const {
+			onPayload: _onPayload,
+			onResponse: _onResponse,
+			...forwardableOptions
+		} = args.options ?? {};
 		const referenceOptions: SimpleStreamOptions = {
 			...forwardableOptions,
 			apiKey: auth.apiKey,
@@ -279,12 +384,23 @@ async function runSingleReference(args: {
 		if (typeof args.preset.referenceTemperature === "number") {
 			referenceOptions.temperature = args.preset.referenceTemperature;
 		}
-		const message = await completeSimple(args.task.model, args.refContext, referenceOptions);
+		const message = await completeSimple(
+			args.task.model,
+			args.refContext,
+			referenceOptions,
+		);
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
-			throw new Error(message.errorMessage ?? `Reference stopped with ${message.stopReason}`);
+			throw new Error(
+				message.errorMessage ?? `Reference stopped with ${message.stopReason}`,
+			);
 		}
-		if (message.stopReason === "toolUse" || message.content.some((block) => block.type === "toolCall")) {
-			throw new Error("Reference attempted to use a tool, but MoA reference models run without tools");
+		if (
+			message.stopReason === "toolUse" ||
+			message.content.some((block) => block.type === "toolCall")
+		) {
+			throw new Error(
+				"Reference attempted to use a tool, but MoA reference models run without tools",
+			);
 		}
 		return {
 			slot: args.task.slot,
@@ -301,9 +417,14 @@ async function runSingleReference(args: {
 	}
 }
 
-function resolveUnderlyingModel(registry: ModelRegistry, slot: ModelSlot): Model<Api> | undefined {
+function resolveUnderlyingModel(
+	registry: ModelRegistry,
+	slot: ModelSlot,
+): Model<Api> | undefined {
 	if (slot.provider === "moa") {
-		throw new Error(`MoA cannot call recursive model ${slot.provider}/${slot.model}`);
+		throw new Error(
+			`MoA cannot call recursive model ${slot.provider}/${slot.model}`,
+		);
 	}
 	return registry.find(slot.provider, slot.model);
 }
@@ -326,10 +447,15 @@ function mergeReferenceOutputs(
 	}
 	return outputs.length > 0
 		? outputs
-		: preset.referenceModels.map((slot) => failedReferenceOutput(slot, "Reference was not run"));
+		: preset.referenceModels.map((slot) =>
+				failedReferenceOutput(slot, "Reference was not run"),
+			);
 }
 
-function failedReferenceOutput(slot: ModelSlot, error: string): ReferenceOutput {
+function failedReferenceOutput(
+	slot: ModelSlot,
+	error: string,
+): ReferenceOutput {
 	const errorMessage = redactErrorMessage(error);
 	return {
 		slot,
@@ -337,6 +463,49 @@ function failedReferenceOutput(slot: ModelSlot, error: string): ReferenceOutput 
 		text: errorMessage,
 		errorMessage,
 	};
+}
+
+// Push the reference thinking block onto the outer stream as a live prelude: a
+// `start`, then thinking start/delta/end for content index 0. This surfaces the
+// references during the reference/aggregator compute pause. The same block is
+// prepended to the final `done` message (see prepareAggregatorMessage) so it
+// persists on the assistant message; these events are the streaming view of it.
+// The EventStream does not accumulate partials, so each event carries the full
+// partial assistant message it represents.
+function emitReferenceThinkingPrelude(
+	outerStream: AssistantMessageEventStream,
+	model: Model<Api>,
+	referenceThinking: ThinkingContent,
+): void {
+	const partial = (content: AssistantMessage["content"]): AssistantMessage => ({
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: EMPTY_USAGE,
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+	const text = referenceThinking.thinking;
+	outerStream.push({ type: "start", partial: partial([]) });
+	outerStream.push({
+		type: "thinking_start",
+		contentIndex: 0,
+		partial: partial([{ type: "thinking", thinking: "" }]),
+	});
+	outerStream.push({
+		type: "thinking_delta",
+		contentIndex: 0,
+		delta: text,
+		partial: partial([referenceThinking]),
+	});
+	outerStream.push({
+		type: "thinking_end",
+		contentIndex: 0,
+		content: text,
+		partial: partial([referenceThinking]),
+	});
 }
 
 function pushFatalError(

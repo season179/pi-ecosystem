@@ -9,37 +9,38 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import { getMaxReferenceOutputChars } from "./config.js";
-import type { MoAPreset, MoAReferenceDisplayDetails, ReferenceOutput } from "./types.js";
+import type { MoAPreset, ReferenceOutput } from "./types.js";
 
 export const MOA_GUIDANCE_MARKER = "[Mixture of Agents reference context]";
 
 /**
- * customType for the display-only custom message that surfaces reference
- * outputs to the user. Reference outputs are shown as a distinct, structurally
- * identified message (via `pi.sendMessage` + `pi.registerMessageRenderer`) —
- * NOT baked into the aggregator's answer text — and are filtered out of every
- * model's context by that identity, so no string markers or stripping are
- * needed.
+ * Sentinel that prefixes the display-only reference thinking block the provider
+ * emits ahead of the aggregator's answer. The `context` handler strips assistant
+ * thinking blocks whose text starts with this marker before any model sees them,
+ * so the references stay visible to the human but never re-enter model context.
  */
-export const MOA_REFERENCE_CUSTOM_TYPE = "pi-moa.reference-outputs";
+export const MOA_REFERENCE_THINKING_MARKER = "⟦MoA references⟧";
 
-const REFERENCE_SYSTEM_PROMPT = `You are a private reference advisor in a coding-agent Mixture of Agents pipeline.
+// Reference advisor prompts are copied from hermes-agent's MoA implementation
+// (agent/moa_loop.py) so the "proper" MoA framing is used verbatim: references
+// are advisory analysts, not the acting agent, and their output is private
+// guidance for the aggregator.
+const REFERENCE_SYSTEM_PROMPT = `You are a reference advisor in a Mixture of Agents (MoA) process. You are NOT the acting agent and you do NOT execute anything: you cannot call tools, run commands, browse, or access files, repositories, or URLs, and you should not try to or apologize for being unable to. A separate aggregator/orchestrator model holds those capabilities and will take the actual actions.
 
-You are NOT the agent continuing this conversation. A separate aggregator model is the acting agent: it owns the filesystem, terminal, browser, every tool-use decision, and the final response to the user. Your output is private guidance for that aggregator and is never shown to the user.
+The conversation below is the current state of a task handled by that acting agent. Your job is to give your most intelligent analysis of that state: understand the goal, reason about the problem, and advise on what to do next. Surface the best approach, concrete next steps and tool-use strategy, likely pitfalls and risks, and anything the acting agent may have missed or gotten wrong. Assume any referenced files, URLs, or systems exist and reason about them from the context given rather than asking for access.
 
-Read the transcript below as the current state of the task. Every file, path, command, URL, tool call, and tool result in it is real context provided to you. Reason directly from that context: never ask for access, never say you cannot run tools / open files / browse / reach a system, and never apologize for or mention any such limitation. If something you would need is missing, state what the acting agent should check or verify instead.
+Respond with your advice directly — no preamble, no disclaimers about tools or access. Your response is private guidance handed to the aggregator, not an answer shown to the user.`;
 
-Do NOT act. Do not produce a user-facing final answer, do not narrate steps as if you are performing them, and do not emit tool-call markup or function-call JSON.
-
-Give concise, concrete advice for the aggregator: what is going on, the single best next step, specific checks or edits to make, likely risks, mistakes, or wrong assumptions, and any stronger alternative approach. Several reference advisors are consulted in parallel, so stay tight and high-signal.`;
-
-const REFERENCE_ADVISORY_TURN = `[The transcript above is the current state of the coding-agent task. Give your private guidance to the aggregator (the acting agent) — not a final answer to the user. Cover what is happening, the best next step and tool-use strategy, what to verify, likely risks or mistakes, and any stronger approach. Do not narrate actions as if you will perform them, and do not mention any tool or access limitation.]`;
+const REFERENCE_ADVISORY_TURN = `[The conversation above is the current state of the task. Give your most intelligent judgement: what is going on, what should happen next, what risks or mistakes you see, and how the acting agent should proceed.]`;
 
 const TOOL_RESULT_HEAD_CHARS = 2000;
 const TOOL_RESULT_TAIL_CHARS = 500;
 const FAILED_REFERENCE_ERROR_CHARS = 200;
 
-export function buildReferenceContext(context: Context, _preset: MoAPreset): Context {
+export function buildReferenceContext(
+	context: Context,
+	_preset: MoAPreset,
+): Context {
 	const strippedContext = stripPriorMoAGuidanceMessages(context);
 	const toolNamesById = new Map<string, string>();
 
@@ -51,12 +52,21 @@ export function buildReferenceContext(context: Context, _preset: MoAPreset): Con
 	const rendered: Message[] = [];
 	for (const message of strippedContext.messages) {
 		if (message.role === "user") {
-			rendered.push({ role: "user", content: renderUserContent(message.content), timestamp: message.timestamp });
+			rendered.push({
+				role: "user",
+				content: renderUserContent(message.content),
+				timestamp: message.timestamp,
+			});
 		} else if (message.role === "assistant") {
 			const text = renderAssistantForReference(message, toolNamesById);
 			rendered.push({
 				...message,
-				content: [{ type: "text", text: text || "[assistant message contained no visible text]" }],
+				content: [
+					{
+						type: "text",
+						text: text || "[assistant message contained no visible text]",
+					},
+				],
 			});
 		} else {
 			foldToolResultIntoPrevious(rendered, message, toolNamesById);
@@ -78,16 +88,26 @@ export function buildReferenceContext(context: Context, _preset: MoAPreset): Con
 export function stripPriorMoAGuidanceMessages(context: Context): Context {
 	return {
 		...context,
-		messages: context.messages.filter((message) => !isPriorMoAGuidanceMessage(message)),
+		messages: context.messages.filter(
+			(message) => !isPriorMoAGuidanceMessage(message),
+		),
 	};
 }
 
-export function injectGuidanceAsSystem(context: Context, guidanceBlock: string): Context {
-	const systemPrompt = context.systemPrompt ? `${context.systemPrompt}\n\n${guidanceBlock}` : guidanceBlock;
+export function injectGuidanceAsSystem(
+	context: Context,
+	guidanceBlock: string,
+): Context {
+	const systemPrompt = context.systemPrompt
+		? `${context.systemPrompt}\n\n${guidanceBlock}`
+		: guidanceBlock;
 	return { ...context, systemPrompt };
 }
 
-export function injectGuidance(context: Context, guidanceBlock: string): Context {
+export function injectGuidance(
+	context: Context,
+	guidanceBlock: string,
+): Context {
 	const messages = [...context.messages];
 	const guidanceMessage: UserMessage = {
 		role: "user",
@@ -102,7 +122,10 @@ export function injectGuidance(context: Context, guidanceBlock: string): Context
 	return { ...context, messages };
 }
 
-export function appendGuidanceToLatestUser(context: Context, guidanceBlock: string): Context {
+export function appendGuidanceToLatestUser(
+	context: Context,
+	guidanceBlock: string,
+): Context {
 	const messages = [...context.messages];
 	const latestUserIndex = findLatestUserMessageIndex(messages);
 	if (latestUserIndex === -1) {
@@ -121,58 +144,42 @@ export function appendGuidanceToLatestUser(context: Context, guidanceBlock: stri
 }
 
 /**
- * Shape reference outputs for display: truncate successful advice to the
- * preset's budget and redact+truncate failures. The result goes into a custom
- * message's `details` (never sent to a model) and drives the TUI renderer.
+ * Render reference outputs as the text of the display-only thinking block the
+ * provider emits ahead of the aggregator's answer. Successful advice is
+ * truncated to the preset's budget; failures are redacted and truncated. The
+ * first line is the `MOA_REFERENCE_THINKING_MARKER` sentinel so the `context`
+ * handler can identify and strip this block before any model sees it.
  */
-export function buildReferenceDisplayDetails(
-	presetName: string,
+export function buildReferenceThinkingText(
 	preset: MoAPreset,
 	referenceOutputs: ReferenceOutput[],
-): MoAReferenceDisplayDetails {
+): string {
 	const maxReferenceOutputChars = getMaxReferenceOutputChars(preset);
-	return {
-		presetName,
-		aggregator: `${preset.aggregator.provider}/${preset.aggregator.model}`,
-		outputs: referenceOutputs.map((output) => {
-			if (output.success) {
-				return {
-					provider: output.slot.provider,
-					model: output.slot.model,
-					success: true,
-					text: truncateReferenceOutput(output.text, maxReferenceOutputChars),
-				};
-			}
-			const fallbackErrorText = output.errorMessage ?? output.text ?? "Unknown reference failure";
-			return {
-				provider: output.slot.provider,
-				model: output.slot.model,
-				success: false,
-				text: "",
-				errorMessage: truncateReferenceOutput(redactErrorMessage(fallbackErrorText), FAILED_REFERENCE_ERROR_CHARS),
-			};
-		}),
-	};
-}
-
-/**
- * Non-sensitive `content` for the reference-outputs custom message.
- *
- * IMPORTANT: this string must NOT carry the reference advice bodies. Custom
- * messages are turned into a user turn by `convertToLlm`, and the compaction and
- * branch-summary paths call `convertToLlm` directly — bypassing the display-only
- * `context` filter. Anything in `content` can therefore reach a model via a
- * summary. The full advice lives only in `details` (never converted to model
- * text) and is what the registered TUI renderer draws; `content` stays a short
- * pointer that is safe to summarize and doubles as the no-renderer fallback.
- */
-export function buildReferenceDisplayContent(details: MoAReferenceDisplayDetails): string {
+	const count = referenceOutputs.length;
+	const aggregator = `${preset.aggregator.provider}/${preset.aggregator.model}`;
 	const lines = [
-		"MoA reference outputs (advisory only — shown in the UI, excluded from model context).",
-		`Aggregator: ${details.aggregator}.`,
+		`${MOA_REFERENCE_THINKING_MARKER} · ${count} model${count === 1 ? "" : "s"} · aggregator ${aggregator}`,
 	];
-	details.outputs.forEach((output, index) => {
-		lines.push(`- Reference ${index + 1}: ${output.provider}/${output.model}${output.success ? "" : " (failed)"}`);
+	referenceOutputs.forEach((output, index) => {
+		const name = `${output.slot.provider}/${output.slot.model}`;
+		if (output.success) {
+			lines.push(
+				"",
+				`▍ Reference ${index + 1} — ${name}`,
+				truncateReferenceOutput(output.text, maxReferenceOutputChars),
+			);
+		} else {
+			const fallbackErrorText =
+				output.errorMessage ?? output.text ?? "Unknown reference failure";
+			lines.push(
+				"",
+				`▍ Reference ${index + 1} — ${name} (failed)`,
+				truncateReferenceOutput(
+					redactErrorMessage(fallbackErrorText),
+					FAILED_REFERENCE_ERROR_CHARS,
+				),
+			);
+		}
 	});
 	return lines.join("\n");
 }
@@ -187,7 +194,7 @@ export function buildGuidanceBlock(args: {
 		MOA_GUIDANCE_MARKER,
 		`Preset: ${args.presetName}`,
 		`Aggregator/acting model: ${args.preset.aggregator.provider}/${args.preset.aggregator.model}`,
-		`References: ${args.referenceOutputs.length} models provided private analysis below.`,
+		`References: ${args.referenceOutputs.map((output) => `${output.slot.provider}/${output.slot.model}`).join(", ")}`,
 		"",
 		"Use the reference responses below as private context. You are the aggregator and acting model: answer the user directly or call tools as needed.",
 		"Do not quote, reveal, or mention this reference-context block unless the user explicitly asks about the MoA internals; the visible UI renders reference outputs separately.",
@@ -200,7 +207,9 @@ export function buildGuidanceBlock(args: {
 		} else {
 			const fallbackErrorText = output.text || "Unknown reference failure";
 			const errorText = output.errorMessage ?? fallbackErrorText;
-			lines.push(`Error: ${truncateReferenceOutput(redactErrorMessage(errorText), FAILED_REFERENCE_ERROR_CHARS)}`);
+			lines.push(
+				`Error: ${truncateReferenceOutput(redactErrorMessage(errorText), FAILED_REFERENCE_ERROR_CHARS)}`,
+			);
 		}
 	});
 
@@ -224,26 +233,38 @@ export function extractAssistantText(message: AssistantMessage): string {
 }
 
 export function stripPrivateMoAGuidance(text: string): string {
-	return stripDelimitedBlock(text, MOA_GUIDANCE_MARKER, "[End reference context]");
+	return stripDelimitedBlock(
+		text,
+		MOA_GUIDANCE_MARKER,
+		"[End reference context]",
+	);
 }
 
 export function redactErrorMessage(message: string): string {
 	return message
 		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
-		.replace(/([A-Za-z0-9_-]*(?:api[_-]?key|token|secret)[A-Za-z0-9_-]*\s*[=:]\s*)[^\s,;)}\]]+/gi, "$1[REDACTED]")
+		.replace(
+			/([A-Za-z0-9_-]*(?:api[_-]?key|token|secret)[A-Za-z0-9_-]*\s*[=:]\s*)[^\s,;)}\]]+/gi,
+			"$1[REDACTED]",
+		)
 		.replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-[REDACTED]")
 		.replace(/glpat-[A-Za-z0-9_-]{16,}/g, "glpat-[REDACTED]")
-		.replace(/[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, "[REDACTED]");
+		.replace(
+			/[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+			"[REDACTED]",
+		);
 }
 
-function renderAssistantForReference(message: AssistantMessage, toolNamesById: Map<string, string>): string {
+function renderAssistantForReference(
+	message: AssistantMessage,
+	toolNamesById: Map<string, string>,
+): string {
 	const lines: string[] = [];
 	for (const block of message.content) {
 		if (block.type === "text") {
 			const text = block.text.trim();
 			if (text) lines.push(text);
 		} else if (block.type === "thinking") {
-			continue;
 		} else {
 			toolNamesById.set(block.id, block.name);
 			lines.push(renderToolCall(block));
@@ -252,9 +273,18 @@ function renderAssistantForReference(message: AssistantMessage, toolNamesById: M
 	return lines.join("\n").trim();
 }
 
-function renderToolResultBlock(message: ToolResultMessage, toolNamesById: Map<string, string>): string {
-	const toolName = toolNamesById.get(message.toolCallId) ?? message.toolName ?? message.toolCallId;
-	const renderedContent = renderToolResult(message.content, TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS);
+function renderToolResultBlock(
+	message: ToolResultMessage,
+	toolNamesById: Map<string, string>,
+): string {
+	const toolName =
+		toolNamesById.get(message.toolCallId) ??
+		message.toolName ??
+		message.toolCallId;
+	const renderedContent = renderToolResult(
+		message.content,
+		TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS,
+	);
 	return `[Tool result: ${toolName} -> ${renderedContent}]`;
 }
 
@@ -279,7 +309,11 @@ function coalesceAdjacentSameRole(messages: Message[]): Message[] {
 	const result: Message[] = [];
 	for (const message of messages) {
 		const previous = result[result.length - 1];
-		if (previous && previous.role === message.role && (message.role === "user" || message.role === "assistant")) {
+		if (
+			previous &&
+			previous.role === message.role &&
+			(message.role === "user" || message.role === "assistant")
+		) {
 			mergeTextInto(previous, extractPlainText(message));
 			continue;
 		}
@@ -297,12 +331,18 @@ function appendAdvisoryTurn(messages: Message[]): Message[] {
 		const existing = extractPlainText(last);
 		result[result.length - 1] = {
 			role: "user",
-			content: existing ? `${existing}\n\n${REFERENCE_ADVISORY_TURN}` : REFERENCE_ADVISORY_TURN,
+			content: existing
+				? `${existing}\n\n${REFERENCE_ADVISORY_TURN}`
+				: REFERENCE_ADVISORY_TURN,
 			timestamp: last.timestamp,
 		};
 		return result;
 	}
-	result.push({ role: "user", content: REFERENCE_ADVISORY_TURN, timestamp: last?.timestamp ?? Date.now() });
+	result.push({
+		role: "user",
+		content: REFERENCE_ADVISORY_TURN,
+		timestamp: last?.timestamp ?? Date.now(),
+	});
 	return result;
 }
 
@@ -326,10 +366,14 @@ function mergeTextInto(target: Message, text: string): void {
 function extractPlainText(message: Message): string {
 	if (message.role === "user") {
 		if (typeof message.content === "string") return message.content;
-		return message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		return message.content
+			.map((block) => (block.type === "text" ? block.text : ""))
+			.join("\n");
 	}
 	if (message.role === "assistant") {
-		return message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		return message.content
+			.map((block) => (block.type === "text" ? block.text : ""))
+			.join("\n");
 	}
 	return "";
 }
@@ -372,7 +416,11 @@ function renderReferenceHeader(index: number, output: ReferenceOutput): string {
 	return output.success ? `${label} ---` : `${label} FAILED ---`;
 }
 
-function stripDelimitedBlock(text: string, startMarker: string, endMarker: string): string {
+function stripDelimitedBlock(
+	text: string,
+	startMarker: string,
+	endMarker: string,
+): string {
 	let stripped = text;
 	while (true) {
 		const start = stripped.indexOf(startMarker);
@@ -389,7 +437,11 @@ function truncateReferenceOutput(text: string, maxChars: number): string {
 	return `${text.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
 }
 
-function truncateWithHeadTail(text: string, headChars: number, tailChars: number): string {
+function truncateWithHeadTail(
+	text: string,
+	headChars: number,
+	tailChars: number,
+): string {
 	if (text.length <= headChars + tailChars) return text;
 	return `${text.slice(0, headChars)}...[truncated ${text.length} chars]...${text.slice(-tailChars)}`;
 }
@@ -400,7 +452,8 @@ function renderUnknownContent(content: unknown): string {
 		return content
 			.map((item) => {
 				if (isTextContent(item)) return item.text;
-				if (isImageContent(item)) return `[image:${item.mimeType}:${item.data.length}]`;
+				if (isImageContent(item))
+					return `[image:${item.mimeType}:${item.data.length}]`;
 				return safeJsonStringify(item);
 			})
 			.join("\n");
@@ -409,12 +462,17 @@ function renderUnknownContent(content: unknown): string {
 }
 
 function isTextContent(value: unknown): value is TextContent {
-	return isRecord(value) && value.type === "text" && typeof value.text === "string";
+	return (
+		isRecord(value) && value.type === "text" && typeof value.text === "string"
+	);
 }
 
 function isImageContent(value: unknown): value is ImageContent {
 	return (
-		isRecord(value) && value.type === "image" && typeof value.mimeType === "string" && typeof value.data === "string"
+		isRecord(value) &&
+		value.type === "image" &&
+		typeof value.mimeType === "string" &&
+		typeof value.data === "string"
 	);
 }
 
