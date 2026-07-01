@@ -166,6 +166,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
 	readOptionalThinkingLevel(value.aggregatorReasoning, presetName, "aggregatorReasoning");
 	readOptionalThinkingBudgets(value.aggregatorThinkingBudgets, presetName, "aggregatorThinkingBudgets");
+	readOptionalThinkingBudgets(value.referenceThinkingBudgets, presetName, "referenceThinkingBudgets");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,
@@ -285,15 +286,17 @@ function readOptionalThinkingLevel(value: unknown, presetName: string, field: st
 	}
 }
 
-// The aggregator-thinking-budgets knob sets precise per-effort-level thinking
-// TOKEN budgets for the aggregator, overriding the coarse default budget that a
-// reasoning effort level maps to. It is the finer-grained companion to
-// `aggregatorReasoning`: keep a given effort level while bounding (or raising)
-// the thinking tokens it spends before answering — the dominant per-turn cost.
-// It maps to pi-ai's `ThinkingBudgets` (honored by token-based providers:
-// native Anthropic / Google / Bedrock), so validation is light — confirm it is
-// an object and that each known thinking-level budget, when present, is a
-// positive integer (token counts). Unknown keys flow through to pi-ai untouched.
+// The thinking-budgets knobs set precise per-effort-level thinking TOKEN budgets,
+// overriding the coarse default budget that a reasoning effort level maps to.
+// They are the finer-grained companions to the reasoning-effort knobs:
+// `aggregatorThinkingBudgets` bounds (or raises) the tokens the aggregator spends
+// thinking before it answers — the dominant per-turn cost; `referenceThinkingBudgets`
+// does the same per reference (whose thinking is discarded downstream anyway), the
+// finer-grained companion to `referenceReasoning`. Both map to pi-ai's
+// `ThinkingBudgets` (honored by token-based providers: native Anthropic / Google /
+// Bedrock), so validation is light — confirm it is an object and that each known
+// thinking-level budget, when present, is a positive integer (token counts). Unknown
+// keys flow through to pi-ai untouched.
 const THINKING_BUDGET_LEVELS = ["minimal", "low", "medium", "high"] as const;
 
 function readOptionalThinkingBudgets(value: unknown, presetName: string, field: string): void {

@@ -417,6 +417,36 @@ describe("MoA config", () => {
 				),
 			),
 		).not.toThrow();
+		// referenceThinkingBudgets shares the same validator, so it rejects a
+		// non-object and a non-positive-integer budget, and accepts a valid map.
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceThinkingBudgets:
+							"high" as unknown as MoAPreset["referenceThinkingBudgets"],
+					}),
+				),
+			),
+		).toThrow(/referenceThinkingBudgets/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceThinkingBudgets: {
+							medium: 0,
+						} as unknown as MoAPreset["referenceThinkingBudgets"],
+					}),
+				),
+			),
+		).toThrow(/referenceThinkingBudgets.*medium/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({ referenceThinkingBudgets: { high: 2000, minimal: 512 } }),
+				),
+			),
+		).not.toThrow();
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1392,6 +1422,89 @@ describe("MoA orchestration", () => {
 		// ...and with no preset override the aggregator inherits them exactly as
 		// before — zero behavioral change by default.
 		expect(aggregatorThinkingBudgets).toEqual({ high: 2048 });
+	});
+
+	it("applies referenceThinkingBudgets to the references only, overriding the caller and leaving the aggregator untouched", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceThinkingBudgets: unknown;
+		let aggregatorThinkingBudgets: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller sets a thinking-budget preference across the board...
+			{ thinkingBudgets: { high: 8192 } },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceThinkingBudgets: { high: 2000, minimal: 512 },
+				}),
+			),
+		).result();
+		// ...but the preset pins the reference's per-level thinking token budgets
+		// (bounding its discarded-downstream thinking on the aggregator-blocking path),
+		// while the aggregator keeps the caller's — the reference knob is
+		// reference-scoped and never touches the aggregator.
+		expect(referenceThinkingBudgets).toEqual({ high: 2000, minimal: 512 });
+		expect(aggregatorThinkingBudgets).toEqual({ high: 8192 });
+	});
+
+	it("leaves references inheriting the caller's thinkingBudgets when referenceThinkingBudgets is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceThinkingBudgets: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ thinkingBudgets: { high: 4096 } },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no preset override the reference inherits the caller's budgets exactly
+		// as before — zero behavioral change by default.
+		expect(referenceThinkingBudgets).toEqual({ high: 4096 });
 	});
 
 	it("applies aggregatorCacheRetention to the aggregator only, overriding the caller and leaving references untouched", async () => {

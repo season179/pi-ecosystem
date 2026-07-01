@@ -77,6 +77,24 @@ the reference's text is kept), and the stream-and-abort above counts text — no
   to a no-op. Because thinking still improves the reference's kept advice, this trades a
   little advice quality for latency, so it stays opt-in.
 
+- `referenceThinkingBudgets` is the finer-grained companion to `referenceReasoning` (and
+  the reference-side mirror of `aggregatorThinkingBudgets`). A reasoning effort level maps
+  to a *default* thinking-token budget (roughly `minimal: 1024`, `low: 2048`, `medium:
+  8192`, `high: 16384`); this `{ minimal?, low?, medium?, high? }` map of positive-integer
+  token counts overrides those exact numbers per level for reference requests only, so a
+  preset can keep a reference's effort level while precisely bounding how many thinking
+  tokens it burns before emitting its (discarded-downstream) advice — e.g. keep
+  `referenceReasoning: "high"` but set `{ high: 2000 }`. Because a reference's thinking
+  never reaches the aggregator or the display (only its text is kept), trimming its budget
+  is a *purer* latency win than the aggregator side, where thinking shapes the answer. It
+  is applied **after** the caller's options and to **only the references**, so a preset
+  governs reference budgets independent of the caller *and* of `aggregatorThinkingBudgets`
+  — completing the role-scoped thinking-budgets matrix. It is honored by **token-based
+  providers** (native Anthropic / Google / Bedrock); pi-ai's OpenAI-completions provider
+  (the default `openrouter` fleet) ignores it, so it is a safe provider-side **no-op**
+  there — this lever pays off when a reference is a native token-based model. **Unset by
+  default** (references inherit the caller's budgets exactly as before).
+
 The knobs above all bound reference *output* (length, cost, time, thinking). The
 remaining critical-path cost is reference *input*: on a large, uncached transcript the
 reference must ingest the whole history before it emits its first token, and that prefill

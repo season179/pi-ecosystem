@@ -772,6 +772,31 @@ async function runSingleReference(args: {
 		if (args.preset.referenceReasoning !== undefined) {
 			referenceOptions.reasoning = args.preset.referenceReasoning;
 		}
+		// Pin this reference's per-effort-level thinking TOKEN budgets — the
+		// reference-side mirror of aggregatorThinkingBudgets and the finer-grained
+		// companion to referenceReasoning. A reasoning effort level maps to a DEFAULT
+		// thinking-token budget (pi-ai's adjustMaxTokensForThinking:
+		// 1024/2048/8192/16384); this overrides those exact numbers, so a preset can
+		// keep a reference's effort level while precisely bounding how many thinking
+		// tokens it burns before emitting its (discarded-downstream) advice. That
+		// leading thinking phase sits on the aggregator-blocking critical path, and —
+		// unlike the aggregator, whose thinking shapes the persisted answer — a
+		// reference's thinking never reaches the aggregator or the display (only its
+		// text is kept), so trimming the reference's thinking budget is a purer latency
+		// win. It composes with referenceReasoning (effort level) and referenceMaxTokens
+		// (which on a native token-based provider bounds thinking+output combined; a
+		// budget cap lets thinking stop sooner so more of that combined budget is
+		// available for the kept text advice). Set AFTER the caller-options spread so a
+		// preset governs reference budgets independent of the caller AND of
+		// aggregatorThinkingBudgets — completing the role-scoped thinking-budgets matrix.
+		// Honored only by native token-based providers (Anthropic / Google / Bedrock);
+		// pi-ai's openai-completions provider (the default openrouter fleet) ignores it,
+		// so it is a safe provider-side no-op there — this lever pays off when a
+		// reference is a native token-based model. Opt-in and unset by default, so
+		// references inherit the caller's budgets exactly as before.
+		if (args.preset.referenceThinkingBudgets !== undefined) {
+			referenceOptions.thinkingBudgets = args.preset.referenceThinkingBudgets;
+		}
 		// Reference output is truncated to maxReferenceOutputChars before it reaches
 		// the aggregator or the display, so tokens generated past that budget are
 		// discarded. Bound reference generation to the preset's cap (never raising a

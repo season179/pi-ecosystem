@@ -26,6 +26,7 @@ export interface MoAPreset {
 	referenceMaxTokens?: number;
 	referenceTimeoutMs?: number;
 	referenceReasoning?: ThinkingLevel;
+	referenceThinkingBudgets?: ThinkingBudgets;
 	referenceProviderRouting?: OpenRouterRouting;
 	referenceMaxRetries?: number;
 	referenceCacheRetention?: CacheRetention;
