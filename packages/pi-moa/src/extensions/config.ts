@@ -6,6 +6,7 @@ import type { MoAConfig, MoAPreset, ModelSlot } from "./types.js";
 const DEFAULT_MAX_REFERENCES = 8;
 const DEFAULT_REFERENCE_CONCURRENCY = 4;
 const DEFAULT_MAX_REFERENCE_OUTPUT_CHARS = 2000;
+const DEFAULT_REFERENCE_MAX_TOKENS = 1024;
 
 export const DEFAULT_MOA_CONFIG: MoAConfig = {
 	defaultPreset: "default",
@@ -23,6 +24,12 @@ export const DEFAULT_MOA_CONFIG: MoAConfig = {
 			referenceConcurrency: DEFAULT_REFERENCE_CONCURRENCY,
 			maxReferences: DEFAULT_MAX_REFERENCES,
 			maxReferenceOutputChars: DEFAULT_MAX_REFERENCE_OUTPUT_CHARS,
+			// References are truncated to maxReferenceOutputChars (~500 tokens) before
+			// they reach the aggregator or the display, so generation beyond that is
+			// discarded. Cap it well above the kept budget: English/code advisory text
+			// runs ~3-4 chars/token, so 2000 chars fits in <700 tokens — the kept text
+			// is unchanged while verbose references stop early instead of running long.
+			referenceMaxTokens: DEFAULT_REFERENCE_MAX_TOKENS,
 			failOnReferenceError: false,
 		},
 	},
@@ -128,6 +135,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	}
 
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
+	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,

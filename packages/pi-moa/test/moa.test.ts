@@ -199,6 +199,9 @@ describe("MoA config", () => {
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceConcurrency: 9 }))),
 		).toThrow(/referenceConcurrency/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceMaxTokens: 0 }))),
+		).toThrow(/referenceMaxTokens/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -667,6 +670,82 @@ describe("MoA orchestration", () => {
 		]);
 		// ...while the aggregator, the acting model, keeps them.
 		expect(aggregatorKeptHooks).toBe(true);
+	});
+
+	it("caps reference generation to referenceMaxTokens without bounding the aggregator", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		const referenceMaxTokens: Array<number | undefined> = [];
+		let aggregatorMaxTokens: number | undefined;
+		refA.setResponses([
+			(_context, options) => {
+				referenceMaxTokens.push(options?.maxTokens);
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorMaxTokens = options?.maxTokens;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ maxTokens: 8192 },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceMaxTokens: 512,
+				}),
+			),
+		).result();
+		// The reference is bound to the preset cap; the aggregator keeps the caller's
+		// larger budget since it produces the actual answer.
+		expect(referenceMaxTokens).toEqual([512]);
+		expect(aggregatorMaxTokens).toBe(8192);
+	});
+
+	it("never raises a caller maxTokens below referenceMaxTokens", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceMaxTokens: number | undefined;
+		refA.setResponses([
+			(_context, options) => {
+				referenceMaxTokens = options?.maxTokens;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ maxTokens: 128 },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceMaxTokens: 512,
+				}),
+			),
+		).result();
+		// The cap only ever lowers generation — a smaller caller limit wins.
+		expect(referenceMaxTokens).toBe(128);
 	});
 
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {

@@ -389,6 +389,17 @@ async function runSingleReference(args: {
 		if (typeof args.preset.referenceTemperature === "number") {
 			referenceOptions.temperature = args.preset.referenceTemperature;
 		}
+		// Reference output is truncated to maxReferenceOutputChars before it reaches
+		// the aggregator or the display, so tokens generated past that budget are
+		// discarded. Bound reference generation to the preset's cap (never raising a
+		// smaller caller-supplied limit) to keep verbose references off the critical
+		// path — the aggregator waits for the slowest reference to finish.
+		if (typeof args.preset.referenceMaxTokens === "number") {
+			referenceOptions.maxTokens =
+				referenceOptions.maxTokens !== undefined
+					? Math.min(referenceOptions.maxTokens, args.preset.referenceMaxTokens)
+					: args.preset.referenceMaxTokens;
+		}
 		const message = await completeSimple(
 			args.task.model,
 			args.refContext,

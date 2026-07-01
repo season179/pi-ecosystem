@@ -12,6 +12,7 @@ export interface MoAPreset {
 	referenceConcurrency?: number;
 	maxReferences?: number;
 	maxReferenceOutputChars?: number;
+	referenceMaxTokens?: number;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	failOnReferenceError?: boolean;
