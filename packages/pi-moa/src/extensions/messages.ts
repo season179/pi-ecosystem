@@ -41,7 +41,23 @@ export function buildReferenceContext(
 	context: Context,
 	preset: MoAPreset,
 ): Context {
-	const strippedContext = stripPriorMoAGuidanceMessages(context);
+	return renderReferenceContext(stripPriorMoAGuidanceMessages(context), preset);
+}
+
+/**
+ * Render an already-stripped context into the reference advisor's view. The input
+ * MUST have had prior MoA guidance messages removed (see
+ * `stripPriorMoAGuidanceMessages`) — this function deliberately does NOT strip,
+ * so it can be called on the shared, once-stripped context the orchestrator
+ * already computes for the aggregator path. That avoids a second full-transcript
+ * strip pass on the synchronous reference-context critical path (the strip is
+ * idempotent, so the rendered output is byte-identical either way). Callers that
+ * hold a raw context should use `buildReferenceContext`, which strips first.
+ */
+export function renderReferenceContext(
+	strippedContext: Context,
+	preset: MoAPreset,
+): Context {
 	const toolNamesById = new Map<string, string>();
 
 	// Render the transcript into plain user/assistant text turns. Tool results

@@ -26,6 +26,7 @@ import {
 	MOA_GUIDANCE_MARKER,
 	MOA_REFERENCE_THINKING_MARKER,
 	redactErrorMessage,
+	renderReferenceContext,
 	stripPriorMoAGuidanceMessages,
 } from "../src/extensions/messages.js";
 import setup, { buildSyntheticModels } from "../src/extensions/moa.js";
@@ -270,6 +271,35 @@ describe("MoA message shaping", () => {
 		expect(stripPriorMoAGuidanceMessages(context).messages).toEqual([
 			context.messages[1],
 		]);
+	});
+
+	it("renderReferenceContext trusts an already-stripped context and does not strip again", () => {
+		// The orchestrator strips prior MoA guidance once up front and shares that
+		// context with both the reference and aggregator paths, so the reference
+		// renderer must NOT strip a second time (a redundant O(n) transcript pass on
+		// the reference-context critical path). buildReferenceContext strips; the
+		// lower-level renderReferenceContext deliberately does not.
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "real question", timestamp: 1 },
+				{
+					role: "user",
+					content: `${MOA_GUIDANCE_MARKER}\nSTALE-PRIOR-GUIDANCE`,
+					timestamp: 2,
+				},
+			],
+		};
+		const preset = basePreset();
+		// The public builder strips prior guidance before rendering.
+		expect(
+			JSON.stringify(buildReferenceContext(context, preset).messages),
+		).not.toContain("STALE-PRIOR-GUIDANCE");
+		// renderReferenceContext assumes its caller already stripped, so it renders
+		// the guidance message verbatim. If it re-stripped (reintroducing the double
+		// pass) this text would be gone — this assertion locks the single-strip win.
+		expect(
+			JSON.stringify(renderReferenceContext(context, preset).messages),
+		).toContain("STALE-PRIOR-GUIDANCE");
 	});
 
 	it("injects guidance after the latest user message without mutating original content", () => {

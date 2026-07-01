@@ -19,11 +19,11 @@ import {
 	appendGuidanceAsTrailingTurn,
 	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
-	buildReferenceContext,
 	buildReferenceThinkingText,
 	extractAssistantText,
 	injectGuidanceAsSystem,
 	redactErrorMessage,
+	renderReferenceContext,
 	stripPriorMoAGuidanceMessages,
 	stripPrivateMoAGuidance,
 } from "./messages.js";
@@ -97,7 +97,6 @@ export function streamMoA(
 
 		const presetName = model.id || config.defaultPreset;
 		const preset = getPreset(config, presetName);
-		const strippedContext = stripPriorMoAGuidanceMessages(context);
 
 		const referenceTasks: ReferenceTask[] = [];
 		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(
@@ -144,7 +143,16 @@ export function streamMoA(
 			registry.getApiKeyAndHeaders(task.model),
 		);
 
-		const referenceContext = buildReferenceContext(strippedContext, preset);
+		// Strip prior MoA guidance *after* firing the auth round-trips (not before, as
+		// the model-resolution above requires) so this O(n) transcript pass overlaps
+		// the auth network I/O rather than sitting un-overlapped ahead of it — the same
+		// overlap principle iteration 1 applied to the aggregator-auth resolution. The
+		// single stripped context is then shared by both paths: renderReferenceContext
+		// consumes it directly (no redundant second strip), and the aggregator guidance
+		// placement below reuses it too.
+		const strippedContext = stripPriorMoAGuidanceMessages(context);
+
+		const referenceContext = renderReferenceContext(strippedContext, preset);
 		const resolvedReferenceOutputs = await runReferenceTasks({
 			presetName,
 			preset,
