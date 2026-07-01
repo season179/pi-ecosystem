@@ -218,6 +218,43 @@ export function appendGuidanceToLatestUser(
 }
 
 /**
+ * Place the aggregator guidance so the entire prior transcript stays a byte-stable
+ * prefix that the aggregator's provider can reuse from its prompt cache across
+ * turns.
+ *
+ * The default `appendGuidanceToLatestUser` mutates the *latest user message*.
+ * In an agentic tool loop the only user message is usually the original task at
+ * index 0 (subsequent turns are `assistant`/`toolResult` roles), so injecting the
+ * fresh-every-turn guidance there changes an early message and busts the aggregator's
+ * cross-turn prompt cache for the whole transcript — forcing a full re-prefill on
+ * every tool-loop iteration. Providers cache the longest matching *prefix*, so the
+ * guidance must sit at the end for the growing transcript before it to keep matching.
+ *
+ * When the transcript already ends on a user turn, appending in place is both
+ * cache-optimal and alternation-safe, so this defers to `appendGuidanceToLatestUser`.
+ * Otherwise it adds the guidance as a new trailing user message. On providers that
+ * reject the resulting role sequence (a user turn after tool results on strict
+ * Anthropic-style alternation), the caller's existing consecutive-user fallback folds
+ * the guidance into the system prompt instead, so correctness is preserved.
+ */
+export function appendGuidanceAsTrailingTurn(
+	context: Context,
+	guidanceBlock: string,
+): Context {
+	const messages = [...context.messages];
+	const last = messages[messages.length - 1];
+	if (last?.role === "user") {
+		return appendGuidanceToLatestUser(context, guidanceBlock);
+	}
+	messages.push({
+		role: "user",
+		content: guidanceBlock,
+		timestamp: last?.timestamp ?? Date.now(),
+	});
+	return { ...context, messages };
+}
+
+/**
  * Render reference outputs as the text of the display-only thinking block the
  * provider emits ahead of the aggregator's answer. Successful advice is
  * truncated to the preset's budget; failures are redacted and truncated. The

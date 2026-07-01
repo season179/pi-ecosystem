@@ -225,6 +225,16 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/referenceReasoning/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorGuidancePlacement:
+							"middle" as unknown as MoAPreset["aggregatorGuidancePlacement"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorGuidancePlacement/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1084,6 +1094,101 @@ describe("MoA orchestration", () => {
 		const aggMessages = JSON.stringify(aggregatorContext?.messages);
 		expect(aggMessages).toContain("advice A");
 		expect(aggMessages).not.toContain("ref-b/b");
+	});
+
+	it("places guidance as a trailing turn (cache-friendly) without mutating the task message in a tool loop", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		let trailingAggContext: Context | undefined;
+		let latestUserAggContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				trailingAggContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+			(context) => {
+				latestUserAggContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		// A tool-loop transcript: the only user turn is the original task at index 0;
+		// the transcript ends on a tool result (role "toolResult", not "user").
+		const toolLoopContext = (): Context => ({
+			messages: [
+				{ role: "user", content: "TASK: fix the bug", timestamp: 1 },
+				fauxAssistantMessage([
+					fauxToolCall("echo", { text: "run" }, { id: "t1" }),
+				]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "echo",
+					content: [{ type: "text", text: "tool output" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		});
+
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			toolLoopContext(),
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorGuidancePlacement: "trailing-message",
+				}),
+			),
+		).result();
+
+		// The guidance is a NEW trailing user turn; the whole prior transcript is
+		// preserved byte-for-byte so the aggregator's provider can reuse it from its
+		// prompt cache across turns.
+		expect(trailingAggContext?.messages.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+		]);
+		const taskMessage = trailingAggContext?.messages[0];
+		expect(JSON.stringify(taskMessage)).toBe(
+			JSON.stringify({
+				role: "user",
+				content: "TASK: fix the bug",
+				timestamp: 1,
+			}),
+		);
+		const trailing =
+			trailingAggContext?.messages[trailingAggContext.messages.length - 1];
+		expect(JSON.stringify(trailing)).toContain(MOA_GUIDANCE_MARKER);
+		expect(JSON.stringify(trailing)).toContain("advice A");
+
+		// Contrast: the default "latest-user" placement mutates the early task
+		// message (index 0), which is what busts the cross-turn prompt cache.
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			toolLoopContext(),
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		expect(latestUserAggContext?.messages.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+		]);
+		expect(JSON.stringify(latestUserAggContext?.messages[0])).toContain(
+			MOA_GUIDANCE_MARKER,
+		);
 	});
 
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {

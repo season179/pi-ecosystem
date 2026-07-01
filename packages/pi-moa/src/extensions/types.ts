@@ -25,6 +25,7 @@ export interface MoAPreset {
 	referenceReasoning?: ThinkingLevel;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
+	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	failOnReferenceError?: boolean;
 }
 

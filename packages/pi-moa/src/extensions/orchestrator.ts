@@ -16,6 +16,7 @@ import {
 	getReferenceConcurrency,
 } from "./config.js";
 import {
+	appendGuidanceAsTrailingTurn,
 	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
 	buildReferenceContext,
@@ -169,10 +170,15 @@ export function streamMoA(
 
 		// Guidance rides on the tail of the latest user message (matches hermes and
 		// keeps the aggregator's stable system-prompt prefix cacheable across turns).
-		const tailContext = appendGuidanceToLatestUser(
-			strippedContext,
-			guidanceBlock,
-		);
+		// The opt-in "trailing-message" placement instead appends the guidance as a
+		// new trailing user turn when the transcript ends on an assistant/tool turn,
+		// so the whole prior transcript stays a byte-stable prefix the aggregator's
+		// provider can reuse from its prompt cache across tool-loop turns (the
+		// latest-user default would mutate the early task message and bust that cache).
+		const tailContext =
+			preset.aggregatorGuidancePlacement === "trailing-message"
+				? appendGuidanceAsTrailingTurn(strippedContext, guidanceBlock)
+				: appendGuidanceToLatestUser(strippedContext, guidanceBlock);
 		const tailResult = await forwardAggregatorStream({
 			model: aggregatorModel,
 			context: tailContext,

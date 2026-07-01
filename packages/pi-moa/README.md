@@ -90,3 +90,28 @@ sits on the aggregator-blocking path. `referenceMaxContextChars` bounds it:
   view — never the final answer's context. It is **unset by default** (references see the
   whole transcript, exactly as before). Set it when reference latency on long transcripts
   matters more than giving the advisors full history.
+
+### Aggregator prompt-cache reuse across tool loops
+
+Every knob above tunes the reference phase. The aggregator itself has one large,
+separate cost: on each turn of an agentic tool loop it re-prefills its context. Providers
+that support prompt caching (e.g. Anthropic, and `openrouter/anthropic/*` — the default
+aggregator) avoid this by reusing the longest **byte-stable prefix** of the previous turn's
+request, so normally only the newly-appended tool result is re-prefilled.
+
+By default the private reference guidance is appended to the **latest user message**. In a
+tool loop the only user message is usually the original task at index 0 (later turns are
+`assistant`/`toolResult` roles), so injecting the fresh-every-turn guidance there changes an
+early message and **busts the aggregator's prompt cache for the entire transcript** — a full
+re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls this:
+
+- `aggregatorGuidancePlacement: "trailing-message"` appends the guidance as a **new trailing
+  user turn** (when the transcript ends on an assistant/tool turn) instead of mutating the
+  early task message. The whole prior transcript then stays a byte-stable prefix the
+  aggregator's provider can reuse from its cache across turns, so only the small trailing
+  guidance is re-prefilled. It is **unset by default** (`"latest-user"`, the original
+  behavior). Recommended for OpenAI-compatible aggregators (including the default
+  `openrouter/anthropic/*`), where a trailing user turn after tool results is a valid role
+  sequence. On strict Anthropic-style alternation a trailing user turn after tool results can
+  be rejected; the existing consecutive-user fallback then folds the guidance into the system
+  prompt, so correctness is preserved regardless of provider.

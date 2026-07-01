@@ -161,6 +161,11 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	}
 	readOptionalNumber(value.referenceTemperature, presetName, "referenceTemperature");
 	readOptionalNumber(value.aggregatorTemperature, presetName, "aggregatorTemperature");
+	readOptionalGuidancePlacement(
+		value.aggregatorGuidancePlacement,
+		presetName,
+		"aggregatorGuidancePlacement",
+	);
 	if (value.failOnReferenceError !== undefined && typeof value.failOnReferenceError !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "failOnReferenceError" must be a boolean`);
 	}
@@ -218,6 +223,21 @@ function readOptionalThinkingLevel(value: unknown, presetName: string, field: st
 	if (typeof value !== "string" || !THINKING_LEVELS.includes(value as never)) {
 		throw new Error(
 			`MoA preset "${presetName}": "${field}" must be one of ${THINKING_LEVELS.join(", ")}`,
+		);
+	}
+}
+
+// The aggregator-guidance-placement knob selects where the private reference
+// guidance is injected into the aggregator's request. "latest-user" (default)
+// appends it to the latest user message; "trailing-message" adds it as a new
+// trailing user turn so the prior transcript stays a cacheable prefix across turns.
+const GUIDANCE_PLACEMENTS = ["latest-user", "trailing-message"] as const;
+
+function readOptionalGuidancePlacement(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || !GUIDANCE_PLACEMENTS.includes(value as never)) {
+		throw new Error(
+			`MoA preset "${presetName}": "${field}" must be one of ${GUIDANCE_PLACEMENTS.join(", ")}`,
 		);
 	}
 }
