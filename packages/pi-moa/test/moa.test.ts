@@ -253,6 +253,13 @@ describe("MoA config", () => {
 				baseConfig(basePreset({ referenceToolResultMaxChars: 199 })),
 			),
 		).toThrow(/referenceToolResultMaxChars/);
+		// A 0 tail is rejected: slice(-0) would keep the whole result, defeating the
+		// truncation, so the minimum is 1.
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(basePreset({ referenceToolResultTailChars: 0 })),
+			),
+		).toThrow(/referenceToolResultTailChars/);
 		expect(() =>
 			validateMoAConfig(
 				baseConfig(
@@ -766,6 +773,56 @@ describe("MoA message shaping", () => {
 		const uncappedToolTurn = JSON.stringify(uncapped.messages[1]);
 		expect(uncappedToolTurn).toContain("...[truncated 5008 chars]...");
 		expect(uncappedToolTurn.length).toBeGreaterThan(cappedToolTurn.length + 1500);
+	});
+
+	it("shrinks the always-kept tail of each tool result to referenceToolResultTailChars", () => {
+		// A distinctive-per-character tail lets us prove exactly how many trailing
+		// chars survive: the default keeps 500, so the marker at position -600 is
+		// dropped but the last 500 chars stay.
+		const uniqueTail = Array.from(
+			{ length: 800 },
+			(_v, index) => `<${index}>`,
+		).join("");
+		const bulkyToolResult = `HEAD${"x".repeat(5000)}${uniqueTail}`;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "run it", timestamp: 1 },
+				fauxAssistantMessage([
+					fauxToolCall("bash", { cmd: "go" }, { id: "t1" }),
+				]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "bash",
+					content: [{ type: "text", text: bulkyToolResult }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+
+		// A tiny tail budget keeps only the final chars of the outcome, dropping the
+		// rest of the tail the default (500) would retain — a reference-prefill
+		// reduction the head cap alone cannot reach.
+		const tailCapped = buildReferenceContext(
+			context,
+			basePreset({ referenceToolResultTailChars: 30 }),
+		);
+		const tailCappedToolTurn = JSON.stringify(tailCapped.messages[1]);
+		// The head still survives, and the very end of the result is still visible.
+		expect(tailCappedToolTurn).toContain("HEAD");
+		expect(tailCappedToolTurn).toContain("<799>");
+		// But content ~500 chars from the end (kept under the default tail) is now gone.
+		expect(tailCappedToolTurn).not.toContain("<700>");
+
+		// The default keeps the full 500-char tail, so that same content survives —
+		// proving the knob is what dropped it, not some other trimming.
+		const defaultTail = buildReferenceContext(context, basePreset());
+		const defaultTailToolTurn = JSON.stringify(defaultTail.messages[1]);
+		expect(defaultTailToolTurn).toContain("<700>");
+		expect(defaultTailToolTurn.length).toBeGreaterThan(
+			tailCappedToolTurn.length + 400,
+		);
 	});
 
 	it("merges the advisory turn into a trailing user message and never emits consecutive same-role turns", () => {

@@ -122,6 +122,17 @@ sits on the aggregator-blocking path. `referenceMaxContextChars` bounds it:
   and composes with `referenceMaxContextChars` (shrinking each result first leaves fewer whole
   turns to elide). Set it on tool-heavy transcripts where reference prefill dominates.
 
+- `referenceToolResultTailChars` is the **tail** companion to `referenceToolResultMaxChars`.
+  Each tool result the references see always keeps a trailing slice (its **outcome** — the exit
+  status, the final lines of output) even when its head is capped, so `referenceToolResultMaxChars`
+  bounds the *head* while a fixed tail (500 chars) is retained regardless. On a long agentic
+  transcript with many tool results, that always-kept tail (500 chars × every result) can itself
+  dominate reference prefill — a cost the head cap alone can't reach. This knob bounds the tail
+  kept per result, so the two together give full control over per-tool-result reference input.
+  It is **unset by default** (the default 500-char tail, exactly as before); its minimum is 1
+  (a tail of 0 would defeat the truncation). As with every reference-input lever, the **aggregator
+  always receives the full, untrimmed tool results**, so this only shrinks the advisory view.
+
 Every knob above bounds the reference's *generation* (length, cost, time, thinking, input).
 One critical-path cost sits *below* generation, in the network layer: when a reference's
 request hits a transient error (a 429 rate limit or a 5xx), the underlying SDK retries it

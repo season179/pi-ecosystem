@@ -159,6 +159,10 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
 	readOptionalMinimumInteger(value.referenceMaxContextChars, presetName, "referenceMaxContextChars", 500);
 	readOptionalMinimumInteger(value.referenceToolResultMaxChars, presetName, "referenceToolResultMaxChars", 200);
+	// Minimum 1, not 0: truncateWithHeadTail keeps the LAST `tailChars` via
+	// `text.slice(-tailChars)`, and `slice(-0)` === `slice(0)` would keep the WHOLE
+	// string — so a 0 tail would defeat the truncation instead of dropping the tail.
+	readOptionalMinimumInteger(value.referenceToolResultTailChars, presetName, "referenceToolResultTailChars", 1);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
 	// maxRetries of 0 (disable client-side retries entirely) is meaningful, so this

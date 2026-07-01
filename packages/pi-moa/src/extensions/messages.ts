@@ -64,16 +64,23 @@ export function renderReferenceContext(
 	// (file dumps, command output) are usually the bulkiest, least-advice-relevant
 	// content in an agentic transcript, and they drive the reference's prefill —
 	// which sits on the aggregator-blocking critical path. `referenceToolResultMaxChars`
-	// bounds the leading portion kept per tool result (a fixed tail is always also
-	// kept so the reference still sees the outcome); unset it falls back to the
-	// default head budget so the rendered view is byte-identical. This is a finer
-	// lever than referenceMaxContextChars: rather than eliding whole middle TURNS
-	// (which loses the sequence of actions), it keeps every turn but compresses each
-	// verbose result — which is exactly what an advisor needs (see WHAT was done,
-	// not every byte of output).
+	// bounds the leading portion (head) kept per tool result and
+	// `referenceToolResultTailChars` bounds the trailing portion (tail) — a fixed
+	// tail is always kept so the reference still sees each command's OUTCOME, not
+	// just its start. Both unset fall back to the default head/tail budgets so the
+	// rendered view is byte-identical. Together they are a finer lever than
+	// referenceMaxContextChars: rather than eliding whole middle TURNS (which loses
+	// the sequence of actions), they keep every turn but compress each verbose
+	// result from both ends — which is exactly what an advisor needs (see WHAT was
+	// done and how it ended, not every byte of output). On a long agentic transcript
+	// with many tool results the always-kept tail (500 chars each by default) can
+	// itself dominate reference prefill, so shrinking it is a real reduction the head
+	// cap alone can't reach.
 	const toolResultHeadChars =
 		preset.referenceToolResultMaxChars ??
 		TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS;
+	const toolResultTailChars =
+		preset.referenceToolResultTailChars ?? TOOL_RESULT_TAIL_CHARS;
 
 	// Render the transcript into plain user/assistant text turns. Tool results
 	// are NOT the user's words, so folding each into the preceding assistant turn
@@ -105,6 +112,7 @@ export function renderReferenceContext(
 				message,
 				toolNamesById,
 				toolResultHeadChars,
+				toolResultTailChars,
 			);
 		}
 	}
@@ -384,9 +392,13 @@ export function buildGuidanceBlock(args: {
 	return lines.join("\n");
 }
 
-export function renderToolResult(content: unknown, maxChars: number): string {
+export function renderToolResult(
+	content: unknown,
+	headChars: number,
+	tailChars: number = TOOL_RESULT_TAIL_CHARS,
+): string {
 	const rendered = renderUnknownContent(content);
-	return truncateWithHeadTail(rendered, maxChars, TOOL_RESULT_TAIL_CHARS);
+	return truncateWithHeadTail(rendered, headChars, tailChars);
 }
 
 export function extractAssistantText(message: AssistantMessage): string {
@@ -444,12 +456,13 @@ function renderToolResultBlock(
 	message: ToolResultMessage,
 	toolNamesById: Map<string, string>,
 	headChars: number,
+	tailChars: number,
 ): string {
 	const toolName =
 		toolNamesById.get(message.toolCallId) ??
 		message.toolName ??
 		message.toolCallId;
-	const renderedContent = renderToolResult(message.content, headChars);
+	const renderedContent = renderToolResult(message.content, headChars, tailChars);
 	return `[Tool result: ${toolName} -> ${renderedContent}]`;
 }
 
@@ -458,8 +471,14 @@ function foldToolResultIntoPrevious(
 	message: ToolResultMessage,
 	toolNamesById: Map<string, string>,
 	headChars: number,
+	tailChars: number,
 ): void {
-	const block = renderToolResultBlock(message, toolNamesById, headChars);
+	const block = renderToolResultBlock(
+		message,
+		toolNamesById,
+		headChars,
+		tailChars,
+	);
 	const previous = rendered[rendered.length - 1];
 	if (previous?.role === "assistant" && previous.content[0]?.type === "text") {
 		const textBlock = previous.content[0];

@@ -24,6 +24,7 @@ export interface MoAPreset {
 	maxReferenceOutputChars?: number;
 	referenceMaxContextChars?: number;
 	referenceToolResultMaxChars?: number;
+	referenceToolResultTailChars?: number;
 	referenceMaxTokens?: number;
 	referenceTimeoutMs?: number;
 	referenceReasoning?: ThinkingLevel;
