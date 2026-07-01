@@ -18,6 +18,7 @@ export interface MoAPreset {
 	referenceConcurrency?: number;
 	maxReferences?: number;
 	maxReferenceOutputChars?: number;
+	referenceMaxContextChars?: number;
 	referenceMaxTokens?: number;
 	referenceTimeoutMs?: number;
 	referenceReasoning?: ThinkingLevel;

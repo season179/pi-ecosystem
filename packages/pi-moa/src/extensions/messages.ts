@@ -39,7 +39,7 @@ const FAILED_REFERENCE_ERROR_CHARS = 200;
 
 export function buildReferenceContext(
 	context: Context,
-	_preset: MoAPreset,
+	preset: MoAPreset,
 ): Context {
 	const strippedContext = stripPriorMoAGuidanceMessages(context);
 	const toolNamesById = new Map<string, string>();
@@ -73,16 +73,90 @@ export function buildReferenceContext(
 		}
 	}
 
+	// Optionally bound the reference's *input* size. References are advisory only
+	// — the aggregator always receives the FULL context and does the actual work —
+	// so trimming a reference's view of a long transcript degrades only its hints,
+	// never the final answer's context. On a large/uncached transcript this is the
+	// one lever that shortens reference time-to-first-token (input length drives
+	// prefill), which sits on the aggregator-blocking critical path. Opt-in and
+	// unset by default, so default behavior is byte-identical.
+	const budgetedRendered = capReferenceContextToBudget(
+		rendered,
+		preset.referenceMaxContextChars,
+	);
+
 	// Collapse any adjacent same-role turns (e.g. two assistant turns in a tool
 	// loop, or a leading tool result kept as a user line) so the transcript
 	// alternates cleanly for strict providers, then close with an advisory turn
 	// that reframes the ask as "advise" — not "continue the task" — and
 	// guarantees the view ends on a user message (required by no-prefill models).
-	const messages = appendAdvisoryTurn(coalesceAdjacentSameRole(rendered));
+	const messages = appendAdvisoryTurn(coalesceAdjacentSameRole(budgetedRendered));
 	return {
 		systemPrompt: REFERENCE_SYSTEM_PROMPT,
 		messages,
 	};
+}
+
+// Marker inserted where earlier transcript turns were dropped to honor
+// referenceMaxContextChars, so the reference knows its view was trimmed (and
+// doesn't treat the kept tail as the whole story).
+const REFERENCE_CONTEXT_ELISION_NOTE =
+	"[Earlier conversation turns were omitted to bound reference latency; reason from the task and the recent state below.]";
+
+// Trim the rendered reference transcript to roughly `maxChars` of text by keeping
+// the most-recent turns (what matters most for "what to do next") plus the first
+// user turn (usually the task/goal), eliding the middle. The cap is approximate:
+// the preserved task turn and elision note are a small, deliberate overage so the
+// reference retains both the objective and the current state. Returns the input
+// unchanged when the cap is unset or the transcript already fits.
+function capReferenceContextToBudget(
+	rendered: Message[],
+	maxChars: number | undefined,
+): Message[] {
+	if (maxChars === undefined || rendered.length <= 1) {
+		return rendered;
+	}
+	const sizes = rendered.map(renderedMessageChars);
+	const total = sizes.reduce((sum, size) => sum + size, 0);
+	if (total <= maxChars) {
+		return rendered;
+	}
+
+	// Walk newest -> oldest, keeping turns until the next one would blow the
+	// budget. Always keep at least the most recent turn even if it alone exceeds
+	// the budget (a single huge turn is better than an empty view).
+	let tailStart = rendered.length;
+	let used = 0;
+	for (let index = rendered.length - 1; index >= 0; index--) {
+		if (tailStart < rendered.length && used + sizes[index] > maxChars) {
+			break;
+		}
+		tailStart = index;
+		used += sizes[index];
+	}
+
+	if (tailStart === 0) {
+		return rendered;
+	}
+
+	const firstUserIndex = rendered.findIndex(
+		(message) => message.role === "user",
+	);
+	const preserved: Message[] = [];
+	if (firstUserIndex !== -1 && firstUserIndex < tailStart) {
+		preserved.push(rendered[firstUserIndex]);
+	}
+	preserved.push({
+		role: "user",
+		content: REFERENCE_CONTEXT_ELISION_NOTE,
+		timestamp: rendered[tailStart].timestamp,
+	});
+	preserved.push(...rendered.slice(tailStart));
+	return preserved;
+}
+
+function renderedMessageChars(message: Message): number {
+	return extractPlainText(message).length;
 }
 
 export function stripPriorMoAGuidanceMessages(context: Context): Context {

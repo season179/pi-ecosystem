@@ -62,3 +62,17 @@ the reference's text is kept), and the stream-and-abort above counts text — no
   caller's reasoning, exactly as before); a non-reasoning reference model clamps it away
   to a no-op. Because thinking still improves the reference's kept advice, this trades a
   little advice quality for latency, so it stays opt-in.
+
+The knobs above all bound reference *output* (length, cost, time, thinking). The
+remaining critical-path cost is reference *input*: on a large, uncached transcript the
+reference must ingest the whole history before it emits its first token, and that prefill
+sits on the aggregator-blocking path. `referenceMaxContextChars` bounds it:
+
+- `referenceMaxContextChars` caps the size of the transcript **the references see** (in
+  characters of rendered text). When the history exceeds it, the middle turns are elided:
+  the references keep the most recent turns plus the first user turn (usually the task),
+  with a note that earlier turns were dropped. The **aggregator always receives the full,
+  untrimmed context** and does the actual work, so this only trims the references' advisory
+  view — never the final answer's context. It is **unset by default** (references see the
+  whole transcript, exactly as before). Set it when reference latency on long transcripts
+  matters more than giving the advisors full history.

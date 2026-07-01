@@ -207,6 +207,11 @@ describe("MoA config", () => {
 		).toThrow(/referenceTimeoutMs/);
 		expect(() =>
 			validateMoAConfig(
+				baseConfig(basePreset({ referenceMaxContextChars: 499 })),
+			),
+		).toThrow(/referenceMaxContextChars/);
+		expect(() =>
+			validateMoAConfig(
 				baseConfig(
 					basePreset({
 						referenceReasoning: "off" as unknown as MoAPreset["referenceReasoning"],
@@ -408,6 +413,45 @@ describe("MoA message shaping", () => {
 		expect(JSON.stringify(lastReferenceMessage)).toContain(
 			"most intelligent judgement",
 		);
+	});
+
+	it("bounds the reference context to referenceMaxContextChars, keeping the task and recent turns", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "TASK: fix the parser", timestamp: 1 },
+				fauxAssistantMessage(`old middle ${"x".repeat(4000)}`),
+				{ role: "user", content: "MIDDLE follow-up", timestamp: 3 },
+				fauxAssistantMessage(`more middle ${"y".repeat(4000)}`),
+				{ role: "user", content: "RECENT: what next?", timestamp: 5 },
+			],
+		};
+		const capped = buildReferenceContext(
+			context,
+			basePreset({ referenceMaxContextChars: 500 }),
+		);
+		const serialized = JSON.stringify(capped.messages);
+		// The first user turn (the task) is preserved and the most recent turn is
+		// kept, but the bulky middle turns are elided with a marker.
+		expect(serialized).toContain("TASK: fix the parser");
+		expect(serialized).toContain("RECENT: what next?");
+		expect(serialized).toContain("omitted to bound reference latency");
+		expect(serialized).not.toContain("old middle");
+		expect(serialized).not.toContain("more middle");
+		// Structure is still valid for strict providers: alternating roles only and
+		// a trailing user advisory turn.
+		expect(
+			capped.messages.every(
+				(message) => message.role === "user" || message.role === "assistant",
+			),
+		).toBe(true);
+		expect(capped.messages[capped.messages.length - 1].role).toBe("user");
+
+		// Unset (default) leaves the full transcript untouched.
+		const uncapped = buildReferenceContext(context, basePreset());
+		const uncappedSerialized = JSON.stringify(uncapped.messages);
+		expect(uncappedSerialized).toContain("old middle");
+		expect(uncappedSerialized).toContain("more middle");
+		expect(uncappedSerialized).not.toContain("omitted to bound reference latency");
 	});
 
 	it("merges the advisory turn into a trailing user message and never emits consecutive same-role turns", () => {
@@ -834,6 +878,62 @@ describe("MoA orchestration", () => {
 		// With no referenceReasoning override, the reference inherits the caller's
 		// reasoning exactly as before — zero behavioral change by default.
 		expect(referenceReasoning).toBe("high");
+	});
+
+	it("bounds reference input to referenceMaxContextChars while the aggregator keeps the full context", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceContext: Context | undefined;
+		let aggregatorContext: Context | undefined;
+		refA.setResponses([
+			(context) => {
+				referenceContext = context;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "TASK: ship the feature", timestamp: 1 },
+				fauxAssistantMessage(`bulky middle ${"z".repeat(4000)}`),
+				{ role: "user", content: "RECENT: how do I proceed?", timestamp: 3 },
+			],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceMaxContextChars: 500,
+				}),
+			),
+		).result();
+
+		// The reference's view is trimmed: task + recent state kept, bulky middle
+		// dropped with a marker.
+		const referenceSerialized = JSON.stringify(referenceContext?.messages);
+		expect(referenceSerialized).toContain("TASK: ship the feature");
+		expect(referenceSerialized).toContain("RECENT: how do I proceed?");
+		expect(referenceSerialized).toContain("omitted to bound reference latency");
+		expect(referenceSerialized).not.toContain("bulky middle");
+
+		// The aggregator — the acting model — always receives the full, untrimmed
+		// transcript, so bounding the reference input never starves the answer.
+		const aggregatorSerialized = JSON.stringify(aggregatorContext?.messages);
+		expect(aggregatorSerialized).toContain("bulky middle");
+		expect(aggregatorSerialized).not.toContain("omitted to bound reference latency");
 	});
 
 	it("aborts a reference once its output reaches the kept budget", async () => {

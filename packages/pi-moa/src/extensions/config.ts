@@ -135,6 +135,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	}
 
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
+	readOptionalMinimumInteger(value.referenceMaxContextChars, presetName, "referenceMaxContextChars", 500);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
 	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
