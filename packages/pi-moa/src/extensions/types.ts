@@ -1,4 +1,10 @@
-import type { Api, Context, Model, Usage } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	Context,
+	Model,
+	ThinkingLevel,
+	Usage,
+} from "@earendil-works/pi-ai";
 
 export interface ModelSlot {
 	provider: string;
@@ -14,6 +20,7 @@ export interface MoAPreset {
 	maxReferenceOutputChars?: number;
 	referenceMaxTokens?: number;
 	referenceTimeoutMs?: number;
+	referenceReasoning?: ThinkingLevel;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	failOnReferenceError?: boolean;

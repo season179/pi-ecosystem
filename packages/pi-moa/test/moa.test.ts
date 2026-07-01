@@ -205,6 +205,15 @@ describe("MoA config", () => {
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceTimeoutMs: 0 }))),
 		).toThrow(/referenceTimeoutMs/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceReasoning: "off" as unknown as MoAPreset["referenceReasoning"],
+					}),
+				),
+			),
+		).toThrow(/referenceReasoning/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -749,6 +758,82 @@ describe("MoA orchestration", () => {
 		).result();
 		// The cap only ever lowers generation — a smaller caller limit wins.
 		expect(referenceMaxTokens).toBe(128);
+	});
+
+	it("caps reference reasoning effort without changing the aggregator's", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceReasoning: unknown;
+		let aggregatorReasoning: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller asks for heavy reasoning (for the aggregator's benefit)...
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceReasoning: "minimal",
+				}),
+			),
+		).result();
+		// ...but the reference is capped to minimal so its (discarded) thinking
+		// stops holding up the aggregator, while the aggregator keeps the caller's
+		// requested reasoning for the actual answer.
+		expect(referenceReasoning).toBe("minimal");
+		expect(aggregatorReasoning).toBe("high");
+	});
+
+	it("leaves reference reasoning inheriting the caller's when unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceReasoning: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no referenceReasoning override, the reference inherits the caller's
+		// reasoning exactly as before — zero behavioral change by default.
+		expect(referenceReasoning).toBe("high");
 	});
 
 	it("aborts a reference once its output reaches the kept budget", async () => {

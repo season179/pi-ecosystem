@@ -392,6 +392,20 @@ async function runSingleReference(args: {
 		if (typeof args.preset.referenceTemperature === "number") {
 			referenceOptions.temperature = args.preset.referenceTemperature;
 		}
+		// A reasoning reference model can spend most of its wall-clock thinking
+		// before it emits any text — and that thinking is discarded downstream
+		// (only the reference's text advice reaches the aggregator/display). The
+		// stream-and-abort below counts text chars, so it cannot shorten that
+		// leading thinking phase. Overriding the reference's reasoning effort is the
+		// only lever that does: it decouples reference reasoning from the caller's,
+		// letting a heavy-thinking reference (e.g. a "flash" model that reasons by
+		// default) be capped to a lower effort so its discarded thinking stops
+		// holding up the aggregator. Opt-in and unset by default, so behavior is
+		// unchanged unless a preset sets it; a non-reasoning reference model clamps
+		// it away to a no-op provider-side.
+		if (args.preset.referenceReasoning !== undefined) {
+			referenceOptions.reasoning = args.preset.referenceReasoning;
+		}
 		// Reference output is truncated to maxReferenceOutputChars before it reaches
 		// the aggregator or the display, so tokens generated past that budget are
 		// discarded. Bound reference generation to the preset's cap (never raising a

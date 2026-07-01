@@ -137,6 +137,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalMinimumInteger(value.maxReferenceOutputChars, presetName, "maxReferenceOutputChars", 200);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
+	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,
@@ -193,6 +194,21 @@ function readOptionalMinimumInteger(
 		throw new Error(`MoA preset "${presetName}": "${field}" must be an integer greater than or equal to ${minimum}`);
 	}
 	return value;
+}
+
+// The reference-reasoning knob accepts the same thinking levels as
+// SimpleStreamOptions.reasoning. It is applied only to reference requests, so a
+// reasoning-heavy reference model can be told to think less (its thinking is
+// discarded downstream anyway) without touching the aggregator's reasoning.
+const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+
+function readOptionalThinkingLevel(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || !THINKING_LEVELS.includes(value as never)) {
+		throw new Error(
+			`MoA preset "${presetName}": "${field}" must be one of ${THINKING_LEVELS.join(", ")}`,
+		);
+	}
 }
 
 function readOptionalNumber(value: unknown, presetName: string, field: string): number | undefined {
