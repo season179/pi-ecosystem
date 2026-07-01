@@ -823,6 +823,56 @@ describe("MoA orchestration", () => {
 		expect(referenceMaxTokens).toBe(128);
 	});
 
+	it("pre-resolves every reference's auth up front so a late concurrency slot never blocks on a fresh auth fetch", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		const authRequested: string[] = [];
+		let authSeenWhileRefARan: string[] = [];
+		// With referenceConcurrency 1 the single worker runs ref-a to completion
+		// before it even picks ref-b, so if ref-b's auth were fetched lazily when
+		// its concurrency slot opens it would NOT yet be requested while ref-a is
+		// still streaming. Capturing the requested-auth set inside ref-a's responder
+		// therefore distinguishes the up-front pre-resolution (ref-b already
+		// requested) from a lazy per-worker fetch (ref-b not yet requested).
+		refA.setResponses([
+			() => {
+				authSeenWhileRefARan = [...authRequested];
+				return fauxAssistantMessage("advice A");
+			},
+		]);
+		refB.setResponses([fauxAssistantMessage("advice B")]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const baseRegistry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const registry = {
+			find: (provider: string, modelId: string) =>
+				baseRegistry.find(provider, modelId),
+			async getApiKeyAndHeaders(model: Model<Api>) {
+				authRequested.push(`${model.provider}:${model.id}`);
+				return baseRegistry.getApiKeyAndHeaders(model);
+			},
+		} as ModelRegistry;
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(basePreset({ referenceConcurrency: 1 })),
+		).result();
+		// ref-b's auth is already in flight while the serial worker is still on
+		// ref-a; reverting the up-front pre-resolution leaves ref-b unrequested here.
+		expect(authSeenWhileRefARan).toContain("ref-b:b");
+		// And every model's auth is still resolved exactly once (no double-fetch).
+		expect(authRequested.filter((key) => key === "ref-b:b")).toHaveLength(1);
+	});
+
 	it("caps reference reasoning effort without changing the aggregator's", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const agg = registerFaux("agg", "main");

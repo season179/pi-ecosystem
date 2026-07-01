@@ -68,6 +68,8 @@ interface ReferenceTask {
 	model: Model<Api>;
 }
 
+type AuthResult = Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
+
 type AggregatorForwardResult =
 	| { kind: "completed" }
 	| { kind: "consecutive-user-rejected" }
@@ -124,16 +126,30 @@ export function streamMoA(
 			);
 		}
 
-		const referenceContext = buildReferenceContext(strippedContext, preset);
-		// Aggregator auth depends on nothing the reference phase produces, so resolve
-		// it concurrently with the (network-bound) references instead of after them.
-		// getApiKeyAndHeaders is side-effect-free and catches its own errors, so this
-		// overlap is safe and takes one serial round-trip off the critical path.
+		// Resolve auth for the aggregator AND every reference concurrently, up front —
+		// before building the reference context and before any reference streams.
+		// getApiKeyAndHeaders depends on nothing the reference phase produces, is
+		// side-effect-free, always resolves (it catches its own errors), and dedups
+		// shared-provider token refreshes via an internal per-provider lock. Firing all
+		// of it now — instead of the aggregator alone (iteration 1) plus a lazy
+		// per-reference fetch inside each worker — overlaps every auth round-trip with
+		// the reference-context CPU work and with each other, so a reference whose
+		// concurrency slot opens late no longer blocks on a fresh auth fetch when it
+		// finally runs. For a single-provider fleet the per-provider lock collapses
+		// these to one round-trip (behavior unchanged); a multi-provider or
+		// concurrency-limited fleet takes the per-reference auth latency off the
+		// reference-streaming critical path.
 		const aggregatorAuthPromise = registry.getApiKeyAndHeaders(aggregatorModel);
+		const referenceAuthPromises = referenceTasks.map((task) =>
+			registry.getApiKeyAndHeaders(task.model),
+		);
+
+		const referenceContext = buildReferenceContext(strippedContext, preset);
 		const resolvedReferenceOutputs = await runReferenceTasks({
 			presetName,
 			preset,
 			referenceTasks,
+			referenceAuthPromises,
 			refContext: referenceContext,
 			options,
 			registry,
@@ -380,6 +396,9 @@ async function runReferenceTasks(args: {
 	presetName: string;
 	preset: MoAPreset;
 	referenceTasks: ReferenceTask[];
+	// Auth pre-resolved up front, index-aligned with referenceTasks. When omitted
+	// (e.g. the public runReferences helper) each worker falls back to a lazy fetch.
+	referenceAuthPromises?: Promise<AuthResult>[];
 	refContext: Context;
 	options: SimpleStreamOptions | undefined;
 	registry: ModelRegistry;
@@ -426,6 +445,7 @@ async function runReferenceTasks(args: {
 				...args,
 				options: phaseOptions,
 				task,
+				authPromise: args.referenceAuthPromises?.[index],
 			});
 			// A reference superseded mid-flight by an already-reached quorum (the
 			// phase was aborted without a caller abort) is a benign drop: its advice
@@ -479,6 +499,9 @@ async function runSingleReference(args: {
 	presetName: string;
 	preset: MoAPreset;
 	task: ReferenceTask;
+	// Pre-resolved auth for this reference (fired up front alongside the others).
+	// Falls back to a lazy fetch when absent so runReferences stays self-contained.
+	authPromise?: Promise<AuthResult>;
 	refContext: Context;
 	options: SimpleStreamOptions | undefined;
 	registry: ModelRegistry;
@@ -487,7 +510,8 @@ async function runSingleReference(args: {
 		if (args.refContext.tools !== undefined) {
 			throw new Error("MoA reference context unexpectedly includes tools");
 		}
-		const auth = await args.registry.getApiKeyAndHeaders(args.task.model);
+		const auth = await (args.authPromise ??
+			args.registry.getApiKeyAndHeaders(args.task.model));
 		if (!auth.ok) {
 			throw new Error(
 				`Authentication failed for ${args.task.slot.provider}: ${auth.error}`,
