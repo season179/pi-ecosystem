@@ -194,6 +194,42 @@ answer (directly, or — for `referenceProviderRouting` — via the reference ad
 into the aggregator), so they stay opt-in (constrain with `quantizations` / `only` / `ignore`
 if that matters). Example: `"referenceProviderRouting": { "sort": "latency" }`.
 
+### Pre-warming the aggregator's prompt cache (overlapping prefill with the reference phase)
+
+Placement and retention decide whether the aggregator's prompt cache *can* be reused; this
+knob attacks *when* the aggregator prefills at all. The aggregator needs the reference
+guidance to build its request, so its prefill currently runs **entirely after** the reference
+phase — un-overlapped, sitting on the head of its generation. On a cold cache (the first turn
+of a session, or after the cache TTL expires) that prefill is pure added latency.
+
+- `aggregatorPrewarm: true` fires a throwaway request to the aggregator over the
+  **guidance-free transcript prefix** — byte-identical to the prefix the real request will
+  share (system prompt + tools + prior turns; only the appended reference guidance differs) —
+  the moment the turn starts, so it runs **concurrently with the reference phase**. The
+  provider prefills and writes its prompt cache while the references are still streaming; when
+  the real aggregator request fires after the references settle, it reads that warm cache
+  instead of prefilling from cold, cutting its time-to-first-token. This is the one lever that
+  **hides** aggregator prefill under the reference phase rather than shrinking either phase.
+
+  The warm-up is deliberately cheap and side-effect-free: its `onPayload`/`onResponse` hooks
+  are dropped, its reasoning is pinned to `minimal` (so a reasoning aggregator doesn't burn a
+  thinking budget on the ping — the cached prefix is keyed by message content, not generation
+  params), and its request is **aborted the instant the provider emits its first event** (by
+  then the prompt has been processed and the cache written, so it pays for the prefill but
+  generates essentially nothing). Any failure is swallowed — the warm-up can never affect the
+  real turn. The real request awaits the warm-up before reading, so the cache write is
+  committed first; since the reference phase dominates the wall-clock this await almost never
+  blocks.
+
+  It is **unset by default** — no warming request fires, so the turn is byte-identical to
+  before the knob existed. Kept opt-in because the warm-up costs an extra prefill (a
+  prompt-cache write) and only pays off on **caching** providers (the default
+  `openrouter/anthropic/*` aggregator is one). It composes best with
+  `aggregatorGuidancePlacement: "trailing-message"` and `aggregatorCacheRetention: "long"`,
+  which keep the shared prefix byte-stable and the warm cache alive; with the default
+  `latest-user` placement in a tool loop the guidance mutates an early message, so the warmed
+  prefix still covers the (large, fixed) system prompt but not the whole transcript.
+
 ### Streaming the aggregator answer (time-to-first-token)
 
 By default the aggregator's answer is delivered to the UI in a **single burst** once it has

@@ -32,6 +32,7 @@ export interface MoAPreset {
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	aggregatorCacheRetention?: CacheRetention;
 	aggregatorProviderRouting?: OpenRouterRouting;
+	aggregatorPrewarm?: boolean;
 	streamAggregator?: boolean;
 	streamReferences?: boolean;
 	failOnReferenceError?: boolean;

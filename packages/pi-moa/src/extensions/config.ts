@@ -204,6 +204,9 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"referenceProviderRouting",
 	);
+	if (value.aggregatorPrewarm !== undefined && typeof value.aggregatorPrewarm !== "boolean") {
+		throw new Error(`MoA preset "${presetName}": "aggregatorPrewarm" must be a boolean`);
+	}
 	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
 	}

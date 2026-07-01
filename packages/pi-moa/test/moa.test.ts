@@ -135,6 +135,30 @@ function thinkingFromResult(
 		.join("\n");
 }
 
+// Flatten a context's system prompt and message text into one searchable string,
+// so a test can assert whether a given request carried the MoA guidance block.
+function serializeContextText(context: Context): string {
+	const chunks: string[] = [context.systemPrompt ?? ""];
+	for (const message of context.messages) {
+		const content = (message as { content: unknown }).content;
+		if (typeof content === "string") {
+			chunks.push(content);
+		} else if (Array.isArray(content)) {
+			for (const block of content) {
+				if (
+					block &&
+					typeof block === "object" &&
+					"text" in block &&
+					typeof (block as { text: unknown }).text === "string"
+				) {
+					chunks.push((block as { text: string }).text);
+				}
+			}
+		}
+	}
+	return chunks.join("\n");
+}
+
 function makeSyntheticMoAModel(
 	realModel: Model<Api>,
 	presetName = "default",
@@ -323,6 +347,16 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/referenceProviderRouting.*sort/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorPrewarm:
+							"yes" as unknown as MoAPreset["aggregatorPrewarm"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorPrewarm/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1391,6 +1425,114 @@ describe("MoA orchestration", () => {
 		// synthetic compat is injected, so the reference request is byte-identical.
 		expect(referenceRouting).toBeUndefined();
 		expect(sawCompat).toBeUndefined();
+	});
+
+	it("pre-warms the aggregator's prompt cache over the guidance-free prefix during the reference phase", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let warmContextText: string | undefined;
+		let warmReasoning: unknown;
+		let realContextText: string | undefined;
+		let warmRanWhileReferencePending = false;
+		let resolveWarm!: () => void;
+		const warmRan = new Promise<void>((resolve) => {
+			resolveWarm = resolve;
+		});
+		// Under pre-warm the aggregator is called twice: first the throwaway warm-up
+		// (guidance-free prefix, minimal reasoning), then the real request (guidance
+		// appended, caller's reasoning kept).
+		agg.setResponses([
+			(context, options) => {
+				warmContextText = serializeContextText(context);
+				warmReasoning = (options as { reasoning?: unknown })?.reasoning;
+				resolveWarm();
+				return fauxAssistantMessage("warm");
+			},
+			(context) => {
+				realContextText = serializeContextText(context);
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		// The single serial reference cannot settle until the warm-up has run, proving
+		// the warm request fires DURING the reference phase (its prefill overlaps the
+		// references rather than stacking after them). Reverting the pre-warm leaves
+		// `warmRan` unresolved, so the reference falls through the 500ms guard with the
+		// flag still false and the assertion below fails (fast on success, bounded on
+		// failure — no hang).
+		refA.setResponses([
+			async () => {
+				await Promise.race([
+					warmRan.then(() => {
+						warmRanWhileReferencePending = true;
+					}),
+					new Promise((resolve) => setTimeout(resolve, 500)),
+				]);
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceConcurrency: 1,
+					aggregatorPrewarm: true,
+				}),
+			),
+		).result();
+		// The warm-up ran while the reference was still pending — overlap achieved.
+		expect(warmRanWhileReferencePending).toBe(true);
+		// It carries the guidance-free prefix (no MoA reference block), so it shares the
+		// byte-stable prefix the real request will read back from the warm cache...
+		expect(warmContextText).toBeDefined();
+		expect(warmContextText).not.toContain(MOA_GUIDANCE_MARKER);
+		// ...pinned to minimal reasoning so a reasoning aggregator does not burn a full
+		// thinking budget on the throwaway ping (the caller asked for "high")...
+		expect(warmReasoning).toBe("minimal");
+		// ...while the real request keeps the guidance for the aggregator to act on.
+		expect(realContextText).toContain(MOA_GUIDANCE_MARKER);
+	});
+
+	it("fires no aggregator pre-warm request when aggregatorPrewarm is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let aggregatorCallCount = 0;
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([
+			() => {
+				aggregatorCallCount += 1;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// Exactly one aggregator request (the real one) — no warm-up fires, so the turn
+		// is byte-identical to before the pre-warm knob existed.
+		expect(aggregatorCallCount).toBe(1);
 	});
 
 	it("bounds reference input to referenceMaxContextChars while the aggregator keeps the full context", async () => {

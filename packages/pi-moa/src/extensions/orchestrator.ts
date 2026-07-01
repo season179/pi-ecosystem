@@ -130,6 +130,31 @@ export function streamMoA(
 			);
 		}
 
+		// Steer OpenRouter's provider routing for the aggregator's request. OpenRouter
+		// fronts several upstream providers per model and, by default, balances routing
+		// (weighted by price/uptime) — which can land the aggregator on a slow backend.
+		// The aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
+		// references, which quorum/timeout/output caps already bound), so pinning it to a
+		// high-throughput / low-latency backend is the most direct latency lever left:
+		// `sort: "throughput"` routes to the fastest tokens/sec provider, `sort:
+		// "latency"` to the lowest time-to-first-token, and preferred_min_throughput /
+		// preferred_max_latency set explicit floors/ceilings. This lives on the model's
+		// `compat` (not the stream options), and pi-ai's openai-completions provider
+		// applies it ONLY when the model's baseUrl points at OpenRouter — so it is a safe
+		// no-op for a non-openrouter aggregator. Aggregator-scoped (references keep their
+		// own routing) and unset by default. Kept opt-in — not shipped in the default
+		// preset — because a different backend can differ in quantization or behavior and
+		// so could subtly shift the answer, unlike a pure cache/TTL hint. Computed up here
+		// (before auth/references) so the optional prompt-cache pre-warm below hits the
+		// exact same routed backend as the real aggregator request.
+		const aggregatorStreamModel =
+			preset.aggregatorProviderRouting !== undefined
+				? withOpenRouterRouting(
+						aggregatorModel,
+						preset.aggregatorProviderRouting,
+					)
+				: aggregatorModel;
+
 		// Resolve auth for the aggregator AND every reference concurrently, up front —
 		// before building the reference context and before any reference streams.
 		// getApiKeyAndHeaders depends on nothing the reference phase produces, is
@@ -156,6 +181,35 @@ export function streamMoA(
 		// consumes it directly (no redundant second strip), and the aggregator guidance
 		// placement below reuses it too.
 		const strippedContext = stripPriorMoAGuidanceMessages(context);
+
+		// Optionally pre-warm the aggregator's prompt cache DURING the reference phase.
+		// The aggregator re-prefills its whole context every turn, and that prefill
+		// currently runs entirely AFTER the references finish (the aggregator needs the
+		// reference guidance to build its request) — it sits, un-overlapped, on the head
+		// of the aggregator's generation. This fires a best-effort throwaway request to
+		// the aggregator over the guidance-free transcript prefix — the exact byte-stable
+		// prefix the real request shares (system prompt + tools + prior turns; only the
+		// appended guidance differs) — so the provider prefills and writes its prompt
+		// cache while the references are still streaming. When the real aggregator
+		// request fires after the reference phase it reads that warm cache instead of
+		// re-prefilling from cold, cutting its time-to-first-token. This is the one
+		// structural lever that hides aggregator prefill latency under the reference
+		// phase rather than shrinking either phase. It composes with (and is most
+		// effective alongside) trailing-message placement + long cache retention, which
+		// keep the shared prefix byte-stable and the warm cache alive. Opt-in and unset
+		// by default: no warming request fires, so the turn is byte-identical. Kept
+		// opt-in because the warming request costs an extra prefill (a prompt-cache
+		// write) and only pays off on caching providers (the default openrouter/anthropic
+		// aggregator is one).
+		const prewarmPromise =
+			preset.aggregatorPrewarm === true
+				? prewarmAggregatorCache(
+						aggregatorStreamModel,
+						strippedContext,
+						options,
+						aggregatorAuthPromise,
+					)
+				: undefined;
 
 		const referenceContext = renderReferenceContext(strippedContext, preset);
 
@@ -266,29 +320,6 @@ export function streamMoA(
 			aggregatorOptions.cacheRetention = preset.aggregatorCacheRetention;
 		}
 
-		// Steer OpenRouter's provider routing for the aggregator's request. OpenRouter
-		// fronts several upstream providers per model and, by default, balances routing
-		// (weighted by price/uptime) — which can land the aggregator on a slow backend.
-		// The aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
-		// references, which quorum/timeout/output caps already bound), so pinning it to a
-		// high-throughput / low-latency backend is the most direct latency lever left:
-		// `sort: "throughput"` routes to the fastest tokens/sec provider, `sort:
-		// "latency"` to the lowest time-to-first-token, and preferred_min_throughput /
-		// preferred_max_latency set explicit floors/ceilings. This lives on the model's
-		// `compat` (not the stream options), and pi-ai's openai-completions provider
-		// applies it ONLY when the model's baseUrl points at OpenRouter — so it is a safe
-		// no-op for a non-openrouter aggregator. Aggregator-scoped (references keep their
-		// own routing) and unset by default. Kept opt-in — not shipped in the default
-		// preset — because a different backend can differ in quantization or behavior and
-		// so could subtly shift the answer, unlike a pure cache/TTL hint.
-		const aggregatorStreamModel =
-			preset.aggregatorProviderRouting !== undefined
-				? withOpenRouterRouting(
-						aggregatorModel,
-						preset.aggregatorProviderRouting,
-					)
-				: aggregatorModel;
-
 		// Emit the reference outputs as a leading, display-only thinking block so
 		// they render ABOVE the aggregator's answer (and during its compute pause).
 		// The block is persisted on the assistant message for the human to see;
@@ -340,6 +371,15 @@ export function streamMoA(
 			primaryContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
 		} else {
 			primaryContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
+		}
+		// Let the pre-warm (fired at the top of the turn, overlapping the reference
+		// phase) settle before the real aggregator request reads its cache. It almost
+		// always finished long ago — references dominate the wall-clock — so this rarely
+		// waits; it just guarantees the warm prefill's prompt-cache write is committed
+		// before the real read, rather than racing it. It never rejects (best-effort,
+		// self-contained) and is undefined when pre-warm is off, so this is a no-op then.
+		if (prewarmPromise) {
+			await prewarmPromise;
 		}
 		const streamIncremental = preset.streamAggregator === true;
 		const primaryResult = await forwardAggregatorStream({
@@ -932,6 +972,77 @@ function withOpenRouterRouting(
 		...model,
 		compat: { ...model.compat, openRouterRouting: routing },
 	} as Model<Api>;
+}
+
+// Best-effort prompt-cache pre-warm for the aggregator, fired at the top of the
+// turn so its prefill overlaps the reference phase. It sends the guidance-free
+// transcript prefix — byte-identical to the prefix the real aggregator request
+// will share (the real one only appends the reference guidance) — to the same
+// (optionally routed) aggregator backend, prompting the provider to prefill and
+// write its prompt cache. The real request, firing after the references settle,
+// then reads that warm cache instead of prefilling from cold.
+//
+// It is deliberately cheap and side-effect-free:
+//   - `onPayload`/`onResponse` are dropped (an `onResponse` here would fire the
+//     acting agent's response hook on a throwaway ping; `onPayload` is dropped
+//     symmetrically to avoid double-running a payload mutator).
+//   - `reasoning` is pinned to "minimal" so a reasoning aggregator does not burn a
+//     full thinking budget on the warm request; the prompt-cache prefix is keyed by
+//     the message content, not the generation params, so this does not change what
+//     the real request can read.
+//   - The stream is aborted the instant the provider emits its FIRST event: by then
+//     the prompt has been processed (prefill + cache write happen before the first
+//     token), so we pay for the cache write but generate essentially nothing.
+//
+// Any failure (auth, network, provider rejection, abort) is swallowed — the warm-up
+// must never affect the real turn. Returns a promise that never rejects.
+async function prewarmAggregatorCache(
+	model: Model<Api>,
+	strippedContext: Context,
+	options: SimpleStreamOptions | undefined,
+	authPromise: Promise<AuthResult>,
+): Promise<void> {
+	const parentSignal = options?.signal;
+	if (parentSignal?.aborted) {
+		return;
+	}
+	try {
+		const auth = await authPromise;
+		if (!auth.ok || parentSignal?.aborted) {
+			return;
+		}
+		const controller = new AbortController();
+		const forwardAbort = () => controller.abort();
+		parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+		try {
+			const {
+				onPayload: _onPayload,
+				onResponse: _onResponse,
+				...forwardableOptions
+			} = options ?? {};
+			const warmOptions: SimpleStreamOptions = {
+				...forwardableOptions,
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal: controller.signal,
+				reasoning: "minimal",
+			};
+			const stream = streamSimple(model, strippedContext, warmOptions);
+			for await (const event of stream) {
+				// The provider has processed the prompt (prefill + prompt-cache write)
+				// by the time it emits any event, so stop right here: abort the request
+				// to avoid generating a real (billable, latency-adding) completion.
+				if (event.type !== "error") {
+					controller.abort();
+				}
+				return;
+			}
+		} finally {
+			parentSignal?.removeEventListener("abort", forwardAbort);
+		}
+	} catch {
+		// Best-effort: never let a warm-up failure surface on the real turn.
+	}
 }
 
 function resolveUnderlyingModel(
