@@ -16,6 +16,7 @@ export interface MoAPreset {
 	referenceModels: ModelSlot[];
 	aggregator: ModelSlot;
 	referenceConcurrency?: number;
+	referenceQuorum?: number;
 	maxReferences?: number;
 	maxReferenceOutputChars?: number;
 	referenceMaxContextChars?: number;

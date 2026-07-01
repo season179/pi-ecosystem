@@ -206,6 +206,12 @@ describe("MoA config", () => {
 			validateMoAConfig(baseConfig(basePreset({ referenceTimeoutMs: 0 }))),
 		).toThrow(/referenceTimeoutMs/);
 		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceQuorum: 0 }))),
+		).toThrow(/referenceQuorum/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceQuorum: 3 }))),
+		).toThrow(/referenceQuorum/);
+		expect(() =>
 			validateMoAConfig(
 				baseConfig(basePreset({ referenceMaxContextChars: 499 })),
 			),
@@ -1032,6 +1038,52 @@ describe("MoA orchestration", () => {
 		const aggMessages = JSON.stringify(aggregatorContext?.messages);
 		expect(aggMessages).toContain("advice A");
 		expect(aggMessages).toContain("referenceTimeoutMs");
+	});
+
+	it("proceeds as soon as referenceQuorum references succeed, dropping the slower ones", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		// refA answers promptly; refB hangs forever (its responder never resolves,
+		// so it never begins streaming — an abort cannot unblock it). With quorum 1,
+		// the fast reference alone must satisfy the phase so the aggregator runs
+		// immediately, WITHOUT any wall-clock deadline. If quorum did not short the
+		// phase, this test would hang on refB.
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		refB.setResponses([() => new Promise<never>(() => {})]);
+		let aggregatorContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(basePreset({ referenceQuorum: 1 })),
+		).result();
+
+		// The turn completed on the fast reference alone.
+		expect(textFromResult(result)).toContain("final answer");
+		const references = thinkingFromResult(result);
+		expect(references).toContain("ref-a/a");
+		expect(references).toContain("advice A");
+		// The superseded slow reference is dropped entirely — NOT surfaced as a
+		// failure (which is what distinguishes quorum from a timeout).
+		expect(references).not.toContain("ref-b/b");
+		expect(references).not.toContain("(failed)");
+		const aggMessages = JSON.stringify(aggregatorContext?.messages);
+		expect(aggMessages).toContain("advice A");
+		expect(aggMessages).not.toContain("ref-b/b");
 	});
 
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {

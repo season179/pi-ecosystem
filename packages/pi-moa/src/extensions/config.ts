@@ -149,6 +149,16 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 			`MoA preset "${presetName}": "referenceConcurrency" must be less than or equal to "maxReferences"`,
 		);
 	}
+	const referenceQuorum = readOptionalPositiveInteger(
+		value.referenceQuorum,
+		presetName,
+		"referenceQuorum",
+	);
+	if (referenceQuorum !== undefined && referenceQuorum > value.referenceModels.length) {
+		throw new Error(
+			`MoA preset "${presetName}": "referenceQuorum" must be less than or equal to the number of "referenceModels"`,
+		);
+	}
 	readOptionalNumber(value.referenceTemperature, presetName, "referenceTemperature");
 	readOptionalNumber(value.aggregatorTemperature, presetName, "aggregatorTemperature");
 	if (value.failOnReferenceError !== undefined && typeof value.failOnReferenceError !== "boolean") {

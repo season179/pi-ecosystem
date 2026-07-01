@@ -49,6 +49,20 @@ provider cannot hold the turn hostage:
   for every reference to finish, exactly as before. Set it when you would rather trade a
   slow reference's tail for a faster, bounded turn.
 
+`referenceTimeoutMs` needs a good absolute deadline picked ahead of time. When you run
+several references, a relative bound is often better: proceed as soon as *enough* of them
+have answered, no matter how fast the batch is overall. That is `referenceQuorum`:
+
+- `referenceQuorum` is the number of references whose advice is enough to start the
+  aggregator. The moment that many references **succeed**, the phase resolves immediately
+  and the still-running (slower) references are dropped — the ones that can be aborted are,
+  capping their cost; a reference that stalls before it streams is simply abandoned rather
+  than awaited. This bounds the reference phase to the *N-th fastest* reference instead of
+  the slowest, with no deadline to guess. Dropped references are omitted (not shown as
+  failures). It is **unset by default** (every reference is awaited, exactly as before),
+  must be ≤ the number of `referenceModels`, and composes with `referenceTimeoutMs`. Set it
+  when you configure several references but only need the fastest few to move on.
+
 A reasoning reference model can also spend most of its wall-clock *thinking* before it
 emits any advice text. That thinking never reaches the aggregator or the display (only
 the reference's text is kept), and the stream-and-abort above counts text — not thinking

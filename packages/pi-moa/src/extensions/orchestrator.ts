@@ -336,20 +336,88 @@ async function runReferenceTasks(args: {
 		getReferenceConcurrency(args.preset),
 		Math.max(1, args.referenceTasks.length),
 	);
+	const quorum = args.preset.referenceQuorum;
 	const results: ReferenceOutput[] = new Array(args.referenceTasks.length);
 	let nextIndex = 0;
+	let successCount = 0;
+	let quorumReached = false;
+
+	// A phase-level controller lets a reached quorum abort the still-running
+	// (slower) references without touching the caller's signal. It is linked to
+	// the parent so a genuine caller abort still propagates to every reference;
+	// with no quorum set it only ever fires via the parent, so behavior is
+	// identical to awaiting every reference as before.
+	const parentSignal = args.options?.signal;
+	const phaseController = new AbortController();
+	if (parentSignal?.aborted) {
+		phaseController.abort();
+	}
+	const forwardParentAbort = () => phaseController.abort();
+	parentSignal?.addEventListener("abort", forwardParentAbort, { once: true });
+	const phaseOptions: SimpleStreamOptions = {
+		...(args.options ?? {}),
+		signal: phaseController.signal,
+	};
+
+	let onQuorumMet: (() => void) | undefined;
+	const quorumMet = new Promise<void>((resolve) => {
+		onQuorumMet = resolve;
+	});
 
 	async function worker(): Promise<void> {
-		while (!args.options?.signal?.aborted) {
+		while (!phaseController.signal.aborted) {
 			const index = nextIndex;
 			nextIndex += 1;
 			if (index >= args.referenceTasks.length) return;
 			const task = args.referenceTasks[index];
-			results[index] = await runSingleReference({ ...args, task });
+			const output = await runSingleReference({
+				...args,
+				options: phaseOptions,
+				task,
+			});
+			// A reference superseded mid-flight by an already-reached quorum (the
+			// phase was aborted without a caller abort) is a benign drop: its advice
+			// is no longer needed, so leave its slot empty rather than recording a
+			// spurious failure.
+			if (quorumReached && !parentSignal?.aborted) {
+				return;
+			}
+			results[index] = output;
+			if (
+				output.success &&
+				quorum !== undefined &&
+				!quorumReached &&
+				++successCount >= quorum
+			) {
+				// Enough references have succeeded: stop waiting for the rest. Abort
+				// the ones we can (real streams honor it, capping their cost) and
+				// resolve immediately — a reference that stalls before it streams can't
+				// be unblocked by abort, so we must not await it (mirrors
+				// referenceTimeoutMs).
+				quorumReached = true;
+				phaseController.abort();
+				onQuorumMet?.();
+				return;
+			}
 		}
 	}
 
-	await Promise.all(Array.from({ length: concurrency }, () => worker()));
+	const allSettled = Promise.all(
+		Array.from({ length: concurrency }, () => worker()),
+	);
+	try {
+		if (quorum === undefined) {
+			await allSettled;
+		} else {
+			// The abandoned workers may reject later (a superseded reference throwing
+			// under failOnReferenceError); swallow it so it never surfaces as an
+			// unhandled rejection once the quorum has already resolved the phase.
+			allSettled.catch(() => {});
+			await Promise.race([allSettled, quorumMet]);
+		}
+	} finally {
+		parentSignal?.removeEventListener("abort", forwardParentAbort);
+	}
 	return results.filter(
 		(output): output is ReferenceOutput => output !== undefined,
 	);
