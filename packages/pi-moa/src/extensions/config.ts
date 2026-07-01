@@ -165,6 +165,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalMinimumInteger(value.referenceMaxRetries, presetName, "referenceMaxRetries", 0);
 	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
 	readOptionalThinkingLevel(value.aggregatorReasoning, presetName, "aggregatorReasoning");
+	readOptionalThinkingBudgets(value.aggregatorThinkingBudgets, presetName, "aggregatorThinkingBudgets");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,
@@ -276,6 +277,33 @@ function readOptionalThinkingLevel(value: unknown, presetName: string, field: st
 		throw new Error(
 			`MoA preset "${presetName}": "${field}" must be one of ${THINKING_LEVELS.join(", ")}`,
 		);
+	}
+}
+
+// The aggregator-thinking-budgets knob sets precise per-effort-level thinking
+// TOKEN budgets for the aggregator, overriding the coarse default budget that a
+// reasoning effort level maps to. It is the finer-grained companion to
+// `aggregatorReasoning`: keep a given effort level while bounding (or raising)
+// the thinking tokens it spends before answering — the dominant per-turn cost.
+// It maps to pi-ai's `ThinkingBudgets` (honored by token-based providers:
+// native Anthropic / Google / Bedrock), so validation is light — confirm it is
+// an object and that each known thinking-level budget, when present, is a
+// positive integer (token counts). Unknown keys flow through to pi-ai untouched.
+const THINKING_BUDGET_LEVELS = ["minimal", "low", "medium", "high"] as const;
+
+function readOptionalThinkingBudgets(value: unknown, presetName: string, field: string): void {
+	if (value === undefined) return;
+	if (!isRecord(value)) {
+		throw new Error(`MoA preset "${presetName}": "${field}" must be an object`);
+	}
+	for (const level of THINKING_BUDGET_LEVELS) {
+		const budget = value[level];
+		if (budget === undefined) continue;
+		if (typeof budget !== "number" || !Number.isInteger(budget) || budget < 1) {
+			throw new Error(
+				`MoA preset "${presetName}": "${field}.${level}" must be an integer greater than or equal to 1`,
+			);
+		}
 	}
 }
 

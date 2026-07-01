@@ -4,6 +4,7 @@ import type {
 	Context,
 	Model,
 	OpenRouterRouting,
+	ThinkingBudgets,
 	ThinkingLevel,
 	Usage,
 } from "@earendil-works/pi-ai";
@@ -30,6 +31,7 @@ export interface MoAPreset {
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorReasoning?: ThinkingLevel;
+	aggregatorThinkingBudgets?: ThinkingBudgets;
 	aggregatorGuidancePlacement?: "latest-user" | "trailing-message";
 	aggregatorCacheRetention?: CacheRetention;
 	aggregatorProviderRouting?: OpenRouterRouting;

@@ -303,6 +303,26 @@ export function streamMoA(
 		if (preset.aggregatorReasoning !== undefined) {
 			aggregatorOptions.reasoning = preset.aggregatorReasoning;
 		}
+		// Pin the aggregator's per-effort-level thinking TOKEN budgets — the
+		// finer-grained companion to aggregatorReasoning. A reasoning effort level
+		// (minimal/low/medium/high) maps to a DEFAULT thinking-token budget
+		// (pi-ai's adjustMaxTokensForThinking: 1024/2048/8192/16384); this knob
+		// overrides those exact numbers, so a preset can keep a given effort level's
+		// behavior while precisely bounding (or raising) how many thinking tokens the
+		// aggregator spends before it answers — the dominant per-turn generation cost
+		// — with finer granularity than the five discrete effort levels (e.g. keep
+		// "high" but cap its budget from 16384 to 4000). Set AFTER the caller-options
+		// spread so the preset governs the aggregator's budgets; references keep the
+		// caller's. Token-based providers (native Anthropic / Google / Bedrock) honor
+		// thinkingBudgets; pi-ai's openai-completions provider (the default openrouter
+		// fleet) ignores it, so it is a safe provider-side no-op there — this lever
+		// pays off when the aggregator is a native token-based model. Like
+		// aggregatorReasoning it shapes the thinking budget and so trades a little
+		// answer quality for latency, so it stays opt-in and unset by default, leaving
+		// the aggregator inheriting the caller's budgets exactly as before.
+		if (preset.aggregatorThinkingBudgets !== undefined) {
+			aggregatorOptions.thinkingBudgets = preset.aggregatorThinkingBudgets;
+		}
 		// Ask the aggregator's provider to keep its prompt cache alive for the
 		// configured retention (a cache-TTL hint mapped to Anthropic `cache_control.ttl`
 		// / OpenAI `prompt_cache_retention`). The aggregator re-prefills its whole

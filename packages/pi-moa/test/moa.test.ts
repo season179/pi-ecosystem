@@ -367,6 +367,46 @@ describe("MoA config", () => {
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: 0 }))),
 		).not.toThrow();
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorThinkingBudgets:
+							"high" as unknown as MoAPreset["aggregatorThinkingBudgets"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorThinkingBudgets/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorThinkingBudgets: {
+							high: 0,
+						} as unknown as MoAPreset["aggregatorThinkingBudgets"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorThinkingBudgets.*high/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorThinkingBudgets: {
+							low: 1.5,
+						} as unknown as MoAPreset["aggregatorThinkingBudgets"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorThinkingBudgets.*low/);
+		// A valid per-level budget map (positive-integer token counts) is accepted.
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({ aggregatorThinkingBudgets: { high: 4000, low: 1024 } }),
+				),
+			),
+		).not.toThrow();
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1258,6 +1298,90 @@ describe("MoA orchestration", () => {
 		// With no preset override the aggregator inherits the caller's reasoning
 		// exactly as before — zero behavioral change by default.
 		expect(aggregatorReasoning).toBe("high");
+	});
+
+	it("applies aggregatorThinkingBudgets to the aggregator only, leaving references untouched", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceThinkingBudgets: unknown;
+		let aggregatorThinkingBudgets: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller passes no thinking-budget preference...
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorThinkingBudgets: { high: 4000, low: 1024 },
+				}),
+			),
+		).result();
+		// ...so the preset pins the aggregator's per-level thinking token budgets
+		// (bounding the dominant per-turn generation cost with finer granularity than
+		// the effort levels), while the reference keeps the caller's (undefined here)
+		// — the aggregator knob never touches references.
+		expect(aggregatorThinkingBudgets).toEqual({ high: 4000, low: 1024 });
+		expect(referenceThinkingBudgets).toBeUndefined();
+	});
+
+	it("leaves the aggregator inheriting the caller's thinkingBudgets when aggregatorThinkingBudgets is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let aggregatorThinkingBudgets: unknown;
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorThinkingBudgets = (
+					options as { thinkingBudgets?: unknown }
+				)?.thinkingBudgets;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller supplies its own thinking budgets...
+			{ thinkingBudgets: { high: 2048 } },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// ...and with no preset override the aggregator inherits them exactly as
+		// before — zero behavioral change by default.
+		expect(aggregatorThinkingBudgets).toEqual({ high: 2048 });
 	});
 
 	it("applies aggregatorCacheRetention to the aggregator only, overriding the caller and leaving references untouched", async () => {

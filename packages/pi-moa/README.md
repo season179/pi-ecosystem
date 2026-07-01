@@ -185,6 +185,24 @@ default. `aggregatorReasoning` decouples them (the aggregator-side mirror of
   reasoning shapes the *final answer*, this trades answer quality for latency directly — a
   sharper trade-off than the reference knobs — so it stays opt-in.
 
+`aggregatorThinkingBudgets` is the finer-grained companion to `aggregatorReasoning`. A
+reasoning effort level maps to a *default* thinking-token budget (roughly
+`minimal: 1024`, `low: 2048`, `medium: 8192`, `high: 16384`); this knob overrides those
+exact numbers per level, so a preset can keep an effort level's behavior while precisely
+bounding (or raising) how many thinking tokens the aggregator spends before it answers —
+with finer granularity than the five discrete effort levels.
+
+- `aggregatorThinkingBudgets` takes a `{ minimal?, low?, medium?, high? }` map of positive
+  integer token counts, applied **after** the caller's options and to **only the
+  aggregator** (references keep the caller's budgets). Example: keep `reasoning: "high"`
+  but set `{ high: 4000 }` to cut the thinking budget from ~16384 to 4000 tokens.
+- It is honored by **token-based providers** (native Anthropic / Google / Bedrock);
+  pi-ai's OpenAI-completions provider (the default `openrouter` fleet) ignores it, so it is
+  a safe provider-side **no-op** there — this lever pays off when the aggregator is a native
+  token-based model. Like `aggregatorReasoning` it shapes the thinking budget and so trades
+  a little answer quality for latency, so it is **unset by default** (the aggregator
+  inherits the caller's budgets exactly as before).
+
 ### Steering OpenRouter provider routing
 
 The reasoning/retention/placement knobs tune *how* a request runs; these tune *which
