@@ -91,6 +91,25 @@ sits on the aggregator-blocking path. `referenceMaxContextChars` bounds it:
   whole transcript, exactly as before). Set it when reference latency on long transcripts
   matters more than giving the advisors full history.
 
+Every knob above bounds the reference's *generation* (length, cost, time, thinking, input).
+One critical-path cost sits *below* generation, in the network layer: when a reference's
+request hits a transient error (a 429 rate limit or a 5xx), the underlying SDK retries it
+with exponential backoff — two attempts by default — and each retry, plus any server-requested
+`Retry-After` wait, blocks the aggregator (which cannot start until the slowest, or quorum-th,
+reference settles). `referenceMaxRetries` bounds that backoff:
+
+- `referenceMaxRetries` caps the client-side retry attempts for **reference requests only**
+  (`0` disables retries entirely). Because references are advisory and failure-tolerant — a
+  failed one simply drops out of the guidance rather than failing the turn, unless
+  `failOnReferenceError` is set — a low cap lets a transient-error reference give up fast and
+  let the phase move on with whatever succeeded, instead of silently spending seconds on
+  backoff on the critical path. It is deliberately **reference-only**: the aggregator produces
+  the final answer, so failing it faster on a transient error would be a robustness regression,
+  not a speed win. It is **unset by default** (references keep the SDK/caller retry behavior,
+  exactly as before), and is forwarded to providers that support client-side retries (the
+  default `openrouter` fleet) and ignored by those that don't. Set it (e.g. `0` or `1`) to
+  trade a little reference resilience for a bounded worst-case turn.
+
 ### Aggregator prompt-cache reuse across tool loops
 
 Every knob above tunes the reference phase. The aggregator itself has one large,

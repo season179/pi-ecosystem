@@ -160,6 +160,9 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalMinimumInteger(value.referenceMaxContextChars, presetName, "referenceMaxContextChars", 500);
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
+	// maxRetries of 0 (disable client-side retries entirely) is meaningful, so this
+	// is a non-negative — not positive — integer.
+	readOptionalMinimumInteger(value.referenceMaxRetries, presetName, "referenceMaxRetries", 0);
 	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
 	readOptionalThinkingLevel(value.aggregatorReasoning, presetName, "aggregatorReasoning");
 	const referenceConcurrency = readOptionalPositiveInteger(

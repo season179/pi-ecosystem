@@ -357,6 +357,16 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/aggregatorPrewarm/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: -1 }))),
+		).toThrow(/referenceMaxRetries/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: 1.5 }))),
+		).toThrow(/referenceMaxRetries/);
+		// 0 (disable retries) is a valid, meaningful value — not rejected.
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: 0 }))),
+		).not.toThrow();
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1095,6 +1105,83 @@ describe("MoA orchestration", () => {
 		// With no referenceReasoning override, the reference inherits the caller's
 		// reasoning exactly as before — zero behavioral change by default.
 		expect(referenceReasoning).toBe("high");
+	});
+
+	it("caps client-side retries for references only, leaving the aggregator's untouched", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		const referenceMaxRetries: Array<number | undefined> = [];
+		let aggregatorMaxRetries: number | undefined = 999;
+		const captureReference = (_context: Context, options: unknown) => {
+			referenceMaxRetries.push(
+				(options as { maxRetries?: number })?.maxRetries,
+			);
+			return fauxAssistantMessage("advice");
+		};
+		refA.setResponses([captureReference]);
+		refB.setResponses([captureReference]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorMaxRetries = (options as { maxRetries?: number })?.maxRetries;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller passes no retry preference...
+			undefined,
+			registry,
+			baseConfig(basePreset({ referenceMaxRetries: 0 })),
+		).result();
+		// ...so every reference's request is pinned to zero client-side retries (fail
+		// fast on a transient error instead of blocking the critical path on backoff),
+		// while the aggregator — which produces the final answer — keeps the SDK/caller
+		// default (undefined here), so its resilience is never traded away.
+		expect(referenceMaxRetries).toEqual([0, 0]);
+		expect(aggregatorMaxRetries).toBeUndefined();
+	});
+
+	it("leaves reference retries inheriting the caller's when referenceMaxRetries is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceMaxRetries: number | undefined = 999;
+		refA.setResponses([
+			(_context, options) => {
+				referenceMaxRetries = (options as { maxRetries?: number })?.maxRetries;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller supplies its own retry budget across the board...
+			{ maxRetries: 5 },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// ...and with no preset override the reference inherits it exactly as before —
+		// zero behavioral change by default.
+		expect(referenceMaxRetries).toBe(5);
 	});
 
 	it("caps aggregator reasoning effort without changing the references'", async () => {

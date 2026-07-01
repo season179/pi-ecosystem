@@ -763,6 +763,29 @@ async function runSingleReference(args: {
 					? Math.min(referenceOptions.maxTokens, args.preset.referenceMaxTokens)
 					: args.preset.referenceMaxTokens;
 		}
+		// Bound the client-side retry attempts for this reference's request. The
+		// underlying SDK retries transient errors (429/5xx) with exponential backoff —
+		// two attempts by default — and each retry, plus any server-requested
+		// Retry-After wait, sits on the aggregator-blocking critical path: the
+		// aggregator cannot start until the slowest (or quorum-th) reference settles,
+		// so a rate-limited reference silently retrying can add seconds of backoff to
+		// the whole turn. References are advisory and failure-tolerant (a failed one
+		// simply drops out of the guidance rather than failing the turn, unless
+		// failOnReferenceError is set), so capping their retries lets a transient-error
+		// reference give up fast and let the phase move on with whatever succeeded —
+		// bounding a worst-case latency source the length/time/quorum caps don't touch
+		// (they bound generation and wall-clock; this bounds the retry-backoff before
+		// the stream even opens). This is deliberately reference-only: the aggregator
+		// produces the final answer, so failing it faster on a transient error would be
+		// a robustness regression rather than a speed win. Opt-in and unset by default,
+		// so references keep the caller/SDK retry behavior exactly as before; a preset
+		// that sets it (e.g. 0 or 1) trades a little reference resilience for a bounded
+		// tail. maxRetries is forwarded to the SDK client by pi-ai's openai-completions
+		// provider (the default openrouter fleet) and ignored by providers that don't
+		// support client-side retries.
+		if (typeof args.preset.referenceMaxRetries === "number") {
+			referenceOptions.maxRetries = args.preset.referenceMaxRetries;
+		}
 		// Steer OpenRouter's provider routing for this reference's request, mirroring
 		// aggregatorProviderRouting on the reference side. References sit on the
 		// aggregator-blocking critical path — the aggregator waits for the slowest (or

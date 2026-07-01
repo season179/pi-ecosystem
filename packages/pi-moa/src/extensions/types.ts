@@ -26,6 +26,7 @@ export interface MoAPreset {
 	referenceTimeoutMs?: number;
 	referenceReasoning?: ThinkingLevel;
 	referenceProviderRouting?: OpenRouterRouting;
+	referenceMaxRetries?: number;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorReasoning?: ThinkingLevel;
