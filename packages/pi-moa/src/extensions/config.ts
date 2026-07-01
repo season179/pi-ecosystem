@@ -30,6 +30,28 @@ export const DEFAULT_MOA_CONFIG: MoAConfig = {
 			// runs ~3-4 chars/token, so 2000 chars fits in <700 tokens — the kept text
 			// is unchanged while verbose references stop early instead of running long.
 			referenceMaxTokens: DEFAULT_REFERENCE_MAX_TOKENS,
+			// Stream the shipped default end-to-end so the out-of-box experience gets the
+			// perceived-latency win the validated streaming machinery enables. Both knobs
+			// are DISPLAY-ONLY: the persisted `done` message (and thus next-turn model
+			// context) is byte-identical to the buffered path either way — only WHEN the
+			// live deltas surface differs. MoA registers as an ordinary provider, and pi's
+			// agent loop already renders incremental content events from every real
+			// streaming provider, so this just makes the default behave like a normal
+			// streaming provider instead of buffering its whole turn.
+			//
+			// - streamReferences reveals the reference thinking block as it fills in (the
+			//   header immediately, then each reference's advice on settle) instead of one
+			//   burst after the phase; it self-protects, falling back to the atomic burst
+			//   when referenceQuorum is set or a reference model is missing.
+			// - streamAggregator forwards the aggregator's answer token-by-token, dropping
+			//   time-to-first-token from the whole generation to the first token. The
+			//   default "latest-user" guidance placement never creates the consecutive-user
+			//   sequence, so the streaming path always runs on its primary attempt.
+			//
+			// The TYPE-level default stays unset (undefined ⇒ buffered), so only this
+			// shipped preset opts in; a custom preset that omits the knobs is unaffected.
+			streamReferences: true,
+			streamAggregator: true,
 			failOnReferenceError: false,
 		},
 	},

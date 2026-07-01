@@ -15,6 +15,7 @@ import {
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	DEFAULT_MOA_CONFIG,
 	getPreset,
 	loadMoAConfig,
 	validateMoAConfig,
@@ -2309,5 +2310,93 @@ describe("MoA extension wiring", () => {
 					block.type === "text" && block.text?.includes("final answer"),
 			),
 		).toBe(true);
+	});
+
+});
+
+describe("MoA shipped default streaming", () => {
+	it("streams the shipped default preset end-to-end (references progressively, aggregator live)", async () => {
+		// The shipped DEFAULT_MOA_CONFIG opts into both streaming knobs so the out-of-box
+		// turn gives live feedback. Run it through streamMoA directly (loadMoAConfig would
+		// pick up a user's global moa.json) and iterate the real event stream — not just
+		// result() — to prove the deltas actually surface, while confirming the persisted
+		// `done` message is still the buffered shape: the safety property that makes
+		// streaming a zero-regression, display-only speedup.
+		const preset = DEFAULT_MOA_CONFIG.presets[DEFAULT_MOA_CONFIG.defaultPreset];
+		expect(preset.streamAggregator).toBe(true);
+		expect(preset.streamReferences).toBe(true);
+
+		const slots = [...preset.referenceModels, preset.aggregator];
+		const modelIds = [...new Set(slots.map((slot) => slot.model))];
+		const registration = registerFauxProvider({
+			provider: preset.aggregator.provider,
+			models: modelIds.map((id) => ({ id, name: id })),
+		});
+		registrations.push(registration);
+		registration.setResponses(
+			slots.map(
+				() =>
+					(
+						_context: Context,
+						_options: unknown,
+						_state: unknown,
+						model: Model<Api>,
+					) =>
+						model.id === preset.aggregator.model
+							? fauxAssistantMessage("the final answer streams in")
+							: fauxAssistantMessage(`advice from ${model.id}`),
+			),
+		);
+		const registry = createRegistry(
+			modelIds.map((id) => ({ model: registration.getModel(id)! })),
+		);
+
+		const stream = streamMoA(
+			makeSyntheticMoAModel(
+				registration.getModel(preset.aggregator.model)!,
+				DEFAULT_MOA_CONFIG.defaultPreset,
+			),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			DEFAULT_MOA_CONFIG,
+		);
+
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// streamReferences: the reference thinking block fills in progressively at
+		// content index 0 — more than the single atomic delta the buffered path emits.
+		const thinkingDeltas = events.filter(
+			(event): event is Extract<AssistantMessageEvent, { type: "thinking_delta" }> =>
+				event.type === "thinking_delta" && event.contentIndex === 0,
+		);
+		expect(thinkingDeltas.length).toBeGreaterThan(1);
+		expect(thinkingDeltas[0]?.delta).toContain(MOA_REFERENCE_THINKING_MARKER);
+
+		// streamAggregator: the answer arrives as incremental text_delta events shifted
+		// to index 1+ (index 0 is the reference thinking prelude), not one final burst.
+		const textDeltas = events.filter(
+			(event): event is Extract<AssistantMessageEvent, { type: "text_delta" }> =>
+				event.type === "text_delta",
+		);
+		expect(textDeltas.length).toBeGreaterThan(0);
+		expect(textDeltas.every((event) => event.contentIndex >= 1)).toBe(true);
+		expect(textDeltas.map((event) => event.delta).join("")).toContain(
+			"the final answer streams in",
+		);
+
+		// The persisted `done` message is unchanged by streaming: reference thinking at
+		// index 0, the aggregator's answer following — identical to the buffered path.
+		const done = events.filter(
+			(event): event is Extract<AssistantMessageEvent, { type: "done" }> =>
+				event.type === "done",
+		);
+		expect(done).toHaveLength(1);
+		const finalMessage = done[0].message;
+		expect(finalMessage.content[0]?.type).toBe("thinking");
+		expect(textFromResult(finalMessage)).toContain("the final answer streams in");
 	});
 });

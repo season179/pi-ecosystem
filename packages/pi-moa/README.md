@@ -138,9 +138,12 @@ once. On a long answer this pause is the dominant *perceived* latency of the tur
   by one to sit after the reference-thinking block (index 0), and every streamed partial
   carries that block, so the live message shape matches the final one. Any complete private
   guidance the aggregator echoes is stripped from the streamed partials just as it is from the
-  final message. It is **unset by default** (buffered), so the default behavior is byte-identical
-  — the *final* persisted message is the same either way; only the live display differs. Enable
-  it for a snappier feel with a streaming-capable UI.
+  final message. Streaming is **display-only** — the *final* persisted message (and thus next-turn
+  model context) is the same either way, so it is a zero-regression speedup. The **shipped
+  `default` preset enables it** so the out-of-box turn streams; the *type-level* default is unset
+  (buffered), so a custom preset that omits the knob is unaffected. (One display nuance: if the
+  aggregator errors mid-generation you'll see the partial answer before the error — standard
+  streaming behavior — instead of only the error.)
 
 ### Streaming the reference thinking block (reference-phase feedback)
 
@@ -157,10 +160,11 @@ does not touch this earlier gap.
   reference that finishes ahead of an earlier slot is buffered until that slot reveals), so the
   streamed order matches the final block and the accumulated text is byte-identical to the
   buffered prelude. Like `streamAggregator`, it is **display-only**: the persisted `done` message
-  is still built atomically, so what re-enters model context is unchanged. It is **unset by
-  default** (single burst), so default behavior is byte-identical. It composes with
-  `streamAggregator` (reference thinking streams at content index 0, the answer at index 1+).
-  It is scoped to the common case — it falls back to the single burst (no live reveal) when
-  `referenceQuorum` is set (dropped references would leave gaps in the slot-ordered reveal) or a
-  reference model can't be found (a missing slot shifts the output order); those paths stay
-  byte-identical.
+  is still built atomically, so what re-enters model context is unchanged. The **shipped `default`
+  preset enables it** alongside `streamAggregator` for a fully-streamed out-of-box turn; the
+  *type-level* default is unset (single burst), so a custom preset that omits the knob is
+  unaffected. It composes with `streamAggregator` (reference thinking streams at content index 0,
+  the answer at index 1+). It is scoped to the common case — it falls back to the single burst (no
+  live reveal) when `referenceQuorum` is set (dropped references would leave gaps in the
+  slot-ordered reveal) or a reference model can't be found (a missing slot shifts the output
+  order); those paths stay byte-identical.
