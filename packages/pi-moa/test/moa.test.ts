@@ -268,14 +268,102 @@ describe("MoA message shaping", () => {
 		};
 		const referenceContext = buildReferenceContext(context, basePreset());
 		expect(referenceContext.tools).toBeUndefined();
-		expect(referenceContext.systemPrompt).toContain("private reference model");
+		expect(referenceContext.systemPrompt).toContain("reference advisor");
 		expect(referenceContext.systemPrompt).not.toContain("acting system prompt");
 		expect(referenceContext.messages[0]).toMatchObject({ role: "user", content: "hello\n[image:image/png:4]" });
+		// Tool results fold into the preceding assistant turn (advisor framing),
+		// so the tool call and its result share one assistant message rather than
+		// the result arriving as a "user" turn that reads like a task instruction.
+		expect(referenceContext.messages[1].role).toBe("assistant");
 		expect(JSON.stringify(referenceContext.messages[1])).not.toContain("secret thinking");
 		expect(JSON.stringify(referenceContext.messages[1])).not.toContain("[assistant thinking omitted]");
 		expect(JSON.stringify(referenceContext.messages[1])).toContain("[Tool call: echo(");
-		expect(JSON.stringify(referenceContext.messages[2])).toContain("[Tool result: echo ->");
-		expect(JSON.stringify(referenceContext.messages[2])).toContain("...[truncated 3004 chars]...");
+		expect(JSON.stringify(referenceContext.messages[1])).toContain("[Tool result: echo ->");
+		expect(JSON.stringify(referenceContext.messages[1])).toContain("...[truncated 3004 chars]...");
+		// No tool-role messages leak to the reference, and the view ends on a
+		// synthetic user advisory turn so the reference advises rather than
+		// continuing the task as if it were the acting agent.
+		expect(referenceContext.messages.every((message) => message.role === "user" || message.role === "assistant")).toBe(
+			true,
+		);
+		const lastReferenceMessage = referenceContext.messages[referenceContext.messages.length - 1];
+		expect(lastReferenceMessage.role).toBe("user");
+		expect(JSON.stringify(lastReferenceMessage)).toContain("private guidance to the aggregator");
+	});
+
+	it("merges the advisory turn into a trailing user message and never emits consecutive same-role turns", () => {
+		const context: Context = {
+			systemPrompt: "acting system prompt",
+			messages: [
+				{ role: "user", content: "first question", timestamp: 1 },
+				fauxAssistantMessage([fauxToolCall("echo", { text: "a" }, { id: "t1" })]),
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "echo",
+					content: [{ type: "text", text: "result-a" }],
+					isError: false,
+					timestamp: 2,
+				},
+				fauxAssistantMessage([fauxToolCall("echo", { text: "b" }, { id: "t2" })]),
+				{
+					role: "toolResult",
+					toolCallId: "t2",
+					toolName: "echo",
+					content: [{ type: "text", text: "result-b" }],
+					isError: false,
+					timestamp: 3,
+				},
+				{ role: "user", content: "now what", timestamp: 4 },
+			],
+		};
+		const referenceContext = buildReferenceContext(context, basePreset());
+		const roles = referenceContext.messages.map((message) => message.role);
+		// Alternation is preserved: two assistant turns coalesce into one, and the
+		// trailing user turn absorbs the advisory instruction instead of spawning a
+		// second consecutive user message.
+		expect(roles).toEqual(["user", "assistant", "user"]);
+		for (let index = 1; index < roles.length; index++) {
+			expect(roles[index]).not.toBe(roles[index - 1]);
+		}
+		const lastReferenceMessage = referenceContext.messages[2];
+		expect(JSON.stringify(lastReferenceMessage)).toContain("now what");
+		expect(JSON.stringify(lastReferenceMessage)).toContain("private guidance to the aggregator");
+		// Both tool loops are visible to the advisor, folded into the one assistant turn.
+		expect(JSON.stringify(referenceContext.messages[1])).toContain("result-a");
+		expect(JSON.stringify(referenceContext.messages[1])).toContain("result-b");
+	});
+
+	it("produces a lone user advisory turn for an empty transcript", () => {
+		const referenceContext = buildReferenceContext({ messages: [] }, basePreset());
+		expect(referenceContext.tools).toBeUndefined();
+		expect(referenceContext.messages).toHaveLength(1);
+		expect(referenceContext.messages[0].role).toBe("user");
+		expect(JSON.stringify(referenceContext.messages[0])).toContain("private guidance to the aggregator");
+	});
+
+	it("handles a leading tool result that has no preceding assistant turn", () => {
+		const context: Context = {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "orphan",
+					toolName: "echo",
+					content: [{ type: "text", text: "orphan-result" }],
+					isError: false,
+					timestamp: 1,
+				},
+				{ role: "user", content: "continue", timestamp: 2 },
+			],
+		};
+		const referenceContext = buildReferenceContext(context, basePreset());
+		// The orphan tool result becomes a user line, coalesces with the following
+		// user turn, and the advisory merges in — one clean user turn, ends on user.
+		expect(referenceContext.messages.map((message) => message.role)).toEqual(["user"]);
+		const only = JSON.stringify(referenceContext.messages[0]);
+		expect(only).toContain("orphan-result");
+		expect(only).toContain("continue");
+		expect(only).toContain("private guidance to the aggregator");
 	});
 
 	it("builds guidance with truncation and redacted failed references", () => {
@@ -361,6 +449,39 @@ describe("MoA orchestration", () => {
 		expect(aggregatorContext?.systemPrompt).toContain("advice A");
 		expect(aggregatorContext?.systemPrompt).toContain("advice B");
 		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain(MOA_GUIDANCE_MARKER);
+	});
+
+	it("strips onPayload/onResponse hooks from references but keeps them for the aggregator", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		const referenceHooks: Array<{ onPayload: unknown; onResponse: unknown }> = [];
+		let aggregatorKeptHooks = false;
+		refA.setResponses([
+			(_context, options) => {
+				referenceHooks.push({ onPayload: options?.onPayload, onResponse: options?.onResponse });
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorKeptHooks = options?.onPayload !== undefined && options?.onResponse !== undefined;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]);
+		const context: Context = { messages: [{ role: "user", content: "question", timestamp: 1 }] };
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ onPayload: () => undefined, onResponse: () => undefined },
+			registry,
+			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+		).result();
+		// The reference never sees the payload-mutation hooks (the only path by
+		// which tool schemas could still reach a supposedly tool-free reference)...
+		expect(referenceHooks).toEqual([{ onPayload: undefined, onResponse: undefined }]);
+		// ...while the aggregator, the acting model, keeps them.
+		expect(aggregatorKeptHooks).toBe(true);
 	});
 
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {

@@ -262,8 +262,14 @@ async function runSingleReference(args: {
 		if (!auth.ok) {
 			throw new Error(`Authentication failed for ${args.task.slot.provider}: ${auth.error}`);
 		}
+		// Drop the payload-mutation hooks before forwarding options to a reference.
+		// `onPayload` runs against the raw provider payload right before send and
+		// could inject tool schemas (the one path by which a reference could still
+		// receive tools even though the Context carries none); `onResponse` is an
+		// acting-agent concern. References are advisory and must stay tool-free.
+		const { onPayload: _onPayload, onResponse: _onResponse, ...forwardableOptions } = args.options ?? {};
 		const referenceOptions: SimpleStreamOptions = {
-			...args.options,
+			...forwardableOptions,
 			apiKey: auth.apiKey,
 			headers: auth.headers,
 			signal: args.options?.signal,
