@@ -157,8 +157,7 @@ export function extractAssistantText(message: AssistantMessage): string {
 	return message.content
 		.flatMap((block) => {
 			if (block.type === "text") return [block.text];
-			if (block.type === "thinking") return ["[assistant thinking omitted]"];
-			return [`[Tool call: ${block.name}(${safeJsonStringify(block.arguments)})]`];
+			return [];
 		})
 		.join("\n")
 		.trim();
@@ -202,7 +201,7 @@ function renderAssistantForReference(message: AssistantMessage, toolNamesById: M
 			const text = stripVisibleReferenceBlocks(block.text).trim();
 			if (text) lines.push(text);
 		} else if (block.type === "thinking") {
-			lines.push("[assistant thinking omitted]");
+			continue;
 		} else {
 			toolNamesById.set(block.id, block.name);
 			lines.push(renderToolCall(block));

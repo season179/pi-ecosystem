@@ -271,7 +271,8 @@ describe("MoA message shaping", () => {
 		expect(referenceContext.systemPrompt).toContain("private reference model");
 		expect(referenceContext.systemPrompt).not.toContain("acting system prompt");
 		expect(referenceContext.messages[0]).toMatchObject({ role: "user", content: "hello\n[image:image/png:4]" });
-		expect(JSON.stringify(referenceContext.messages[1])).toContain("[assistant thinking omitted]");
+		expect(JSON.stringify(referenceContext.messages[1])).not.toContain("secret thinking");
+		expect(JSON.stringify(referenceContext.messages[1])).not.toContain("[assistant thinking omitted]");
 		expect(JSON.stringify(referenceContext.messages[1])).toContain("[Tool call: echo(");
 		expect(JSON.stringify(referenceContext.messages[2])).toContain("[Tool result: echo ->");
 		expect(JSON.stringify(referenceContext.messages[2])).toContain("...[truncated 3004 chars]...");
