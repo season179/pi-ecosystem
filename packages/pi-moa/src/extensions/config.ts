@@ -161,6 +161,7 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	readOptionalPositiveInteger(value.referenceMaxTokens, presetName, "referenceMaxTokens");
 	readOptionalPositiveInteger(value.referenceTimeoutMs, presetName, "referenceTimeoutMs");
 	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
+	readOptionalThinkingLevel(value.aggregatorReasoning, presetName, "aggregatorReasoning");
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,
@@ -245,10 +246,12 @@ function readOptionalMinimumInteger(
 	return value;
 }
 
-// The reference-reasoning knob accepts the same thinking levels as
-// SimpleStreamOptions.reasoning. It is applied only to reference requests, so a
-// reasoning-heavy reference model can be told to think less (its thinking is
-// discarded downstream anyway) without touching the aggregator's reasoning.
+// The reasoning-effort knobs accept the same thinking levels as
+// SimpleStreamOptions.reasoning. `referenceReasoning` applies only to reference
+// requests (a reasoning-heavy reference can be told to think less — its thinking
+// is discarded downstream anyway); `aggregatorReasoning` applies only to the
+// aggregator, letting a preset pin the acting model's reasoning effort (the
+// dominant per-turn latency cost) independent of whatever the caller passed.
 const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
 function readOptionalThinkingLevel(value: unknown, presetName: string, field: string): void {

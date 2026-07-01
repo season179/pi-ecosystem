@@ -271,6 +271,16 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/aggregatorCacheRetention/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						aggregatorReasoning:
+							"off" as unknown as MoAPreset["aggregatorReasoning"],
+					}),
+				),
+			),
+		).toThrow(/aggregatorReasoning/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1009,6 +1019,82 @@ describe("MoA orchestration", () => {
 		// With no referenceReasoning override, the reference inherits the caller's
 		// reasoning exactly as before — zero behavioral change by default.
 		expect(referenceReasoning).toBe("high");
+	});
+
+	it("caps aggregator reasoning effort without changing the references'", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceReasoning: unknown;
+		let aggregatorReasoning: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller asks for heavy reasoning across the board...
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorReasoning: "minimal",
+				}),
+			),
+		).result();
+		// ...but the preset pins the aggregator (the dominant per-turn latency cost)
+		// to minimal so its answer generation is faster, while the reference keeps the
+		// caller's reasoning — the aggregator knob never touches references.
+		expect(aggregatorReasoning).toBe("minimal");
+		expect(referenceReasoning).toBe("high");
+	});
+
+	it("leaves the aggregator inheriting the caller's reasoning when aggregatorReasoning is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let aggregatorReasoning: unknown;
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no preset override the aggregator inherits the caller's reasoning
+		// exactly as before — zero behavioral change by default.
+		expect(aggregatorReasoning).toBe("high");
 	});
 
 	it("applies aggregatorCacheRetention to the aggregator only, overriding the caller and leaving references untouched", async () => {

@@ -145,6 +145,27 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   routinely exceed the short TTL. Providers that don't support long retention ignore it (safe
   no-op).
 
+### Capping the aggregator's reasoning effort
+
+Placement and retention tune the aggregator's *prefill*. Its *generation* — the answer
+tokens, and for a reasoning model the thinking that precedes them — is the dominant
+per-turn latency cost. The aggregator inherits the caller's `reasoning` level by default,
+and there is otherwise no way to lower it without also lowering the references' inherited
+default. `aggregatorReasoning` decouples them (the aggregator-side mirror of
+`referenceReasoning`):
+
+- `aggregatorReasoning` pins the thinking effort (`minimal`, `low`, `medium`, `high`, or
+  `xhigh`) used for the aggregator request only, independent of what the caller passed.
+  Point it lower (e.g. `medium`) so a preset can run a fast aggregator on top of the
+  references' guidance without forcing the caller to lower reasoning globally (which would
+  also hit the references). It is applied **after** the caller's options, so the preset
+  governs the aggregator's reasoning regardless of the caller, and touches **only the
+  aggregator** — references keep their own (caller- or `referenceReasoning`-set) effort.
+  It is **unset by default** (the aggregator inherits the caller's reasoning exactly as
+  before), and a non-reasoning aggregator clamps it away to a provider-side no-op. Because
+  reasoning shapes the *final answer*, this trades answer quality for latency directly — a
+  sharper trade-off than the reference knobs — so it stays opt-in.
+
 ### Streaming the aggregator answer (time-to-first-token)
 
 By default the aggregator's answer is delivered to the UI in a **single burst** once it has

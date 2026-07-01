@@ -231,6 +231,23 @@ export function streamMoA(
 		if (typeof preset.aggregatorTemperature === "number") {
 			aggregatorOptions.temperature = preset.aggregatorTemperature;
 		}
+		// Pin the aggregator's reasoning effort independent of the caller. The
+		// aggregator's generation is the dominant per-turn latency cost, and a
+		// reasoning aggregator spends much of its wall-clock thinking before it
+		// answers — so capping its effort is the most direct lever on that cost. The
+		// caller's `options.reasoning` applies to the aggregator by default (via the
+		// spread above) and there is otherwise no way to lower the aggregator's
+		// reasoning without also lowering the references' inherited default; this knob
+		// decouples them, mirroring referenceReasoning on the aggregator side. Set
+		// AFTER the caller-options spread so the preset governs the aggregator's
+		// reasoning; references keep their own (caller or referenceReasoning) effort.
+		// Unlike a pure TTL/placement hint this trades answer quality for latency, so
+		// it stays opt-in and unset by default — leaving the aggregator inheriting the
+		// caller's reasoning exactly as before. A non-reasoning aggregator clamps it
+		// away to a provider-side no-op.
+		if (preset.aggregatorReasoning !== undefined) {
+			aggregatorOptions.reasoning = preset.aggregatorReasoning;
+		}
 		// Ask the aggregator's provider to keep its prompt cache alive for the
 		// configured retention (a cache-TTL hint mapped to Anthropic `cache_control.ttl`
 		// / OpenAI `prompt_cache_retention`). The aggregator re-prefills its whole
