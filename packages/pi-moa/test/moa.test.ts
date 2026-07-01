@@ -299,6 +299,16 @@ describe("MoA config", () => {
 			validateMoAConfig(
 				baseConfig(
 					basePreset({
+						referenceCacheRetention:
+							"forever" as unknown as MoAPreset["referenceCacheRetention"],
+					}),
+				),
+			),
+		).toThrow(/referenceCacheRetention/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
 						aggregatorReasoning:
 							"off" as unknown as MoAPreset["aggregatorReasoning"],
 					}),
@@ -1466,6 +1476,89 @@ describe("MoA orchestration", () => {
 		// With no preset override the aggregator inherits the caller's retention
 		// exactly as before — zero behavioral change by default.
 		expect(aggregatorCacheRetention).toBe("long");
+	});
+
+	it("applies referenceCacheRetention to the references only, overriding the caller and leaving the aggregator untouched", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceCacheRetention: unknown;
+		let aggregatorCacheRetention: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceCacheRetention = (
+					options as { cacheRetention?: unknown }
+				)?.cacheRetention;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([
+			(_context, options) => {
+				aggregatorCacheRetention = (
+					options as { cacheRetention?: unknown }
+				)?.cacheRetention;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller asks for short retention across the board...
+			{ cacheRetention: "short" },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceCacheRetention: "long",
+				}),
+			),
+		).result();
+		// ...but the preset upgrades the references (which also re-prefill their
+		// shared, append-only transcript prefix on every tool-loop turn) to long
+		// retention, while the aggregator keeps the caller's short retention — the
+		// reference knob is reference-scoped and never touches the aggregator.
+		expect(referenceCacheRetention).toBe("long");
+		expect(aggregatorCacheRetention).toBe("short");
+	});
+
+	it("leaves references inheriting the caller's cache retention when referenceCacheRetention is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceCacheRetention: unknown;
+		refA.setResponses([
+			(_context, options) => {
+				referenceCacheRetention = (
+					options as { cacheRetention?: unknown }
+				)?.cacheRetention;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			{ cacheRetention: "long" },
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no preset override the reference inherits the caller's retention
+		// exactly as before — zero behavioral change by default.
+		expect(referenceCacheRetention).toBe("long");
 	});
 
 	it("applies aggregatorProviderRouting to the aggregator model only, leaving references unrouted", async () => {

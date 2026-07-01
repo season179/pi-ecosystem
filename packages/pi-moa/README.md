@@ -153,9 +153,7 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   a long-running tool or a review pause between turns exceeds the short TTL, the cache expires
   and the next turn re-prefills the **whole transcript**. `"long"` survives those gaps so the
   next turn stays a cache hit — dropping its time-to-first-token. Accepts `"none" | "short" |
-  "long"`. It is applied **only to the aggregator**, not the references: references are
-  single-turn advisory calls that never re-hit their own cache, so paying the pricier
-  long-retention cache-*write* for them would be wasted. It is set **after** the caller's
+  "long"`. It is applied **only to the aggregator**. It is set **after** the caller's
   options, so a preset governs the aggregator's retention regardless of the caller. It is a
   pure cache-TTL hint — the generated answer is **byte-identical** either way — and **unset by
   default** (the aggregator inherits the caller/provider retention exactly as before). The
@@ -163,6 +161,22 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   a 1h write is ~2× base input vs ~1.25× for 5 min), so it only pays off when turn gaps
   routinely exceed the short TTL. Providers that don't support long retention ignore it (safe
   no-op).
+
+- `referenceCacheRetention` is the reference-side mirror of `aggregatorCacheRetention`. A
+  reference is one provider call *per MoA turn*, but MoA is re-invoked on every turn of an
+  agentic tool loop, and each turn re-runs the references over the **same transcript grown
+  append-only** (prior MoA guidance is stripped back out, so a reference's rendered view stays
+  a byte-stable growing prefix). So — like the aggregator — a reference re-prefills that shared
+  prefix every turn, and prompt caching avoids it only while the cache lives; the provider
+  default `"short"` expires across a long tool run or review pause, forcing a cold reference
+  re-prefill on the aggregator-blocking critical path. `"long"` keeps the next turn's reference
+  a cache hit (lower reference TTFT → shorter reference phase). It is applied **only to the
+  references** and set **after** the caller's options, so a preset governs reference retention
+  independent of the caller *and* of `aggregatorCacheRetention` — completing the role-scoped
+  retention matrix. Also a pure cache-TTL hint (**byte-identical** advice, hence answer) and
+  **unset by default**. Kept opt-in because references are smaller/cheaper prefillers than the
+  aggregator, so the pricier long-cache *write* only pays off when reference turn gaps
+  routinely exceed the short TTL; a non-caching reference provider ignores it (safe no-op).
 
 ### Capping the aggregator's reasoning effort
 

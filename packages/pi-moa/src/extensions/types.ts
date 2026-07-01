@@ -28,6 +28,7 @@ export interface MoAPreset {
 	referenceReasoning?: ThinkingLevel;
 	referenceProviderRouting?: OpenRouterRouting;
 	referenceMaxRetries?: number;
+	referenceCacheRetention?: CacheRetention;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorReasoning?: ThinkingLevel;

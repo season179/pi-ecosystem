@@ -198,6 +198,11 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"aggregatorCacheRetention",
 	);
+	readOptionalCacheRetention(
+		value.referenceCacheRetention,
+		presetName,
+		"referenceCacheRetention",
+	);
 	readOptionalOpenRouterRouting(
 		value.aggregatorProviderRouting,
 		presetName,
@@ -322,13 +327,15 @@ function readOptionalGuidancePlacement(value: unknown, presetName: string, field
 	}
 }
 
-// The aggregator-cache-retention knob sets how long the aggregator's provider is
-// asked to keep its prompt cache alive. It maps to the provider's cache-TTL hint
-// (Anthropic-style `cache_control.ttl: "1h"`, OpenAI `prompt_cache_retention`),
-// so "long" survives longer gaps between aggregator turns than the provider
-// default "short" — cutting time-to-first-token when a tool run or a review pause
-// exceeds the short TTL. It is a pure cache-TTL hint: the generated answer is
-// byte-identical regardless.
+// The cache-retention knobs set how long a request's provider is asked to keep its
+// prompt cache alive. They map to the provider's cache-TTL hint (Anthropic-style
+// `cache_control.ttl: "1h"`, OpenAI `prompt_cache_retention`), so "long" survives
+// longer gaps between turns than the provider default "short" — cutting
+// time-to-first-token when a tool run or a review pause exceeds the short TTL.
+// `aggregatorCacheRetention` scopes it to the aggregator; `referenceCacheRetention`
+// scopes it to every reference (references also re-prefill their shared, append-only
+// transcript prefix on each tool-loop turn, so they can re-hit their own cache too).
+// Both are pure cache-TTL hints: the generated output is byte-identical regardless.
 const CACHE_RETENTIONS = ["none", "short", "long"] as const;
 
 function readOptionalCacheRetention(value: unknown, presetName: string, field: string): void {

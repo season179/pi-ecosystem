@@ -806,6 +806,30 @@ async function runSingleReference(args: {
 		if (typeof args.preset.referenceMaxRetries === "number") {
 			referenceOptions.maxRetries = args.preset.referenceMaxRetries;
 		}
+		// Ask each reference's provider to keep its prompt cache alive for the
+		// configured retention — the reference-side mirror of aggregatorCacheRetention.
+		// A reference is a single provider call *per MoA turn*, but MoA is re-invoked on
+		// every turn of an agentic tool loop, and each turn re-runs the references over
+		// the SAME transcript grown append-only (prior MoA guidance is stripped back out,
+		// so the reference's rendered view stays a byte-stable growing prefix). So — like
+		// the aggregator — a reference re-prefills that shared prefix every turn, and
+		// prompt caching avoids it only while the cache lives. The provider default
+		// ("short", ~5min on Anthropic) expires when a tool run or review pause between
+		// turns exceeds it, forcing the reference to re-prefill the whole prefix from cold
+		// on the aggregator-blocking critical path. "long" survives those gaps so the next
+		// turn's reference stays a cache hit (lower reference TTFT → shorter reference
+		// phase). Set AFTER the caller-options spread so a preset governs reference
+		// retention independent of the caller AND of aggregatorCacheRetention — completing
+		// the role-scoped retention matrix (previously only the aggregator was tunable).
+		// It is a pure cache-TTL hint, so the reference advice (and thus the persisted
+		// answer) is byte-identical regardless. Unset by default, so references inherit the
+		// caller/provider retention exactly as before. Kept opt-in — not shipped in the
+		// default preset — because references are smaller/cheaper prefillers than the
+		// aggregator, so the pricier long-cache WRITE only pays off when reference turn
+		// gaps routinely exceed the short TTL; a non-caching reference provider ignores it.
+		if (args.preset.referenceCacheRetention !== undefined) {
+			referenceOptions.cacheRetention = args.preset.referenceCacheRetention;
+		}
 		// Steer OpenRouter's provider routing for this reference's request, mirroring
 		// aggregatorProviderRouting on the reference side. References sit on the
 		// aggregator-blocking critical path — the aggregator waits for the slowest (or
