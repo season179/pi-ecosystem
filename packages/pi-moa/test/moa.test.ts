@@ -748,6 +748,60 @@ describe("MoA orchestration", () => {
 		expect(referenceMaxTokens).toBe(128);
 	});
 
+	it("aborts a reference once its output reaches the kept budget", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceSignal: AbortSignal | undefined;
+		// Only the first maxReferenceOutputChars of a reference ever reach the
+		// aggregator/display, so a reference far longer than that budget should be
+		// aborted mid-stream rather than generating the discarded tail.
+		const longAdvice = `${"advice ".repeat(400)}TAIL-SENTINEL`;
+		refA.setResponses([
+			(_context, options) => {
+				referenceSignal = options?.signal;
+				return fauxAssistantMessage(longAdvice);
+			},
+		]);
+		let aggregatorContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					maxReferenceOutputChars: 200,
+				}),
+			),
+		).result();
+
+		// The reference stream was aborted once the kept-output budget was met.
+		expect(referenceSignal?.aborted).toBe(true);
+		// It is still a success: the aggregator ran, and the kept head of the
+		// reference reached it as guidance without the discarded tail sentinel.
+		expect(textFromResult(result)).toContain("final answer");
+		const references = thinkingFromResult(result);
+		expect(references).toContain("ref-a/a");
+		expect(references).not.toContain("(failed)");
+		expect(references).toContain("advice");
+		expect(references).not.toContain("TAIL-SENTINEL");
+		expect(JSON.stringify(aggregatorContext?.messages)).toContain("advice");
+		expect(JSON.stringify(aggregatorContext?.messages)).not.toContain(
+			"TAIL-SENTINEL",
+		);
+	});
+
 	it("removes accidentally echoed private guidance from the visible aggregator answer", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const agg = registerFaux("agg", "main");

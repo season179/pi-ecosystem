@@ -3,7 +3,6 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
-	completeSimple,
 	createAssistantMessageEventStream,
 	type Model,
 	type SimpleStreamOptions,
@@ -11,7 +10,11 @@ import {
 	type ThinkingContent,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { getPreset, getReferenceConcurrency } from "./config.js";
+import {
+	getMaxReferenceOutputChars,
+	getPreset,
+	getReferenceConcurrency,
+} from "./config.js";
 import {
 	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
@@ -400,10 +403,11 @@ async function runSingleReference(args: {
 					? Math.min(referenceOptions.maxTokens, args.preset.referenceMaxTokens)
 					: args.preset.referenceMaxTokens;
 		}
-		const message = await completeSimple(
+		const message = await streamReferenceUntilBudget(
 			args.task.model,
 			args.refContext,
 			referenceOptions,
+			getMaxReferenceOutputChars(args.preset),
 		);
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(
@@ -431,6 +435,98 @@ async function runSingleReference(args: {
 		}
 		return output;
 	}
+}
+
+// Only the first `keptOutputChars` of a reference's text ever reaches the
+// aggregator or the display — buildGuidanceBlock/buildReferenceThinkingText
+// head-truncate to that budget, so any text generated past it is discarded.
+// Consume the reference as a stream and abort it once that many characters of
+// text have arrived, taking the discarded tail off the critical path (the
+// aggregator waits for the slowest reference before it can start). The kept
+// advisory text is byte-identical to reading the full response and truncating;
+// only the truncation marker's reported total reflects the early stop rather
+// than the full would-be length. This complements the referenceMaxTokens cap:
+// the token cap is an upper bound, this stops precisely at the kept budget.
+async function streamReferenceUntilBudget(
+	model: Model<Api>,
+	refContext: Context,
+	referenceOptions: SimpleStreamOptions,
+	keptOutputChars: number,
+): Promise<AssistantMessage> {
+	const parentSignal = referenceOptions.signal;
+	const controller = new AbortController();
+	if (parentSignal?.aborted) {
+		controller.abort();
+	}
+	const forwardAbort = () => controller.abort();
+	parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+
+	let keptTextChars = 0;
+	let sawToolCall = false;
+	let budgetReached = false;
+	let latestPartial: AssistantMessage | undefined;
+	try {
+		const stream = streamSimple(model, refContext, {
+			...referenceOptions,
+			signal: controller.signal,
+		});
+		for await (const event of stream) {
+			if (event.type === "done") {
+				return event.message;
+			}
+			if (event.type === "error") {
+				// A budget abort is our own doing and yields a complete-enough
+				// reference, so surface the accumulated partial as success. Every
+				// other error — including a genuine parent abort — propagates.
+				if (budgetReached && latestPartial) {
+					return finalizeBudgetedReference(latestPartial);
+				}
+				throw new Error(
+					event.error.errorMessage ??
+						`Reference stopped with ${event.error.stopReason}`,
+				);
+			}
+			latestPartial = event.partial;
+			if (
+				event.type === "toolcall_start" ||
+				event.type === "toolcall_delta" ||
+				event.type === "toolcall_end"
+			) {
+				// A reference must not call tools. Stop early-aborting so the full
+				// (tool-bearing) message is assembled and rejected by the caller,
+				// exactly as before.
+				sawToolCall = true;
+			}
+			if (event.type === "text_delta") {
+				keptTextChars += event.delta.length;
+			}
+			if (!sawToolCall && !budgetReached && keptTextChars >= keptOutputChars) {
+				budgetReached = true;
+				controller.abort();
+				return finalizeBudgetedReference(latestPartial);
+			}
+		}
+		if (latestPartial) {
+			return latestPartial;
+		}
+		throw new Error("Reference produced no output before the stream ended");
+	} finally {
+		parentSignal?.removeEventListener("abort", forwardAbort);
+	}
+}
+
+// Snapshot the partial assembled up to the kept-output budget into a standalone
+// success message. Deep-copy the content so it can't be mutated by any lingering
+// stream producer, and mark the stop reason as `length` — the reference stopped
+// because it reached its output budget, which the caller treats as success.
+function finalizeBudgetedReference(
+	partial: AssistantMessage,
+): AssistantMessage {
+	return {
+		...partial,
+		content: structuredClone(partial.content),
+		stopReason: "length",
+	};
 }
 
 function resolveUnderlyingModel(
