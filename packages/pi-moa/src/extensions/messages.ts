@@ -9,11 +9,19 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import { getMaxReferenceOutputChars } from "./config.js";
-import type { MoAPreset, ReferenceOutput } from "./types.js";
+import type { MoAPreset, MoAReferenceDisplayDetails, ReferenceOutput } from "./types.js";
 
 export const MOA_GUIDANCE_MARKER = "[Mixture of Agents reference context]";
-export const MOA_VISIBLE_REFERENCES_START = "<!-- pi-moa-reference-outputs:start -->";
-export const MOA_VISIBLE_REFERENCES_END = "<!-- pi-moa-reference-outputs:end -->";
+
+/**
+ * customType for the display-only custom message that surfaces reference
+ * outputs to the user. Reference outputs are shown as a distinct, structurally
+ * identified message (via `pi.sendMessage` + `pi.registerMessageRenderer`) —
+ * NOT baked into the aggregator's answer text — and are filtered out of every
+ * model's context by that identity, so no string markers or stripping are
+ * needed.
+ */
+export const MOA_REFERENCE_CUSTOM_TYPE = "pi-moa.reference-outputs";
 
 const REFERENCE_SYSTEM_PROMPT = `You are a private reference advisor in a coding-agent Mixture of Agents pipeline.
 
@@ -70,9 +78,7 @@ export function buildReferenceContext(context: Context, _preset: MoAPreset): Con
 export function stripPriorMoAGuidanceMessages(context: Context): Context {
 	return {
 		...context,
-		messages: context.messages
-			.filter((message) => !isPriorMoAGuidanceMessage(message))
-			.map(stripVisibleReferenceBlocksFromMessage),
+		messages: context.messages.filter((message) => !isPriorMoAGuidanceMessage(message)),
 	};
 }
 
@@ -114,25 +120,60 @@ export function appendGuidanceToLatestUser(context: Context, guidanceBlock: stri
 	return { ...context, messages };
 }
 
-export function buildReferenceDisplayBlock(args: {
-	preset: MoAPreset;
-	referenceOutputs: ReferenceOutput[];
-}): string {
-	const maxReferenceOutputChars = getMaxReferenceOutputChars(args.preset);
-	const lines = [MOA_VISIBLE_REFERENCES_START, "## Reference model outputs"];
+/**
+ * Shape reference outputs for display: truncate successful advice to the
+ * preset's budget and redact+truncate failures. The result goes into a custom
+ * message's `details` (never sent to a model) and drives the TUI renderer.
+ */
+export function buildReferenceDisplayDetails(
+	presetName: string,
+	preset: MoAPreset,
+	referenceOutputs: ReferenceOutput[],
+): MoAReferenceDisplayDetails {
+	const maxReferenceOutputChars = getMaxReferenceOutputChars(preset);
+	return {
+		presetName,
+		aggregator: `${preset.aggregator.provider}/${preset.aggregator.model}`,
+		outputs: referenceOutputs.map((output) => {
+			if (output.success) {
+				return {
+					provider: output.slot.provider,
+					model: output.slot.model,
+					success: true,
+					text: truncateReferenceOutput(output.text, maxReferenceOutputChars),
+				};
+			}
+			const fallbackErrorText = output.errorMessage ?? output.text ?? "Unknown reference failure";
+			return {
+				provider: output.slot.provider,
+				model: output.slot.model,
+				success: false,
+				text: "",
+				errorMessage: truncateReferenceOutput(redactErrorMessage(fallbackErrorText), FAILED_REFERENCE_ERROR_CHARS),
+			};
+		}),
+	};
+}
 
-	args.referenceOutputs.forEach((output, index) => {
-		lines.push("", renderReferenceDisplayHeader(index, output));
-		if (output.success) {
-			lines.push(truncateReferenceOutput(output.text, maxReferenceOutputChars));
-		} else {
-			const fallbackErrorText = output.text || "Unknown reference failure";
-			const errorText = output.errorMessage ?? fallbackErrorText;
-			lines.push(`Error: ${truncateReferenceOutput(redactErrorMessage(errorText), FAILED_REFERENCE_ERROR_CHARS)}`);
-		}
+/**
+ * Non-sensitive `content` for the reference-outputs custom message.
+ *
+ * IMPORTANT: this string must NOT carry the reference advice bodies. Custom
+ * messages are turned into a user turn by `convertToLlm`, and the compaction and
+ * branch-summary paths call `convertToLlm` directly — bypassing the display-only
+ * `context` filter. Anything in `content` can therefore reach a model via a
+ * summary. The full advice lives only in `details` (never converted to model
+ * text) and is what the registered TUI renderer draws; `content` stays a short
+ * pointer that is safe to summarize and doubles as the no-renderer fallback.
+ */
+export function buildReferenceDisplayContent(details: MoAReferenceDisplayDetails): string {
+	const lines = [
+		"MoA reference outputs (advisory only — shown in the UI, excluded from model context).",
+		`Aggregator: ${details.aggregator}.`,
+	];
+	details.outputs.forEach((output, index) => {
+		lines.push(`- Reference ${index + 1}: ${output.provider}/${output.model}${output.success ? "" : " (failed)"}`);
 	});
-
-	lines.push("", MOA_VISIBLE_REFERENCES_END, "");
 	return lines.join("\n");
 }
 
@@ -199,7 +240,7 @@ function renderAssistantForReference(message: AssistantMessage, toolNamesById: M
 	const lines: string[] = [];
 	for (const block of message.content) {
 		if (block.type === "text") {
-			const text = stripVisibleReferenceBlocks(block.text).trim();
+			const text = block.text.trim();
 			if (text) lines.push(text);
 		} else if (block.type === "thinking") {
 			continue;
@@ -329,29 +370,6 @@ function findLatestUserMessageIndex(messages: Message[]): number {
 function renderReferenceHeader(index: number, output: ReferenceOutput): string {
 	const label = `--- Reference ${index + 1} (${output.slot.provider}/${output.slot.model})`;
 	return output.success ? `${label} ---` : `${label} FAILED ---`;
-}
-
-function renderReferenceDisplayHeader(index: number, output: ReferenceOutput): string {
-	const label = `### Reference ${index + 1} (${output.slot.provider}/${output.slot.model})`;
-	return output.success ? label : `${label} — failed`;
-}
-
-function stripVisibleReferenceBlocksFromMessage(message: Message): Message {
-	if (message.role !== "assistant") return message;
-	let changed = false;
-	const content = message.content
-		.map((block) => {
-			if (block.type !== "text") return block;
-			const text = stripVisibleReferenceBlocks(block.text);
-			if (text !== block.text) changed = true;
-			return { ...block, text };
-		})
-		.filter((block) => block.type !== "text" || block.text.length > 0);
-	return changed ? { ...message, content } : message;
-}
-
-function stripVisibleReferenceBlocks(text: string): string {
-	return stripDelimitedBlock(text, MOA_VISIBLE_REFERENCES_START, MOA_VISIBLE_REFERENCES_END);
 }
 
 function stripDelimitedBlock(text: string, startMarker: string, endMarker: string): string {

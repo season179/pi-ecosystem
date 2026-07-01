@@ -14,7 +14,7 @@ import { getPreset, getReferenceConcurrency } from "./config.js";
 import {
 	buildGuidanceBlock,
 	buildReferenceContext,
-	buildReferenceDisplayBlock,
+	buildReferenceDisplayDetails,
 	extractAssistantText,
 	injectGuidance,
 	injectGuidanceAsSystem,
@@ -22,7 +22,7 @@ import {
 	stripPrivateMoAGuidance,
 	stripPriorMoAGuidanceMessages,
 } from "./messages.js";
-import type { MoAConfig, MoAPreset, ModelSlot, ReferenceOutput } from "./types.js";
+import type { MoAConfig, MoAPreset, MoAStreamHooks, ModelSlot, ReferenceOutput } from "./types.js";
 
 const EMPTY_USAGE: AssistantMessage["usage"] = {
 	input: 0,
@@ -49,6 +49,7 @@ export function streamMoA(
 	options: SimpleStreamOptions | undefined,
 	registry: ModelRegistry,
 	config: MoAConfig,
+	hooks?: MoAStreamHooks,
 ): AssistantMessageEventStream {
 	const outerStream = createAssistantMessageEventStream();
 
@@ -98,8 +99,12 @@ export function streamMoA(
 			return;
 		}
 
+		// Hand the reference outputs to the extension, which surfaces them as a
+		// display-only custom message once the turn is idle. Not baked into the
+		// aggregator's answer text, so nothing has to be stripped back out later.
+		hooks?.onReferenceOutputs?.(buildReferenceDisplayDetails(presetName, preset, referenceOutputs));
+
 		const guidanceBlock = buildGuidanceBlock({ presetName, preset, referenceOutputs });
-		const referenceDisplayBlock = buildReferenceDisplayBlock({ preset, referenceOutputs });
 		const aggregatorAuth = await registry.getApiKeyAndHeaders(aggregatorModel);
 		if (!aggregatorAuth.ok) {
 			throw new Error(
@@ -123,7 +128,6 @@ export function streamMoA(
 			context: injectedContext,
 			options: aggregatorOptions,
 			outerStream,
-			prefixText: referenceDisplayBlock,
 		});
 
 		if (injectedResult.kind === "consecutive-user-rejected") {
@@ -133,7 +137,6 @@ export function streamMoA(
 				context: retriedContext,
 				options: aggregatorOptions,
 				outerStream,
-				prefixText: referenceDisplayBlock,
 			});
 			if (appendedResult.kind === "error") {
 				outerStream.end(appendedResult.error);
@@ -175,7 +178,6 @@ async function forwardAggregatorStream(args: {
 	context: Context;
 	options: SimpleStreamOptions;
 	outerStream: AssistantMessageEventStream;
-	prefixText?: string;
 }): Promise<AggregatorForwardResult> {
 	const innerStream = streamSimple(args.model, args.context, args.options);
 	let isFirstEvent = true;
@@ -187,12 +189,12 @@ async function forwardAggregatorStream(args: {
 		isFirstEvent = false;
 
 		if (event.type === "done") {
-			const message = prepareAggregatorMessage(event.message, args.prefixText);
+			const message = prepareAggregatorMessage(event.message);
 			args.outerStream.push({ ...event, message });
 			return { kind: "completed" };
 		}
 		if (event.type === "error") {
-			const error = prepareAggregatorMessage(event.error, args.prefixText);
+			const error = prepareAggregatorMessage(event.error);
 			args.outerStream.push({ ...event, error });
 			return { kind: "error", error };
 		}
@@ -201,7 +203,10 @@ async function forwardAggregatorStream(args: {
 	return { kind: "completed" };
 }
 
-function prepareAggregatorMessage(message: AssistantMessage, prefixText?: string): AssistantMessage {
+function prepareAggregatorMessage(message: AssistantMessage): AssistantMessage {
+	// Strip any private MoA guidance the aggregator may have echoed. Reference
+	// outputs are surfaced separately as a custom message, so the aggregator's
+	// answer is left as-is otherwise.
 	const sanitizedContent = message.content
 		.map((block) => {
 			if (block.type !== "text") return block;
@@ -209,10 +214,7 @@ function prepareAggregatorMessage(message: AssistantMessage, prefixText?: string
 		})
 		.filter((block) => block.type !== "text" || block.text.length > 0);
 
-	return {
-		...message,
-		content: prefixText ? [{ type: "text", text: prefixText }, ...sanitizedContent] : sanitizedContent,
-	};
+	return { ...message, content: sanitizedContent };
 }
 
 function isConsecutiveUserRejection(error: AssistantMessage): boolean {

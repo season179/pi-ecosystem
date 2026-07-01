@@ -12,21 +12,21 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { getPreset, validateMoAConfig } from "../src/extensions/config.js";
-import { buildSyntheticModels } from "../src/extensions/moa.js";
+import { getPreset, loadMoAConfig, validateMoAConfig } from "../src/extensions/config.js";
+import setup, { buildSyntheticModels } from "../src/extensions/moa.js";
 import {
 	appendGuidanceToLatestUser,
 	buildGuidanceBlock,
 	buildReferenceContext,
+	buildReferenceDisplayContent,
 	injectGuidance,
 	MOA_GUIDANCE_MARKER,
-	MOA_VISIBLE_REFERENCES_END,
-	MOA_VISIBLE_REFERENCES_START,
+	MOA_REFERENCE_CUSTOM_TYPE,
 	redactErrorMessage,
 	stripPriorMoAGuidanceMessages,
 } from "../src/extensions/messages.js";
 import { streamMoA } from "../src/extensions/orchestrator.js";
-import type { MoAConfig, MoAPreset } from "../src/extensions/types.js";
+import type { MoAConfig, MoAPreset, MoAReferenceDisplayDetails, ModelSlot } from "../src/extensions/types.js";
 
 type FauxRegistration = ReturnType<typeof registerFauxProvider>;
 
@@ -91,6 +91,27 @@ function registerFaux(provider: string, modelId: string): FauxRegistration {
 
 function textFromResult(result: Awaited<ReturnType<typeof completeSimple>>): string {
 	return result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
+function createDisplayCapture(): {
+	hooks: { onReferenceOutputs: (details: MoAReferenceDisplayDetails) => void };
+	displays: MoAReferenceDisplayDetails[];
+} {
+	const displays: MoAReferenceDisplayDetails[] = [];
+	return { hooks: { onReferenceOutputs: (details) => displays.push(details) }, displays };
+}
+
+// Flattens the structured reference details into a searchable string. Assertions
+// use this rather than the custom message `content`, which is a leak-safe
+// pointer that deliberately omits the advice bodies (those live in `details`).
+function referenceText(displays: MoAReferenceDisplayDetails[]): string {
+	return displays
+		.flatMap((details) =>
+			details.outputs.map(
+				(output) => `${output.provider}/${output.model} ${output.success ? output.text : `FAILED ${output.errorMessage ?? ""}`}`,
+			),
+		)
+		.join("\n");
 }
 
 function makeSyntheticMoAModel(realModel: Model<Api>, presetName = "default"): Model<Api> {
@@ -162,19 +183,6 @@ describe("MoA message shaping", () => {
 			],
 		};
 		expect(stripPriorMoAGuidanceMessages(context).messages).toEqual([context.messages[1]]);
-	});
-
-	it("strips prior visible reference blocks while preserving the final answer", () => {
-		const context: Context = {
-			messages: [
-				fauxAssistantMessage(
-					`${MOA_VISIBLE_REFERENCES_START}\n## Reference model outputs\nsecret advice\n${MOA_VISIBLE_REFERENCES_END}\n\nfinal answer`,
-				),
-			],
-		};
-		const stripped = stripPriorMoAGuidanceMessages(context);
-		expect(JSON.stringify(stripped.messages)).not.toContain("secret advice");
-		expect(JSON.stringify(stripped.messages)).toContain("final answer");
 	});
 
 	it("injects guidance after the latest user message without mutating original content", () => {
@@ -429,20 +437,28 @@ describe("MoA orchestration", () => {
 			tools: [{ name: "echo", description: "Echo", parameters: Type.Object({ text: Type.String() }) }],
 			messages: [{ role: "user", content: "question", timestamp: 1 }],
 		};
+		const { hooks, displays } = createDisplayCapture();
 		const result = await streamMoA(
 			makeSyntheticMoAModel(agg.getModel("main")!),
 			context,
 			undefined,
 			registry,
 			baseConfig(),
+			hooks,
 		).result();
 		const resultText = textFromResult(result);
-		expect(resultText).toContain("## Reference model outputs");
-		expect(resultText).toContain("### Reference 1 (ref-a/a)");
-		expect(resultText).toContain("advice A");
-		expect(resultText).toContain("### Reference 2 (ref-b/b)");
-		expect(resultText).toContain("advice B");
+		// Reference outputs are surfaced via the display hook (a separate custom
+		// message), NOT prepended onto the aggregator's visible answer.
 		expect(resultText).toContain("final answer");
+		expect(resultText).not.toContain("## Reference model outputs");
+		expect(resultText).not.toContain("advice A");
+		expect(displays).toHaveLength(1);
+		expect(displays[0].outputs).toHaveLength(2);
+		const references = referenceText(displays);
+		expect(references).toContain("ref-a/a");
+		expect(references).toContain("advice A");
+		expect(references).toContain("ref-b/b");
+		expect(references).toContain("advice B");
 		expect(seenReferenceTools).toEqual([undefined, undefined]);
 		expect(aggregatorContext?.tools).toBe(context.tools);
 		expect(aggregatorContext?.messages.map((message) => message.role)).toEqual(["user"]);
@@ -494,20 +510,21 @@ describe("MoA orchestration", () => {
 			),
 		]);
 
+		const { hooks, displays } = createDisplayCapture();
 		const result = await streamMoA(
 			makeSyntheticMoAModel(agg.getModel("main")!),
 			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
 			undefined,
 			createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]),
 			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+			hooks,
 		).result();
 
 		const resultText = textFromResult(result);
-		expect(resultText).toContain("## Reference model outputs");
-		expect(resultText).toContain("advice");
 		expect(resultText).toContain("final answer");
 		expect(resultText).not.toContain(MOA_GUIDANCE_MARKER);
 		expect(resultText).not.toContain("private stuff that must not leak");
+		expect(referenceText(displays)).toContain("advice");
 	});
 
 	it("treats reference tool calls as reference failures", async () => {
@@ -522,18 +539,20 @@ describe("MoA orchestration", () => {
 			},
 		]);
 
+		const { hooks, displays } = createDisplayCapture();
 		const result = await streamMoA(
 			makeSyntheticMoAModel(agg.getModel("main")!),
 			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
 			undefined,
 			createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]),
 			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+			hooks,
 		).result();
 
 		const resultText = textFromResult(result);
-		expect(resultText).toContain("### Reference 1 (ref-a/a) — failed");
-		expect(resultText).toContain("Reference attempted to use a tool");
 		expect(resultText).toContain("final answer");
+		expect(displays[0].outputs[0]).toMatchObject({ provider: "ref-a", model: "a", success: false });
+		expect(referenceText(displays)).toContain("Reference attempted to use a tool");
 		expect(aggregatorContext?.systemPrompt).toContain("Reference attempted to use a tool");
 	});
 
@@ -601,19 +620,22 @@ describe("MoA orchestration", () => {
 			{ model: refB.getModel("b")! },
 			{ model: agg.getModel("main")! },
 		]);
+		const { hooks, displays } = createDisplayCapture();
 		const result = await streamMoA(
 			makeSyntheticMoAModel(agg.getModel("main")!),
 			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
 			undefined,
 			registry,
 			baseConfig(),
+			hooks,
 		).result();
 		const resultText = textFromResult(result);
-		expect(resultText).toContain("### Reference 1 (ref-a/a)");
-		expect(resultText).toContain("advice A");
-		expect(resultText).toContain("### Reference 2 (ref-b/b) — failed");
-		expect(resultText).toContain("Bearer [REDACTED]");
 		expect(resultText).toContain("still ok");
+		const references = referenceText(displays);
+		expect(references).toContain("ref-a/a");
+		expect(references).toContain("advice A");
+		expect(references).toContain("ref-b/b FAILED");
+		expect(references).toContain("Bearer [REDACTED]");
 		expect(aggregatorContext?.systemPrompt).toContain("FAILED");
 		expect(aggregatorContext?.systemPrompt).toContain("Bearer [REDACTED]");
 	});
@@ -682,18 +704,22 @@ describe("MoA orchestration", () => {
 			},
 		]);
 
+		const { hooks, displays } = createDisplayCapture();
 		const result = await streamMoA(
 			makeSyntheticMoAModel(agg.getModel("main")!),
 			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
 			undefined,
 			createRegistry([{ model: refA.getModel("a")! }, { model: agg.getModel("main")! }]),
 			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
+			hooks,
 		).result();
 
 		const resultText = textFromResult(result);
-		expect(resultText).toContain("## Reference model outputs");
-		expect(resultText).toContain("advice");
 		expect(resultText).toContain("fallback answer");
+		// References are computed once, before the aggregator retry, so the display
+		// hook fires exactly once even though the aggregator streamed twice.
+		expect(displays).toHaveLength(1);
+		expect(referenceText(displays)).toContain("advice");
 		expect(agg.state.callCount).toBe(2);
 		expect(aggregatorContexts[0].messages.map((message) => message.role)).toEqual(["user"]);
 		expect(aggregatorContexts[1].messages.map((message) => message.role)).toEqual(["user"]);
@@ -715,7 +741,177 @@ describe("MoA orchestration", () => {
 			baseConfig(basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] })),
 		).result();
 		expect(result.stopReason).toBe("toolUse");
-		expect(result.content[0]).toMatchObject({ type: "text" });
-		expect(result.content[1]).toMatchObject({ type: "toolCall", name: "echo", arguments: { text: "hi" } });
+		// Reference outputs are no longer prepended onto the aggregator's answer, so
+		// a tool-call-only turn passes through as a lone tool call (no leading text).
+		expect(result.content).toHaveLength(1);
+		expect(result.content[0]).toMatchObject({ type: "toolCall", name: "echo", arguments: { text: "hi" } });
+	});
+});
+
+describe("MoA extension wiring", () => {
+	interface CapturedProvider {
+		streamSimple: (
+			model: Model<Api>,
+			context: Context,
+			options?: unknown,
+		) => { result(): Promise<Awaited<ReturnType<typeof completeSimple>>> };
+	}
+
+	// biome-ignore lint/suspicious/noExplicitAny: a minimal ExtensionAPI test double
+	type Handler = (event: any, ctx?: any) => any;
+
+	function createFakePi() {
+		const handlers = new Map<string, Handler>();
+		const renderers = new Map<string, unknown>();
+		const sent: Array<{ message: Record<string, unknown>; options?: Record<string, unknown> }> = [];
+		let provider: CapturedProvider | undefined;
+		const pi = {
+			on(event: string, handler: Handler) {
+				handlers.set(event, handler);
+			},
+			registerMessageRenderer(customType: string, _renderer: unknown) {
+				renderers.set(customType, _renderer);
+			},
+			registerProvider(_id: string, config: CapturedProvider) {
+				provider = config;
+			},
+			sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>) {
+				sent.push({ message, options });
+			},
+		};
+		return { pi, handlers, renderers, sent, getProvider: () => provider };
+	}
+
+	function tick(): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	it("registers the reference renderer and filters reference messages out of every model context", () => {
+		const fake = createFakePi();
+		setup(fake.pi as unknown as Parameters<typeof setup>[0]);
+
+		expect(fake.renderers.has(MOA_REFERENCE_CUSTOM_TYPE)).toBe(true);
+
+		const contextHandler = fake.handlers.get("context");
+		expect(contextHandler).toBeDefined();
+		const referenceMessage = { role: "custom", customType: MOA_REFERENCE_CUSTOM_TYPE, content: "refs" };
+		const otherCustom = { role: "custom", customType: "some-other-extension", content: "keep me" };
+		const userMessage = { role: "user", content: "hi", timestamp: 1 };
+		const filtered = contextHandler?.({ messages: [referenceMessage, otherCustom, userMessage] });
+		// Only our reference custom messages are dropped; unrelated custom messages
+		// and ordinary turns pass through untouched.
+		expect(filtered.messages).toEqual([otherCustom, userMessage]);
+	});
+
+	// Runs one full MoA turn through the provider setup() registers, using whatever
+	// MoA config is active so the wiring is exercised end to end regardless of the
+	// config values (references succeed with distinctive advice; aggregator answers
+	// "final answer"). Leaves the reference outputs stashed but NOT yet flushed.
+	async function primeMoATurn(): Promise<{ fake: ReturnType<typeof createFakePi>; preset: MoAPreset }> {
+		const config = loadMoAConfig(process.cwd());
+		const preset = config.presets[config.defaultPreset];
+		const slots: ModelSlot[] = [...preset.referenceModels, preset.aggregator];
+
+		const modelsByProvider = new Map<string, Set<string>>();
+		for (const slot of slots) {
+			if (!modelsByProvider.has(slot.provider)) modelsByProvider.set(slot.provider, new Set());
+			modelsByProvider.get(slot.provider)?.add(slot.model);
+		}
+
+		const registryEntries: RegistryEntry[] = [];
+		for (const [provider, modelIds] of modelsByProvider) {
+			const registration = registerFauxProvider({
+				provider,
+				models: [...modelIds].map((id) => ({ id, name: `${provider}/${id}` })),
+			});
+			registrations.push(registration);
+			// The response queue is shared per provider and consumed FIFO, but
+			// references run concurrently — so dispatch by model id rather than
+			// relying on call order. One entry per call this provider will serve.
+			const dispatch = (_context: Context, _options: unknown, _state: unknown, model: Model<Api>) =>
+				model.id === preset.aggregator.model && model.provider === preset.aggregator.provider
+					? fauxAssistantMessage("final answer")
+					: fauxAssistantMessage(`advice from ${model.provider}/${model.id}`);
+			const callCount = slots.filter((slot) => slot.provider === provider).length;
+			registration.setResponses(Array.from({ length: callCount }, () => dispatch));
+			for (const id of modelIds) registryEntries.push({ model: registration.getModel(id)! });
+		}
+		const registry = createRegistry(registryEntries);
+
+		const fake = createFakePi();
+		setup(fake.pi as unknown as Parameters<typeof setup>[0]);
+		// setup captures the registry on turn_start.
+		fake.handlers.get("turn_start")?.({}, { modelRegistry: registry });
+
+		const aggregatorModel = registry.find(preset.aggregator.provider, preset.aggregator.model);
+		expect(aggregatorModel).toBeDefined();
+		const stream = fake.getProvider()?.streamSimple(
+			makeSyntheticMoAModel(aggregatorModel as Model<Api>, config.defaultPreset),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+		);
+		const result = await stream!.result();
+		const resultText = textFromResult(result);
+		// The aggregator answer is clean: no reference block prepended.
+		expect(resultText).toContain("final answer");
+		expect(resultText).not.toContain("advisory only");
+		return { fake, preset };
+	}
+
+	it("flushes reference outputs once as a display-only custom message after the agent goes idle", async () => {
+		const { fake, preset } = await primeMoATurn();
+
+		// Nothing is emitted mid-turn...
+		expect(fake.sent).toHaveLength(0);
+		fake.handlers.get("agent_end")?.({}, { isIdle: () => true });
+		// ...the flush is deferred to a macrotask so Pi sees the agent as idle...
+		expect(fake.sent).toHaveLength(0);
+		await tick();
+
+		expect(fake.sent).toHaveLength(1);
+		const { message, options } = fake.sent[0];
+		expect(message.customType).toBe(MOA_REFERENCE_CUSTOM_TYPE);
+		expect(message.display).toBe(true);
+		const details = message.details as MoAReferenceDisplayDetails;
+		expect(details.outputs).toHaveLength(preset.referenceModels.length);
+		// Full advice lives ONLY in details (never converted to model text)...
+		expect(details.outputs.some((output) => output.text.includes("advice from"))).toBe(true);
+		// ...while content is a leak-safe pointer (compaction converts content to a
+		// user turn, so it must not carry the advice bodies).
+		expect(message.content).toBe(buildReferenceDisplayContent(details));
+		expect(message.content).toContain("advisory only");
+		expect(message.content).not.toContain("advice from");
+		// ...and it must never trigger another LLM turn.
+		expect(options?.triggerTurn).toBe(false);
+
+		// A subsequent idle event with nothing pending emits nothing further.
+		fake.handlers.get("agent_end")?.({}, { isIdle: () => true });
+		await tick();
+		expect(fake.sent).toHaveLength(1);
+	});
+
+	it("defers the flush while a follow-up turn is streaming, then flushes once idle", async () => {
+		const { fake } = await primeMoATurn();
+
+		// agent_end fires but a follow-up turn is already streaming (not idle):
+		// appending now would steer the block into that turn, so it must defer.
+		fake.handlers.get("agent_end")?.({}, { isIdle: () => false });
+		await tick();
+		expect(fake.sent).toHaveLength(0);
+
+		// The streaming turn ends; now idle, the next agent_end retries and flushes.
+		fake.handlers.get("agent_end")?.({}, { isIdle: () => true });
+		await tick();
+		expect(fake.sent).toHaveLength(1);
+	});
+
+	it("cancels a scheduled flush and drops pending outputs on session shutdown", async () => {
+		const { fake } = await primeMoATurn();
+
+		fake.handlers.get("agent_end")?.({}, { isIdle: () => true }); // schedules the deferred flush
+		fake.handlers.get("session_shutdown")?.({}, {}); // must cancel it before it fires
+		await tick();
+
+		expect(fake.sent).toHaveLength(0);
 	});
 });
