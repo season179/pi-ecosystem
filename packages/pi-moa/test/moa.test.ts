@@ -302,6 +302,27 @@ describe("MoA config", () => {
 				),
 			),
 		).toThrow(/aggregatorProviderRouting.*sort/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceProviderRouting:
+							"latency" as unknown as MoAPreset["referenceProviderRouting"],
+					}),
+				),
+			),
+		).toThrow(/referenceProviderRouting/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceProviderRouting: {
+							sort: "slowest",
+						} as unknown as MoAPreset["referenceProviderRouting"],
+					}),
+				),
+			),
+		).toThrow(/referenceProviderRouting.*sort/);
 	});
 
 	it("does not generate synthetic models for disabled presets", () => {
@@ -1280,6 +1301,95 @@ describe("MoA orchestration", () => {
 		// With no preset override the aggregator model is passed through untouched —
 		// no synthetic compat is injected, so the request is byte-identical to before.
 		expect(aggregatorRouting).toBeUndefined();
+		expect(sawCompat).toBeUndefined();
+	});
+
+	it("applies referenceProviderRouting to reference models only, leaving the aggregator unrouted", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		const referenceRoutings: unknown[] = [];
+		let aggregatorRouting: unknown = "sentinel";
+		refA.setResponses([
+			(_context, _options, _state, model) => {
+				referenceRoutings.push(model.compat?.openRouterRouting);
+				return fauxAssistantMessage("advice a");
+			},
+		]);
+		refB.setResponses([
+			(_context, _options, _state, model) => {
+				referenceRoutings.push(model.compat?.openRouterRouting);
+				return fauxAssistantMessage("advice b");
+			},
+		]);
+		agg.setResponses([
+			(_context, _options, _state, model) => {
+				aggregatorRouting = model.compat?.openRouterRouting;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [
+						{ provider: "ref-a", model: "a" },
+						{ provider: "ref-b", model: "b" },
+					],
+					referenceProviderRouting: { sort: "latency" },
+				}),
+			),
+		).result();
+		// Every reference is pinned to the lowest-latency OpenRouter backend (they sit
+		// on the aggregator-blocking critical path), while the aggregator stays unrouted
+		// — the knob is reference-scoped and never touches the aggregator request.
+		expect(referenceRoutings).toEqual([{ sort: "latency" }, { sort: "latency" }]);
+		expect(aggregatorRouting).toBeUndefined();
+	});
+
+	it("leaves reference models unrouted when referenceProviderRouting is unset", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceRouting: unknown = "sentinel";
+		let sawCompat: unknown = "sentinel";
+		refA.setResponses([
+			(_context, _options, _state, model) => {
+				sawCompat = model.compat;
+				referenceRouting = model.compat?.openRouterRouting;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+		).result();
+		// With no preset override the reference model is passed through untouched — no
+		// synthetic compat is injected, so the reference request is byte-identical.
+		expect(referenceRouting).toBeUndefined();
 		expect(sawCompat).toBeUndefined();
 	});
 

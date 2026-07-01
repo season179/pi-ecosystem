@@ -723,8 +723,28 @@ async function runSingleReference(args: {
 					? Math.min(referenceOptions.maxTokens, args.preset.referenceMaxTokens)
 					: args.preset.referenceMaxTokens;
 		}
+		// Steer OpenRouter's provider routing for this reference's request, mirroring
+		// aggregatorProviderRouting on the reference side. References sit on the
+		// aggregator-blocking critical path — the aggregator waits for the slowest (or
+		// the quorum-th fastest) reference — so pinning them to a low-latency /
+		// high-throughput OpenRouter backend (`sort: "latency"` / `"throughput"`)
+		// directly shortens that phase, the same which-backend lever iteration 20 gave
+		// the aggregator. Routing lives on the model's `compat` (not the stream
+		// options), so clone the model rather than mutate the shared registry object,
+		// and pi-ai applies it ONLY for OpenRouter-hosted models — a safe no-op for a
+		// non-openrouter reference. Opt-in and unset by default; kept opt-in (not
+		// shipped in the default preset) because a different backend can differ in
+		// quantization/behavior and so could subtly shift the reference advice that
+		// feeds the aggregator's persisted answer.
+		const referenceStreamModel =
+			args.preset.referenceProviderRouting !== undefined
+				? withOpenRouterRouting(
+						args.task.model,
+						args.preset.referenceProviderRouting,
+					)
+				: args.task.model;
 		const message = await streamReferenceUntilBudget(
-			args.task.model,
+			referenceStreamModel,
 			args.refContext,
 			referenceOptions,
 			getMaxReferenceOutputChars(args.preset),

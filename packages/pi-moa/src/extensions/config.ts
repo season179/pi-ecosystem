@@ -199,6 +199,11 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"aggregatorProviderRouting",
 	);
+	readOptionalOpenRouterRouting(
+		value.referenceProviderRouting,
+		presetName,
+		"referenceProviderRouting",
+	);
 	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
 		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
 	}
@@ -301,14 +306,16 @@ function readOptionalCacheRetention(value: unknown, presetName: string, field: s
 	}
 }
 
-// The aggregator-provider-routing knob steers OpenRouter's upstream provider
-// selection for the aggregator's request (a speed lever: `sort: "throughput"` /
-// `"latency"` route to a faster backend). It is a passthrough to pi-ai's typed
-// `OpenRouterRouting` field, so validation is deliberately light — confirm it is an
-// object and, when the speed-relevant `sort` is given as a string, that it is one of
-// the OpenRouter sort metrics (a silent typo there would just be ignored upstream).
-// Every other routing field flows through and is validated by pi-ai/OpenRouter at
-// request time rather than duplicated (and kept in sync) here.
+// The provider-routing knobs steer OpenRouter's upstream provider selection (a
+// speed lever: `sort: "throughput"` / `"latency"` route to a faster backend).
+// `aggregatorProviderRouting` pins the aggregator's request; `referenceProviderRouting`
+// pins every reference's request (references sit on the aggregator-blocking critical
+// path). Both are passthroughs to pi-ai's typed `OpenRouterRouting` field, so
+// validation is deliberately light — confirm it is an object and, when the
+// speed-relevant `sort` is given as a string, that it is one of the OpenRouter sort
+// metrics (a silent typo there would just be ignored upstream). Every other routing
+// field flows through and is validated by pi-ai/OpenRouter at request time rather than
+// duplicated (and kept in sync) here.
 const OPENROUTER_SORTS = ["price", "throughput", "latency"] as const;
 
 function readOptionalOpenRouterRouting(value: unknown, presetName: string, field: string): void {
