@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2879,8 +2879,23 @@ describe("MoA extension wiring", () => {
 		}
 		const registry = createRegistry(registryEntries);
 
+		// setup() loads the active config itself, so redirect it to a
+		// telemetry-free copy of that config — otherwise these end-to-end turns
+		// append junk records to the user's real telemetryPath on every test run.
+		const agentDir = mkdtempSync(join(tmpdir(), "moa-wiring-"));
+		writeFileSync(
+			join(agentDir, "moa.json"),
+			JSON.stringify({ ...config, telemetryPath: undefined }),
+		);
 		const fake = createFakePi();
-		setup(fake.pi as unknown as Parameters<typeof setup>[0]);
+		const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		try {
+			setup(fake.pi as unknown as Parameters<typeof setup>[0]);
+		} finally {
+			if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+		}
 		// setup captures the registry on turn_start.
 		fake.handlers.get("turn_start")?.({}, { modelRegistry: registry });
 
