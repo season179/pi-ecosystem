@@ -168,10 +168,8 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	// maxRetries of 0 (disable client-side retries entirely) is meaningful, so this
 	// is a non-negative — not positive — integer.
 	readOptionalMinimumInteger(value.referenceMaxRetries, presetName, "referenceMaxRetries", 0);
-	readOptionalThinkingLevel(value.referenceReasoning, presetName, "referenceReasoning");
-	readOptionalThinkingLevel(value.aggregatorReasoning, presetName, "aggregatorReasoning");
-	readOptionalThinkingBudgets(value.aggregatorThinkingBudgets, presetName, "aggregatorThinkingBudgets");
-	readOptionalThinkingBudgets(value.referenceThinkingBudgets, presetName, "referenceThinkingBudgets");
+	readOptionalEnum(value.referenceReasoning, presetName, "referenceReasoning", THINKING_LEVELS);
+	readOptionalEnum(value.aggregatorReasoning, presetName, "aggregatorReasoning", THINKING_LEVELS);
 	const referenceConcurrency = readOptionalPositiveInteger(
 		value.referenceConcurrency,
 		presetName,
@@ -194,20 +192,23 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 	}
 	readOptionalNumber(value.referenceTemperature, presetName, "referenceTemperature");
 	readOptionalNumber(value.aggregatorTemperature, presetName, "aggregatorTemperature");
-	readOptionalGuidancePlacement(
+	readOptionalEnum(
 		value.aggregatorGuidancePlacement,
 		presetName,
 		"aggregatorGuidancePlacement",
+		GUIDANCE_PLACEMENTS,
 	);
-	readOptionalCacheRetention(
+	readOptionalEnum(
 		value.aggregatorCacheRetention,
 		presetName,
 		"aggregatorCacheRetention",
+		CACHE_RETENTIONS,
 	);
-	readOptionalCacheRetention(
+	readOptionalEnum(
 		value.referenceCacheRetention,
 		presetName,
 		"referenceCacheRetention",
+		CACHE_RETENTIONS,
 	);
 	readOptionalOpenRouterRouting(
 		value.aggregatorProviderRouting,
@@ -219,28 +220,10 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"referenceProviderRouting",
 	);
-	readOptionalVercelGatewayRouting(
-		value.aggregatorGatewayRouting,
-		presetName,
-		"aggregatorGatewayRouting",
-	);
-	readOptionalVercelGatewayRouting(
-		value.referenceGatewayRouting,
-		presetName,
-		"referenceGatewayRouting",
-	);
-	if (value.aggregatorPrewarm !== undefined && typeof value.aggregatorPrewarm !== "boolean") {
-		throw new Error(`MoA preset "${presetName}": "aggregatorPrewarm" must be a boolean`);
-	}
-	if (value.streamAggregator !== undefined && typeof value.streamAggregator !== "boolean") {
-		throw new Error(`MoA preset "${presetName}": "streamAggregator" must be a boolean`);
-	}
-	if (value.streamReferences !== undefined && typeof value.streamReferences !== "boolean") {
-		throw new Error(`MoA preset "${presetName}": "streamReferences" must be a boolean`);
-	}
-	if (value.failOnReferenceError !== undefined && typeof value.failOnReferenceError !== "boolean") {
-		throw new Error(`MoA preset "${presetName}": "failOnReferenceError" must be a boolean`);
-	}
+	readOptionalBoolean(value.aggregatorPrewarm, presetName, "aggregatorPrewarm");
+	readOptionalBoolean(value.streamAggregator, presetName, "streamAggregator");
+	readOptionalBoolean(value.streamReferences, presetName, "streamReferences");
+	readOptionalBoolean(value.failOnReferenceError, presetName, "failOnReferenceError");
 
 	value.referenceModels.forEach((slot, index) => {
 		validateModelSlot(presetName, `referenceModels[${index}]`, slot);
@@ -292,58 +275,11 @@ function readOptionalMinimumInteger(
 // dominant per-turn latency cost) independent of whatever the caller passed.
 const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
-function readOptionalThinkingLevel(value: unknown, presetName: string, field: string): void {
-	if (value === undefined) return;
-	if (typeof value !== "string" || !THINKING_LEVELS.includes(value as never)) {
-		throw new Error(
-			`MoA preset "${presetName}": "${field}" must be one of ${THINKING_LEVELS.join(", ")}`,
-		);
-	}
-}
-
-// The thinking-budgets knobs set precise per-effort-level thinking TOKEN budgets,
-// overriding the coarse default budget that a reasoning effort level maps to.
-// They are the finer-grained companions to the reasoning-effort knobs:
-// `aggregatorThinkingBudgets` bounds (or raises) the tokens the aggregator spends
-// thinking before it answers — the dominant per-turn cost; `referenceThinkingBudgets`
-// does the same per reference (whose thinking is discarded downstream anyway), the
-// finer-grained companion to `referenceReasoning`. Both map to pi-ai's
-// `ThinkingBudgets` (honored by token-based providers: native Anthropic / Google /
-// Bedrock), so validation is light — confirm it is an object and that each known
-// thinking-level budget, when present, is a positive integer (token counts). Unknown
-// keys flow through to pi-ai untouched.
-const THINKING_BUDGET_LEVELS = ["minimal", "low", "medium", "high"] as const;
-
-function readOptionalThinkingBudgets(value: unknown, presetName: string, field: string): void {
-	if (value === undefined) return;
-	if (!isRecord(value)) {
-		throw new Error(`MoA preset "${presetName}": "${field}" must be an object`);
-	}
-	for (const level of THINKING_BUDGET_LEVELS) {
-		const budget = value[level];
-		if (budget === undefined) continue;
-		if (typeof budget !== "number" || !Number.isInteger(budget) || budget < 1) {
-			throw new Error(
-				`MoA preset "${presetName}": "${field}.${level}" must be an integer greater than or equal to 1`,
-			);
-		}
-	}
-}
-
 // The aggregator-guidance-placement knob selects where the private reference
 // guidance is injected into the aggregator's request. "latest-user" (default)
 // appends it to the latest user message; "trailing-message" adds it as a new
 // trailing user turn so the prior transcript stays a cacheable prefix across turns.
 const GUIDANCE_PLACEMENTS = ["latest-user", "trailing-message"] as const;
-
-function readOptionalGuidancePlacement(value: unknown, presetName: string, field: string): void {
-	if (value === undefined) return;
-	if (typeof value !== "string" || !GUIDANCE_PLACEMENTS.includes(value as never)) {
-		throw new Error(
-			`MoA preset "${presetName}": "${field}" must be one of ${GUIDANCE_PLACEMENTS.join(", ")}`,
-		);
-	}
-}
 
 // The cache-retention knobs set how long a request's provider is asked to keep its
 // prompt cache alive. They map to the provider's cache-TTL hint (Anthropic-style
@@ -355,15 +291,6 @@ function readOptionalGuidancePlacement(value: unknown, presetName: string, field
 // transcript prefix on each tool-loop turn, so they can re-hit their own cache too).
 // Both are pure cache-TTL hints: the generated output is byte-identical regardless.
 const CACHE_RETENTIONS = ["none", "short", "long"] as const;
-
-function readOptionalCacheRetention(value: unknown, presetName: string, field: string): void {
-	if (value === undefined) return;
-	if (typeof value !== "string" || !CACHE_RETENTIONS.includes(value as never)) {
-		throw new Error(
-			`MoA preset "${presetName}": "${field}" must be one of ${CACHE_RETENTIONS.join(", ")}`,
-		);
-	}
-}
 
 // The provider-routing knobs steer OpenRouter's upstream provider selection (a
 // speed lever: `sort: "throughput"` / `"latency"` route to a faster backend).
@@ -390,37 +317,30 @@ function readOptionalOpenRouterRouting(value: unknown, presetName: string, field
 	}
 }
 
-// The Vercel-AI-Gateway routing knobs are the sibling of the OpenRouter routing knobs
-// for models hosted on Vercel AI Gateway (ai-gateway.vercel.sh): pi-ai reads them from a
-// DISTINCT `compat` field (`vercelGatewayRouting`, not `openRouterRouting`) and applies
-// them only for that gateway's baseUrl. `aggregatorGatewayRouting` pins the aggregator's
-// request; `referenceGatewayRouting` pins every reference's request. The routing shape is
-// `order`/`only` provider-slug lists (prefer / restrict to a faster provider) — no `sort`
-// metric like OpenRouter — so validation confirms it is an object and that `order`/`only`,
-// when present, are arrays of strings. Every other field flows through to pi-ai's typed
-// `VercelGatewayRouting` and is validated at request time rather than duplicated here.
-function readOptionalVercelGatewayRouting(value: unknown, presetName: string, field: string): void {
-	if (value === undefined) return;
-	if (!isRecord(value)) {
-		throw new Error(`MoA preset "${presetName}": "${field}" must be an object`);
-	}
-	for (const key of ["order", "only"] as const) {
-		const list = value[key];
-		if (list === undefined) continue;
-		if (!Array.isArray(list) || list.some((slug) => typeof slug !== "string")) {
-			throw new Error(
-				`MoA preset "${presetName}": "${field}.${key}" must be an array of provider slug strings`,
-			);
-		}
-	}
-}
-
 function readOptionalNumber(value: unknown, presetName: string, field: string): number | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isFinite(value)) {
 		throw new Error(`MoA preset "${presetName}": "${field}" must be a finite number`);
 	}
 	return value;
+}
+
+function readOptionalBoolean(value: unknown, presetName: string, field: string): void {
+	if (value !== undefined && typeof value !== "boolean") {
+		throw new Error(`MoA preset "${presetName}": "${field}" must be a boolean`);
+	}
+}
+
+function readOptionalEnum(
+	value: unknown,
+	presetName: string,
+	field: string,
+	allowed: readonly string[],
+): void {
+	if (value === undefined) return;
+	if (typeof value !== "string" || !allowed.includes(value)) {
+		throw new Error(`MoA preset "${presetName}": "${field}" must be one of ${allowed.join(", ")}`);
+	}
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

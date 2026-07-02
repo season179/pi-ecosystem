@@ -2,6 +2,7 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	type CacheRetention,
 	type Context,
 	createAssistantMessageEventStream,
 	type Model,
@@ -9,7 +10,6 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 	type ThinkingContent,
-	type VercelGatewayRouting,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
@@ -47,16 +47,19 @@ const EMPTY_USAGE: AssistantMessage["usage"] = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-// Aggregator providers observed to reject a *trailing* user turn placed after
-// tool results (a role-alternation error) during this process, keyed by provider
-// id. Whether a provider's API accepts that sequence is a stable property of the
-// API — not a transient failure — so caching it process-wide is correct: once a
-// provider rejects the cache-friendly "trailing-message" placement we skip that
-// doomed attempt on every later turn and go straight to the always-valid
-// system-prompt fallback. This bounds the wasted-request cost of trailing-message
-// on a strict provider to one failed request per process instead of one on every
+// Aggregator models observed to reject a *trailing* user turn placed after
+// tool results (a role-alternation error) during this process, keyed by
+// "provider/model". Whether that sequence is accepted is a stable property of the
+// serving API — not a transient failure — so caching it process-wide is correct:
+// once a model rejects the cache-friendly "trailing-message" placement we skip
+// that doomed attempt on every later turn and go straight to the always-valid
+// system-prompt fallback. Keyed per model (not per provider) because a gateway
+// like OpenRouter fronts many upstream APIs with different alternation rules —
+// one strict model must not disable the trailing attempt for every other model
+// on the same gateway. This bounds the wasted-request cost of trailing-message
+// on a strict model to one failed request per process instead of one on every
 // tool-loop turn. It stays empty (so behavior is byte-identical) unless the opt-in
-// trailing-message placement is used against a provider that rejects the trailing
+// trailing-message placement is used against a model that rejects the trailing
 // turn; the default "latest-user" placement never attempts a trailing turn and so
 // never touches this cache.
 const trailingPlacementUnsupported = new Set<string>();
@@ -131,21 +134,16 @@ export function streamMoA(
 			);
 		}
 
-		// Steer the aggregator's request to a faster upstream backend. A gateway fronts
+		// Steer the aggregator's request to a faster upstream backend. OpenRouter fronts
 		// several upstream providers per model and, by default, balances routing (weighted
 		// by price/uptime) — which can land the aggregator on a slow backend. The
 		// aggregator's generation is the dominant, UN-bounded per-turn cost (unlike
 		// references, which quorum/timeout/output caps already bound), so pinning it to a
-		// faster backend is the most direct latency lever left. Two gateways are covered,
-		// each via its own knob and its own `compat` field (not the stream options):
-		//   - aggregatorProviderRouting → OpenRouter (`sort: "throughput"` = fastest
-		//     tokens/sec, `sort: "latency"` = lowest TTFT, preferred_min_throughput /
-		//     preferred_max_latency = explicit floors/ceilings); applied by pi-ai ONLY when
-		//     the model's baseUrl points at openrouter.ai.
-		//   - aggregatorGatewayRouting → Vercel AI Gateway (`order`/`only` provider lists
-		//     to prefer/restrict a faster provider); applied ONLY when the baseUrl points
-		//     at ai-gateway.vercel.sh.
-		// Each is therefore a safe no-op for a model on the other gateway (or on neither).
+		// faster backend is the most direct latency lever left. The routing rides on the
+		// model's `compat.openRouterRouting` (not the stream options: `sort: "throughput"`
+		// = fastest tokens/sec, `sort: "latency"` = lowest TTFT, preferred_min_throughput /
+		// preferred_max_latency = explicit floors/ceilings) and pi-ai applies it ONLY when
+		// the model's baseUrl points at openrouter.ai, so it is a safe no-op elsewhere.
 		// Aggregator-scoped (references keep their own routing) and unset by default. Kept
 		// opt-in — not shipped in the default preset — because a different backend can
 		// differ in quantization or behavior and so could subtly shift the answer, unlike a
@@ -155,7 +153,6 @@ export function streamMoA(
 		const aggregatorStreamModel = withProviderRouting(
 			aggregatorModel,
 			preset.aggregatorProviderRouting,
-			preset.aggregatorGatewayRouting,
 		);
 
 		// Resolve auth for the aggregator AND every reference concurrently, up front —
@@ -211,6 +208,7 @@ export function streamMoA(
 						strippedContext,
 						options,
 						aggregatorAuthPromise,
+						preset.aggregatorCacheRetention,
 					)
 				: undefined;
 
@@ -306,26 +304,6 @@ export function streamMoA(
 		if (preset.aggregatorReasoning !== undefined) {
 			aggregatorOptions.reasoning = preset.aggregatorReasoning;
 		}
-		// Pin the aggregator's per-effort-level thinking TOKEN budgets — the
-		// finer-grained companion to aggregatorReasoning. A reasoning effort level
-		// (minimal/low/medium/high) maps to a DEFAULT thinking-token budget
-		// (pi-ai's adjustMaxTokensForThinking: 1024/2048/8192/16384); this knob
-		// overrides those exact numbers, so a preset can keep a given effort level's
-		// behavior while precisely bounding (or raising) how many thinking tokens the
-		// aggregator spends before it answers — the dominant per-turn generation cost
-		// — with finer granularity than the five discrete effort levels (e.g. keep
-		// "high" but cap its budget from 16384 to 4000). Set AFTER the caller-options
-		// spread so the preset governs the aggregator's budgets; references keep the
-		// caller's. Token-based providers (native Anthropic / Google / Bedrock) honor
-		// thinkingBudgets; pi-ai's openai-completions provider (the default openrouter
-		// fleet) ignores it, so it is a safe provider-side no-op there — this lever
-		// pays off when the aggregator is a native token-based model. Like
-		// aggregatorReasoning it shapes the thinking budget and so trades a little
-		// answer quality for latency, so it stays opt-in and unset by default, leaving
-		// the aggregator inheriting the caller's budgets exactly as before.
-		if (preset.aggregatorThinkingBudgets !== undefined) {
-			aggregatorOptions.thinkingBudgets = preset.aggregatorThinkingBudgets;
-		}
 		// Ask the aggregator's provider to keep its prompt cache alive for the
 		// configured retention (a cache-TTL hint mapped to Anthropic `cache_control.ttl`
 		// / OpenAI `prompt_cache_retention`). The aggregator re-prefills its whole
@@ -371,13 +349,13 @@ export function streamMoA(
 		// provider can reuse from its prompt cache across tool-loop turns (the
 		// latest-user default would mutate the early task message and bust that cache).
 		//
-		// A few strict providers reject a trailing user turn after tool results. That
-		// is a stable property of the provider's API, so once we have seen it we skip
+		// A few strict APIs reject a trailing user turn after tool results. That is a
+		// stable property of the model's serving API, so once we have seen it we skip
 		// the doomed trailing attempt on later turns (see trailingPlacementUnsupported)
 		// and go straight to the system-prompt placement, which touches no message
-		// roles — turning trailing-message's worst case on a strict provider from a
+		// roles — turning trailing-message's worst case on a strict model from a
 		// wasted request every tool-loop turn into one wasted request per process.
-		const aggregatorProviderKey = preset.aggregator.provider;
+		const aggregatorProviderKey = `${preset.aggregator.provider}/${preset.aggregator.model}`;
 		const wantsTrailing =
 			preset.aggregatorGuidancePlacement === "trailing-message";
 		const attemptTrailing =
@@ -643,21 +621,22 @@ async function runReferenceTasks(args: {
 	// with no quorum set it only ever fires via the parent, so behavior is
 	// identical to awaiting every reference as before.
 	const parentSignal = args.options?.signal;
-	const phaseController = new AbortController();
-	if (parentSignal?.aborted) {
-		phaseController.abort();
-	}
-	const forwardParentAbort = () => phaseController.abort();
-	parentSignal?.addEventListener("abort", forwardParentAbort, { once: true });
+	const { controller: phaseController, dispose: unlinkAbort } =
+		linkAbortController(parentSignal);
 	const phaseOptions: SimpleStreamOptions = {
 		...(args.options ?? {}),
 		signal: phaseController.signal,
 	};
 
+	// Created only when a quorum can resolve the phase early; the default
+	// (quorum-off) path just awaits every reference and never consumes it.
 	let onQuorumMet: (() => void) | undefined;
-	const quorumMet = new Promise<void>((resolve) => {
-		onQuorumMet = resolve;
-	});
+	const quorumMet =
+		quorum !== undefined
+			? new Promise<void>((resolve) => {
+					onQuorumMet = resolve;
+				})
+			: undefined;
 
 	async function worker(): Promise<void> {
 		while (!phaseController.signal.aborted) {
@@ -703,7 +682,7 @@ async function runReferenceTasks(args: {
 		Array.from({ length: concurrency }, () => worker()),
 	);
 	try {
-		if (quorum === undefined) {
+		if (quorumMet === undefined) {
 			await allSettled;
 		} else {
 			// The abandoned workers may reject later (a superseded reference throwing
@@ -713,7 +692,7 @@ async function runReferenceTasks(args: {
 			await Promise.race([allSettled, quorumMet]);
 		}
 	} finally {
-		parentSignal?.removeEventListener("abort", forwardParentAbort);
+		unlinkAbort();
 	}
 	return results.filter(
 		(output): output is ReferenceOutput => output !== undefined,
@@ -742,22 +721,11 @@ async function runSingleReference(args: {
 				`Authentication failed for ${args.task.slot.provider}: ${auth.error}`,
 			);
 		}
-		// Drop the payload-mutation hooks before forwarding options to a reference.
-		// `onPayload` runs against the raw provider payload right before send and
-		// could inject tool schemas (the one path by which a reference could still
-		// receive tools even though the Context carries none); `onResponse` is an
-		// acting-agent concern. References are advisory and must stay tool-free.
-		const {
-			onPayload: _onPayload,
-			onResponse: _onResponse,
-			...forwardableOptions
-		} = args.options ?? {};
-		const referenceOptions: SimpleStreamOptions = {
-			...forwardableOptions,
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			signal: args.options?.signal,
-		};
+		const referenceOptions = buildSubRequestOptions(
+			args.options,
+			auth,
+			args.options?.signal,
+		);
 		if (typeof args.preset.referenceTemperature === "number") {
 			referenceOptions.temperature = args.preset.referenceTemperature;
 		}
@@ -775,37 +743,25 @@ async function runSingleReference(args: {
 		if (args.preset.referenceReasoning !== undefined) {
 			referenceOptions.reasoning = args.preset.referenceReasoning;
 		}
-		// Pin this reference's per-effort-level thinking TOKEN budgets — the
-		// reference-side mirror of aggregatorThinkingBudgets and the finer-grained
-		// companion to referenceReasoning. A reasoning effort level maps to a DEFAULT
-		// thinking-token budget (pi-ai's adjustMaxTokensForThinking:
-		// 1024/2048/8192/16384); this overrides those exact numbers, so a preset can
-		// keep a reference's effort level while precisely bounding how many thinking
-		// tokens it burns before emitting its (discarded-downstream) advice. That
-		// leading thinking phase sits on the aggregator-blocking critical path, and —
-		// unlike the aggregator, whose thinking shapes the persisted answer — a
-		// reference's thinking never reaches the aggregator or the display (only its
-		// text is kept), so trimming the reference's thinking budget is a purer latency
-		// win. It composes with referenceReasoning (effort level) and referenceMaxTokens
-		// (which on a native token-based provider bounds thinking+output combined; a
-		// budget cap lets thinking stop sooner so more of that combined budget is
-		// available for the kept text advice). Set AFTER the caller-options spread so a
-		// preset governs reference budgets independent of the caller AND of
-		// aggregatorThinkingBudgets — completing the role-scoped thinking-budgets matrix.
-		// Honored only by native token-based providers (Anthropic / Google / Bedrock);
-		// pi-ai's openai-completions provider (the default openrouter fleet) ignores it,
-		// so it is a safe provider-side no-op there — this lever pays off when a
-		// reference is a native token-based model. Opt-in and unset by default, so
-		// references inherit the caller's budgets exactly as before.
-		if (args.preset.referenceThinkingBudgets !== undefined) {
-			referenceOptions.thinkingBudgets = args.preset.referenceThinkingBudgets;
-		}
 		// Reference output is truncated to maxReferenceOutputChars before it reaches
 		// the aggregator or the display, so tokens generated past that budget are
 		// discarded. Bound reference generation to the preset's cap (never raising a
 		// smaller caller-supplied limit) to keep verbose references off the critical
 		// path — the aggregator waits for the slowest reference to finish.
-		if (typeof args.preset.referenceMaxTokens === "number") {
+		//
+		// Applied ONLY when no reasoning effort is in play for this reference. On
+		// completions-style APIs (the default openrouter fleet, where OpenRouter
+		// derives the Anthropic thinking budget as a fraction of max_tokens with a
+		// 1024-token provider minimum) thinking tokens share the max_tokens budget,
+		// so a small cap on a thinking reference can get the request rejected
+		// outright or let thinking starve the kept advice text — turning a pure
+		// cost bound into a failure mode. A thinking reference is instead bounded
+		// by the stream-level abort above (which stops it at the kept text budget)
+		// and, optionally, referenceReasoning/referenceTimeoutMs.
+		if (
+			typeof args.preset.referenceMaxTokens === "number" &&
+			referenceOptions.reasoning === undefined
+		) {
 			referenceOptions.maxTokens =
 				referenceOptions.maxTokens !== undefined
 					? Math.min(referenceOptions.maxTokens, args.preset.referenceMaxTokens)
@@ -859,24 +815,19 @@ async function runSingleReference(args: {
 			referenceOptions.cacheRetention = args.preset.referenceCacheRetention;
 		}
 		// Steer this reference's request to a faster upstream backend, mirroring the
-		// aggregator's routing knobs on the reference side. References sit on the
+		// aggregator's routing knob on the reference side. References sit on the
 		// aggregator-blocking critical path — the aggregator waits for the slowest (or
-		// the quorum-th fastest) reference — so pinning them to a faster backend directly
-		// shortens that phase, the same which-backend lever iteration 20 gave the
-		// aggregator. Two gateways are covered: referenceProviderRouting steers OpenRouter
-		// (`sort: "latency"` / `"throughput"`, applied only for openrouter.ai models) and
-		// referenceGatewayRouting steers Vercel AI Gateway (`order`/`only` provider lists,
-		// applied only for ai-gateway.vercel.sh models). Routing lives on the model's
-		// `compat` (not the stream options), so clone the model rather than mutate the
-		// shared registry object; each is a safe no-op for a reference on the other
-		// gateway (or on neither). Opt-in and unset by default; kept opt-in (not shipped
-		// in the default preset) because a different backend can differ in
-		// quantization/behavior and so could subtly shift the reference advice that feeds
-		// the aggregator's persisted answer.
+		// the quorum-th fastest) reference — so pinning them to a faster OpenRouter
+		// backend (`sort: "latency"` / `"throughput"`) directly shortens that phase.
+		// Routing lives on the model's `compat` (not the stream options), so clone the
+		// model rather than mutate the shared registry object; pi-ai applies it only
+		// for openrouter.ai models, so it is a safe no-op elsewhere. Opt-in and unset
+		// by default; kept opt-in (not shipped in the default preset) because a
+		// different backend can differ in quantization/behavior and so could subtly
+		// shift the reference advice that feeds the aggregator's persisted answer.
 		const referenceStreamModel = withProviderRouting(
 			args.task.model,
 			args.preset.referenceProviderRouting,
-			args.preset.referenceGatewayRouting,
 		);
 		const message = await streamReferenceUntilBudget(
 			referenceStreamModel,
@@ -937,13 +888,9 @@ async function streamReferenceUntilBudget(
 	keptOutputChars: number,
 	timeoutMs?: number,
 ): Promise<AssistantMessage> {
-	const parentSignal = referenceOptions.signal;
-	const controller = new AbortController();
-	if (parentSignal?.aborted) {
-		controller.abort();
-	}
-	const forwardAbort = () => controller.abort();
-	parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+	const { controller, dispose: unlinkAbort } = linkAbortController(
+		referenceOptions.signal,
+	);
 
 	let keptTextChars = 0;
 	let sawToolCall = false;
@@ -1034,7 +981,7 @@ async function streamReferenceUntilBudget(
 		if (timer !== undefined) {
 			clearTimeout(timer);
 		}
-		parentSignal?.removeEventListener("abort", forwardAbort);
+		unlinkAbort();
 	}
 }
 
@@ -1058,54 +1005,20 @@ function finalizeBudgetedReference(
 // it clones and layers the routing on top of any existing compat. The provider only
 // reads `compat.openRouterRouting` for OpenRouter-hosted models, so a non-openrouter
 // model carries it harmlessly. The cast bridges pi-ai's conditional `compat` type
-// (which varies by api) for this openrouter-shaped augmentation.
-function withOpenRouterRouting(
+// (which varies by api) for this openrouter-shaped augmentation. When the knob is
+// unset the model is returned untouched (no clone, no synthetic compat), so the
+// request stays byte-identical.
+function withProviderRouting(
 	model: Model<Api>,
-	routing: OpenRouterRouting,
+	routing: OpenRouterRouting | undefined,
 ): Model<Api> {
+	if (routing === undefined) {
+		return model;
+	}
 	return {
 		...model,
 		compat: { ...model.compat, openRouterRouting: routing },
 	} as Model<Api>;
-}
-
-// The Vercel AI Gateway counterpart of withOpenRouterRouting: return a shallow clone
-// of the model with Vercel-gateway provider routing merged into its `compat`. pi-ai
-// reads `compat.vercelGatewayRouting` (an `order`/`only` provider list) ONLY for models
-// whose baseUrl points at ai-gateway.vercel.sh — a different field and a different
-// baseUrl gate than OpenRouter's `openRouterRouting` — so this is a safe no-op for a
-// non-Vercel-gateway model, and cloning (rather than mutating the shared registry
-// object) keeps the routing from leaking to every other caller of that model. The cast
-// bridges pi-ai's conditional `compat` type for this Vercel-gateway-shaped augmentation.
-function withVercelGatewayRouting(
-	model: Model<Api>,
-	routing: VercelGatewayRouting,
-): Model<Api> {
-	return {
-		...model,
-		compat: { ...model.compat, vercelGatewayRouting: routing },
-	} as Model<Api>;
-}
-
-// Apply whichever role-scoped provider-routing knobs are set to a model. OpenRouter
-// routing and Vercel AI Gateway routing live on DISTINCT `compat` fields that the
-// provider reads only for a matching baseUrl (openrouter.ai vs ai-gateway.vercel.sh),
-// so a given model has at most one that actually applies and setting both is harmless —
-// this composes them without conflict. When neither knob is set the model is returned
-// untouched (no clone, no synthetic compat), so the request stays byte-identical.
-function withProviderRouting(
-	model: Model<Api>,
-	openRouterRouting: OpenRouterRouting | undefined,
-	gatewayRouting: VercelGatewayRouting | undefined,
-): Model<Api> {
-	let routed = model;
-	if (openRouterRouting !== undefined) {
-		routed = withOpenRouterRouting(routed, openRouterRouting);
-	}
-	if (gatewayRouting !== undefined) {
-		routed = withVercelGatewayRouting(routed, gatewayRouting);
-	}
-	return routed;
 }
 
 // Best-effort prompt-cache pre-warm for the aggregator, fired at the top of the
@@ -1124,9 +1037,15 @@ function withProviderRouting(
 //     full thinking budget on the warm request; the prompt-cache prefix is keyed by
 //     the message content, not the generation params, so this does not change what
 //     the real request can read.
-//   - The stream is aborted the instant the provider emits its FIRST event: by then
-//     the prompt has been processed (prefill + cache write happen before the first
-//     token), so we pay for the cache write but generate essentially nothing.
+//   - The preset's aggregatorCacheRetention (when set) is applied to the warm request
+//     too, so the warm cache write carries the same TTL the real request will ask for.
+//   - The stream is aborted at the provider's first CONTENT event — not at `start`.
+//     pi-ai pushes `start` as soon as the HTTP response HEADERS arrive, which for a
+//     long context is typically while the provider is still prefilling; aborting
+//     there could cancel the request before the prompt-cache write commits. The
+//     first content event, by contrast, proves the prompt has been fully processed
+//     (prefill + cache write precede the first token), so breaking there pays for
+//     the cache write while generating essentially nothing.
 //
 // Any failure (auth, network, provider rejection, abort) is swallowed — the warm-up
 // must never affect the real turn. Returns a promise that never rejects.
@@ -1135,6 +1054,7 @@ async function prewarmAggregatorCache(
 	strippedContext: Context,
 	options: SimpleStreamOptions | undefined,
 	authPromise: Promise<AuthResult>,
+	cacheRetention: CacheRetention | undefined,
 ): Promise<void> {
 	const parentSignal = options?.signal;
 	if (parentSignal?.aborted) {
@@ -1145,38 +1065,82 @@ async function prewarmAggregatorCache(
 		if (!auth.ok || parentSignal?.aborted) {
 			return;
 		}
-		const controller = new AbortController();
-		const forwardAbort = () => controller.abort();
-		parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+		const { controller, dispose: unlinkAbort } =
+			linkAbortController(parentSignal);
 		try {
-			const {
-				onPayload: _onPayload,
-				onResponse: _onResponse,
-				...forwardableOptions
-			} = options ?? {};
 			const warmOptions: SimpleStreamOptions = {
-				...forwardableOptions,
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				signal: controller.signal,
+				...buildSubRequestOptions(options, auth, controller.signal),
 				reasoning: "minimal",
 			};
+			if (cacheRetention !== undefined) {
+				warmOptions.cacheRetention = cacheRetention;
+			}
 			const stream = streamSimple(model, strippedContext, warmOptions);
 			for await (const event of stream) {
-				// The provider has processed the prompt (prefill + prompt-cache write)
-				// by the time it emits any event, so stop right here: abort the request
-				// to avoid generating a real (billable, latency-adding) completion.
-				if (event.type !== "error") {
-					controller.abort();
+				if (event.type === "error" || event.type === "done") {
+					return;
 				}
+				if (event.type === "start") {
+					// `start` fires when the HTTP response headers arrive — the provider
+					// may still be prefilling. Keep consuming until a content event
+					// proves the prompt (and its cache write) has been fully processed.
+					continue;
+				}
+				// First content event: prefill + cache write are committed. Abort now to
+				// avoid generating a real (billable, latency-adding) completion.
+				controller.abort();
 				return;
 			}
 		} finally {
-			parentSignal?.removeEventListener("abort", forwardAbort);
+			unlinkAbort();
 		}
 	} catch {
 		// Best-effort: never let a warm-up failure surface on the real turn.
 	}
+}
+
+// Create a child AbortController mirrored from a parent signal: an
+// already-aborted parent aborts the child immediately, a later parent abort
+// forwards to it, and the returned dispose (call it in a `finally`) removes the
+// forwarding listener so the parent signal never accumulates dead listeners.
+function linkAbortController(parentSignal: AbortSignal | undefined): {
+	controller: AbortController;
+	dispose: () => void;
+} {
+	const controller = new AbortController();
+	if (parentSignal?.aborted) {
+		controller.abort();
+	}
+	const forwardAbort = () => controller.abort();
+	parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+	return {
+		controller,
+		dispose: () => parentSignal?.removeEventListener("abort", forwardAbort),
+	};
+}
+
+// Build the options forwarded to a synthetic MoA sub-request (a reference or the
+// aggregator pre-warm): drop the acting agent's payload-mutation hooks and inject
+// the sub-request's own auth and abort signal. `onPayload` runs against the raw
+// provider payload right before send and could inject tool schemas (the one path
+// by which a tool-free sub-request could still receive tools); `onResponse` is an
+// acting-agent concern that must not fire for advisory or throwaway requests.
+function buildSubRequestOptions(
+	options: SimpleStreamOptions | undefined,
+	auth: Pick<SimpleStreamOptions, "apiKey" | "headers">,
+	signal: AbortSignal | undefined,
+): SimpleStreamOptions {
+	const {
+		onPayload: _onPayload,
+		onResponse: _onResponse,
+		...forwardableOptions
+	} = options ?? {};
+	return {
+		...forwardableOptions,
+		apiKey: auth.apiKey,
+		headers: auth.headers,
+		signal,
+	};
 }
 
 function resolveUnderlyingModel(
@@ -1227,6 +1191,26 @@ function failedReferenceOutput(
 	};
 }
 
+// Assistant-message shell for the synthetic events the orchestrator emits
+// itself (the thinking preludes and the fatal-error path), so the three
+// emitters stamp one shape instead of drifting copies.
+function assistantPartial(
+	model: Model<Api>,
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"] = "stop",
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: EMPTY_USAGE,
+		stopReason,
+		timestamp: Date.now(),
+	};
+}
+
 // Push the reference thinking block onto the outer stream as a live prelude: a
 // `start`, then thinking start/delta/end for content index 0. This surfaces the
 // references during the reference/aggregator compute pause. The same block is
@@ -1239,16 +1223,8 @@ function emitReferenceThinkingPrelude(
 	model: Model<Api>,
 	referenceThinking: ThinkingContent,
 ): void {
-	const partial = (content: AssistantMessage["content"]): AssistantMessage => ({
-		role: "assistant",
-		content,
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: EMPTY_USAGE,
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
+	const partial = (content: AssistantMessage["content"]): AssistantMessage =>
+		assistantPartial(model, content);
 	const text = referenceThinking.thinking;
 	outerStream.push({ type: "start", partial: partial([]) });
 	outerStream.push({
@@ -1288,26 +1264,15 @@ export function beginProgressiveReferenceThinking(
 	reveal: (index: number, output: ReferenceOutput) => void;
 	finish: (fullText: string) => void;
 } {
-	const base = (): Omit<AssistantMessage, "content"> => ({
-		role: "assistant",
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: EMPTY_USAGE,
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
-	const thinkingPartial = (thinking: string): AssistantMessage => ({
-		...base(),
-		content: [{ type: "thinking", thinking }],
-	});
+	const thinkingPartial = (thinking: string): AssistantMessage =>
+		assistantPartial(model, [{ type: "thinking", thinking }]);
 
 	const header = buildReferenceThinkingHeader(preset, referenceCount);
 	let accumulated = header;
 	const settled: Array<ReferenceOutput | undefined> = new Array(referenceCount);
 	let revealPointer = 0;
 
-	outerStream.push({ type: "start", partial: { ...base(), content: [] } });
+	outerStream.push({ type: "start", partial: assistantPartial(model, []) });
 	outerStream.push({
 		type: "thinking_start",
 		contentIndex: 0,
@@ -1361,15 +1326,8 @@ function pushFatalError(
 	stopReason: "error" | "aborted",
 ): void {
 	const message: AssistantMessage = {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: EMPTY_USAGE,
-		stopReason,
+		...assistantPartial(model, [], stopReason),
 		errorMessage,
-		timestamp: Date.now(),
 	};
 	stream.push({ type: "error", reason: stopReason, error: message });
 	stream.end(message);

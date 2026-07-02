@@ -10,6 +10,7 @@ import {
 	fauxToolCall,
 	type Model,
 	registerFauxProvider,
+	type SimpleStreamOptions,
 	Type,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -113,6 +114,82 @@ function registerFaux(provider: string, modelId: string): FauxRegistration {
 	});
 	registrations.push(registration);
 	return registration;
+}
+
+// pi-ai's Model.compat is a conditional type that resolves to `never` for the faux
+// provider's api, so read the routing through a structural cast — the same boundary
+// cast the orchestrator uses when it writes the field.
+function openRouterRoutingOf(model: Model<Api>): unknown {
+	return (model as { compat?: { openRouterRouting?: unknown } }).compat
+		?.openRouterRouting;
+}
+
+// The role-scoped knob tests share one scaffold: reference faux providers plus an
+// aggregator, a single-user-turn context, and a streamMoA call whose responders
+// capture what each role's request actually carried. `read` runs inside every
+// responder with the exact (options, model) pi-moa handed to streamSimple; the
+// returned values are index-aligned with the references. Throws if any responder
+// never fired, so an `undefined` capture can only mean the request really carried
+// no value.
+async function captureRoleValues<T>(args: {
+	callerOptions?: SimpleStreamOptions;
+	preset?: Partial<MoAPreset>;
+	referenceCount?: 1 | 2;
+	read: (options: unknown, model: Model<Api>) => T;
+}): Promise<{ references: T[]; aggregator: T }> {
+	const slots = [
+		{ provider: "ref-a", model: "a" },
+		{ provider: "ref-b", model: "b" },
+	].slice(0, args.referenceCount ?? 1);
+	const fauxes = slots.map((slot) => registerFaux(slot.provider, slot.model));
+	const agg = registerFaux("agg", "main");
+	const references: T[] = [];
+	const referenceFired = slots.map(() => false);
+	let aggregator: T | undefined;
+	let aggregatorFired = false;
+	fauxes.forEach((faux, index) => {
+		faux.setResponses([
+			(_context, options, _state, model) => {
+				references[index] = args.read(options, model);
+				referenceFired[index] = true;
+				return fauxAssistantMessage(`advice ${slots[index].model}`);
+			},
+		]);
+	});
+	agg.setResponses([
+		(_context, options, _state, model) => {
+			aggregator = args.read(options, model);
+			aggregatorFired = true;
+			return fauxAssistantMessage("final answer");
+		},
+	]);
+	const registry = createRegistry([
+		...fauxes.map((faux, index) => ({
+			model: faux.getModel(slots[index].model)!,
+		})),
+		{ model: agg.getModel("main")! },
+	]);
+	await streamMoA(
+		makeSyntheticMoAModel(agg.getModel("main")!),
+		{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+		args.callerOptions,
+		registry,
+		baseConfig(basePreset({ referenceModels: slots, ...args.preset })),
+	).result();
+	if (!aggregatorFired || referenceFired.some((fired) => !fired)) {
+		throw new Error("captureRoleValues: a faux responder never fired");
+	}
+	return { references, aggregator: aggregator as T };
+}
+
+async function collectEvents(
+	stream: ReturnType<typeof streamMoA>,
+): Promise<AssistantMessageEvent[]> {
+	const events: AssistantMessageEvent[] = [];
+	for await (const event of stream) {
+		events.push(event);
+	}
+	return events;
 }
 
 function textFromResult(
@@ -373,27 +450,6 @@ describe("MoA config", () => {
 			validateMoAConfig(
 				baseConfig(
 					basePreset({
-						aggregatorGatewayRouting:
-							"anthropic" as unknown as MoAPreset["aggregatorGatewayRouting"],
-					}),
-				),
-			),
-		).toThrow(/aggregatorGatewayRouting/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						referenceGatewayRouting: {
-							order: ["anthropic", 5],
-						} as unknown as MoAPreset["referenceGatewayRouting"],
-					}),
-				),
-			),
-		).toThrow(/referenceGatewayRouting.*order/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
 						aggregatorPrewarm:
 							"yes" as unknown as MoAPreset["aggregatorPrewarm"],
 					}),
@@ -409,76 +465,6 @@ describe("MoA config", () => {
 		// 0 (disable retries) is a valid, meaningful value — not rejected.
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: 0 }))),
-		).not.toThrow();
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						aggregatorThinkingBudgets:
-							"high" as unknown as MoAPreset["aggregatorThinkingBudgets"],
-					}),
-				),
-			),
-		).toThrow(/aggregatorThinkingBudgets/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						aggregatorThinkingBudgets: {
-							high: 0,
-						} as unknown as MoAPreset["aggregatorThinkingBudgets"],
-					}),
-				),
-			),
-		).toThrow(/aggregatorThinkingBudgets.*high/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						aggregatorThinkingBudgets: {
-							low: 1.5,
-						} as unknown as MoAPreset["aggregatorThinkingBudgets"],
-					}),
-				),
-			),
-		).toThrow(/aggregatorThinkingBudgets.*low/);
-		// A valid per-level budget map (positive-integer token counts) is accepted.
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({ aggregatorThinkingBudgets: { high: 4000, low: 1024 } }),
-				),
-			),
-		).not.toThrow();
-		// referenceThinkingBudgets shares the same validator, so it rejects a
-		// non-object and a non-positive-integer budget, and accepts a valid map.
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						referenceThinkingBudgets:
-							"high" as unknown as MoAPreset["referenceThinkingBudgets"],
-					}),
-				),
-			),
-		).toThrow(/referenceThinkingBudgets/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({
-						referenceThinkingBudgets: {
-							medium: 0,
-						} as unknown as MoAPreset["referenceThinkingBudgets"],
-					}),
-				),
-			),
-		).toThrow(/referenceThinkingBudgets.*medium/);
-		expect(() =>
-			validateMoAConfig(
-				baseConfig(
-					basePreset({ referenceThinkingBudgets: { high: 2000, minimal: 512 } }),
-				),
-			),
 		).not.toThrow();
 	});
 
@@ -1196,6 +1182,46 @@ describe("MoA orchestration", () => {
 		expect(referenceMaxTokens).toBe(128);
 	});
 
+	it("skips the referenceMaxTokens cap when a reasoning effort is in play for the reference", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceMaxTokens: number | undefined = -1;
+		refA.setResponses([
+			(_context, options) => {
+				referenceMaxTokens = options?.maxTokens;
+				return fauxAssistantMessage("advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const context: Context = {
+			messages: [{ role: "user", content: "question", timestamp: 1 }],
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			context,
+			// The caller runs with thinking enabled; the reference inherits it.
+			{ reasoning: "high" },
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceMaxTokens: 512,
+				}),
+			),
+		).result();
+		// On completions-style APIs thinking tokens share the max_tokens budget
+		// (OpenRouter derives the Anthropic thinking budget as a fraction of
+		// max_tokens, with a 1024-token provider-side minimum), so applying a small
+		// cap to a thinking reference could get the request rejected or let thinking
+		// starve the kept advice text. The cap must stand down when a reasoning
+		// effort is in play — the stream-level abort still bounds the kept text.
+		expect(referenceMaxTokens).toBeUndefined();
+	});
+
 	it("pre-resolves every reference's auth up front so a late concurrency slot never blocks on a fresh auth fetch", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const refB = registerFaux("ref-b", "b");
@@ -1247,836 +1273,180 @@ describe("MoA orchestration", () => {
 	});
 
 	it("caps reference reasoning effort without changing the aggregator's", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceReasoning: unknown;
-		let aggregatorReasoning: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references, aggregator } = await captureRoleValues({
 			// The caller asks for heavy reasoning (for the aggregator's benefit)...
-			{ reasoning: "high" },
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					referenceReasoning: "minimal",
-				}),
-			),
-		).result();
+			callerOptions: { reasoning: "high" },
+			preset: { referenceReasoning: "minimal" },
+			read: (options) => (options as { reasoning?: unknown })?.reasoning,
+		});
 		// ...but the reference is capped to minimal so its (discarded) thinking
 		// stops holding up the aggregator, while the aggregator keeps the caller's
 		// requested reasoning for the actual answer.
-		expect(referenceReasoning).toBe("minimal");
-		expect(aggregatorReasoning).toBe("high");
+		expect(references).toEqual(["minimal"]);
+		expect(aggregator).toBe("high");
 	});
 
 	it("leaves reference reasoning inheriting the caller's when unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceReasoning: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([fauxAssistantMessage("final answer")]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			{ reasoning: "high" },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { references } = await captureRoleValues({
+			callerOptions: { reasoning: "high" },
+			read: (options) => (options as { reasoning?: unknown })?.reasoning,
+		});
 		// With no referenceReasoning override, the reference inherits the caller's
 		// reasoning exactly as before — zero behavioral change by default.
-		expect(referenceReasoning).toBe("high");
+		expect(references).toEqual(["high"]);
 	});
 
 	it("caps client-side retries for references only, leaving the aggregator's untouched", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const refB = registerFaux("ref-b", "b");
-		const agg = registerFaux("agg", "main");
-		const referenceMaxRetries: Array<number | undefined> = [];
-		let aggregatorMaxRetries: number | undefined = 999;
-		const captureReference = (_context: Context, options: unknown) => {
-			referenceMaxRetries.push(
-				(options as { maxRetries?: number })?.maxRetries,
-			);
-			return fauxAssistantMessage("advice");
-		};
-		refA.setResponses([captureReference]);
-		refB.setResponses([captureReference]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorMaxRetries = (options as { maxRetries?: number })?.maxRetries;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: refB.getModel("b")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references, aggregator } = await captureRoleValues({
 			// The caller passes no retry preference...
-			undefined,
-			registry,
-			baseConfig(basePreset({ referenceMaxRetries: 0 })),
-		).result();
+			referenceCount: 2,
+			preset: { referenceMaxRetries: 0 },
+			read: (options) => (options as { maxRetries?: number })?.maxRetries,
+		});
 		// ...so every reference's request is pinned to zero client-side retries (fail
 		// fast on a transient error instead of blocking the critical path on backoff),
 		// while the aggregator — which produces the final answer — keeps the SDK/caller
 		// default (undefined here), so its resilience is never traded away.
-		expect(referenceMaxRetries).toEqual([0, 0]);
-		expect(aggregatorMaxRetries).toBeUndefined();
+		expect(references).toEqual([0, 0]);
+		expect(aggregator).toBeUndefined();
 	});
 
 	it("leaves reference retries inheriting the caller's when referenceMaxRetries is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceMaxRetries: number | undefined = 999;
-		refA.setResponses([
-			(_context, options) => {
-				referenceMaxRetries = (options as { maxRetries?: number })?.maxRetries;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([fauxAssistantMessage("final answer")]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references } = await captureRoleValues({
 			// The caller supplies its own retry budget across the board...
-			{ maxRetries: 5 },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+			callerOptions: { maxRetries: 5 },
+			read: (options) => (options as { maxRetries?: number })?.maxRetries,
+		});
 		// ...and with no preset override the reference inherits it exactly as before —
 		// zero behavioral change by default.
-		expect(referenceMaxRetries).toBe(5);
+		expect(references).toEqual([5]);
 	});
 
 	it("caps aggregator reasoning effort without changing the references'", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceReasoning: unknown;
-		let aggregatorReasoning: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references, aggregator } = await captureRoleValues({
 			// The caller asks for heavy reasoning across the board...
-			{ reasoning: "high" },
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					aggregatorReasoning: "minimal",
-				}),
-			),
-		).result();
+			callerOptions: { reasoning: "high" },
+			preset: { aggregatorReasoning: "minimal" },
+			read: (options) => (options as { reasoning?: unknown })?.reasoning,
+		});
 		// ...but the preset pins the aggregator (the dominant per-turn latency cost)
 		// to minimal so its answer generation is faster, while the reference keeps the
 		// caller's reasoning — the aggregator knob never touches references.
-		expect(aggregatorReasoning).toBe("minimal");
-		expect(referenceReasoning).toBe("high");
+		expect(aggregator).toBe("minimal");
+		expect(references).toEqual(["high"]);
 	});
 
 	it("leaves the aggregator inheriting the caller's reasoning when aggregatorReasoning is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let aggregatorReasoning: unknown;
-		refA.setResponses([fauxAssistantMessage("advice")]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorReasoning = (options as { reasoning?: unknown })?.reasoning;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			{ reasoning: "high" },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { aggregator } = await captureRoleValues({
+			callerOptions: { reasoning: "high" },
+			read: (options) => (options as { reasoning?: unknown })?.reasoning,
+		});
 		// With no preset override the aggregator inherits the caller's reasoning
 		// exactly as before — zero behavioral change by default.
-		expect(aggregatorReasoning).toBe("high");
-	});
-
-	it("applies aggregatorThinkingBudgets to the aggregator only, leaving references untouched", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceThinkingBudgets: unknown;
-		let aggregatorThinkingBudgets: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			// The caller passes no thinking-budget preference...
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					aggregatorThinkingBudgets: { high: 4000, low: 1024 },
-				}),
-			),
-		).result();
-		// ...so the preset pins the aggregator's per-level thinking token budgets
-		// (bounding the dominant per-turn generation cost with finer granularity than
-		// the effort levels), while the reference keeps the caller's (undefined here)
-		// — the aggregator knob never touches references.
-		expect(aggregatorThinkingBudgets).toEqual({ high: 4000, low: 1024 });
-		expect(referenceThinkingBudgets).toBeUndefined();
-	});
-
-	it("leaves the aggregator inheriting the caller's thinkingBudgets when aggregatorThinkingBudgets is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let aggregatorThinkingBudgets: unknown;
-		refA.setResponses([fauxAssistantMessage("advice")]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			// The caller supplies its own thinking budgets...
-			{ thinkingBudgets: { high: 2048 } },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
-		// ...and with no preset override the aggregator inherits them exactly as
-		// before — zero behavioral change by default.
-		expect(aggregatorThinkingBudgets).toEqual({ high: 2048 });
-	});
-
-	it("applies referenceThinkingBudgets to the references only, overriding the caller and leaving the aggregator untouched", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceThinkingBudgets: unknown;
-		let aggregatorThinkingBudgets: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			// The caller sets a thinking-budget preference across the board...
-			{ thinkingBudgets: { high: 8192 } },
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					referenceThinkingBudgets: { high: 2000, minimal: 512 },
-				}),
-			),
-		).result();
-		// ...but the preset pins the reference's per-level thinking token budgets
-		// (bounding its discarded-downstream thinking on the aggregator-blocking path),
-		// while the aggregator keeps the caller's — the reference knob is
-		// reference-scoped and never touches the aggregator.
-		expect(referenceThinkingBudgets).toEqual({ high: 2000, minimal: 512 });
-		expect(aggregatorThinkingBudgets).toEqual({ high: 8192 });
-	});
-
-	it("leaves references inheriting the caller's thinkingBudgets when referenceThinkingBudgets is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceThinkingBudgets: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceThinkingBudgets = (
-					options as { thinkingBudgets?: unknown }
-				)?.thinkingBudgets;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([fauxAssistantMessage("final answer")]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			{ thinkingBudgets: { high: 4096 } },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
-		// With no preset override the reference inherits the caller's budgets exactly
-		// as before — zero behavioral change by default.
-		expect(referenceThinkingBudgets).toEqual({ high: 4096 });
+		expect(aggregator).toBe("high");
 	});
 
 	it("applies aggregatorCacheRetention to the aggregator only, overriding the caller and leaving references untouched", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceCacheRetention: unknown;
-		let aggregatorCacheRetention: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references, aggregator } = await captureRoleValues({
 			// The caller asks for short retention across the board...
-			{ cacheRetention: "short" },
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					aggregatorCacheRetention: "long",
-				}),
-			),
-		).result();
+			callerOptions: { cacheRetention: "short" },
+			preset: { aggregatorCacheRetention: "long" },
+			read: (options) =>
+				(options as { cacheRetention?: unknown })?.cacheRetention,
+		});
 		// ...but the preset upgrades the aggregator (the expensive, cross-turn
 		// re-prefiller) to long retention so its cache survives review/tool gaps,
 		// while the single-turn reference keeps the caller's short retention — the
 		// preset knob never touches references, so it doesn't pay their long-cache
 		// write cost.
-		expect(aggregatorCacheRetention).toBe("long");
-		expect(referenceCacheRetention).toBe("short");
+		expect(aggregator).toBe("long");
+		expect(references).toEqual(["short"]);
 	});
 
 	it("leaves the aggregator inheriting the caller's cache retention when aggregatorCacheRetention is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let aggregatorCacheRetention: unknown;
-		refA.setResponses([fauxAssistantMessage("advice")]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			{ cacheRetention: "long" },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { aggregator } = await captureRoleValues({
+			callerOptions: { cacheRetention: "long" },
+			read: (options) =>
+				(options as { cacheRetention?: unknown })?.cacheRetention,
+		});
 		// With no preset override the aggregator inherits the caller's retention
 		// exactly as before — zero behavioral change by default.
-		expect(aggregatorCacheRetention).toBe("long");
+		expect(aggregator).toBe("long");
 	});
 
 	it("applies referenceCacheRetention to the references only, overriding the caller and leaving the aggregator untouched", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceCacheRetention: unknown;
-		let aggregatorCacheRetention: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, options) => {
-				aggregatorCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
+		const { references, aggregator } = await captureRoleValues({
 			// The caller asks for short retention across the board...
-			{ cacheRetention: "short" },
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					referenceCacheRetention: "long",
-				}),
-			),
-		).result();
+			callerOptions: { cacheRetention: "short" },
+			preset: { referenceCacheRetention: "long" },
+			read: (options) =>
+				(options as { cacheRetention?: unknown })?.cacheRetention,
+		});
 		// ...but the preset upgrades the references (which also re-prefill their
 		// shared, append-only transcript prefix on every tool-loop turn) to long
 		// retention, while the aggregator keeps the caller's short retention — the
 		// reference knob is reference-scoped and never touches the aggregator.
-		expect(referenceCacheRetention).toBe("long");
-		expect(aggregatorCacheRetention).toBe("short");
+		expect(references).toEqual(["long"]);
+		expect(aggregator).toBe("short");
 	});
 
 	it("leaves references inheriting the caller's cache retention when referenceCacheRetention is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceCacheRetention: unknown;
-		refA.setResponses([
-			(_context, options) => {
-				referenceCacheRetention = (
-					options as { cacheRetention?: unknown }
-				)?.cacheRetention;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([fauxAssistantMessage("final answer")]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			{ cacheRetention: "long" },
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { references } = await captureRoleValues({
+			callerOptions: { cacheRetention: "long" },
+			read: (options) =>
+				(options as { cacheRetention?: unknown })?.cacheRetention,
+		});
 		// With no preset override the reference inherits the caller's retention
 		// exactly as before — zero behavioral change by default.
-		expect(referenceCacheRetention).toBe("long");
+		expect(references).toEqual(["long"]);
 	});
 
 	it("applies aggregatorProviderRouting to the aggregator model only, leaving references unrouted", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceRouting: unknown;
-		let aggregatorRouting: unknown;
-		// The faux responder's 4th arg is the exact model object pi-moa handed to
+		// The faux responder's model arg is the exact model object pi-moa handed to
 		// streamSimple, so `model.compat.openRouterRouting` reflects the routing that
 		// would reach OpenRouter's `provider` payload field.
-		refA.setResponses([
-			(_context, _options, _state, model) => {
-				referenceRouting = model.compat?.openRouterRouting;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, _options, _state, model) => {
-				aggregatorRouting = model.compat?.openRouterRouting;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					aggregatorProviderRouting: { sort: "throughput" },
-				}),
-			),
-		).result();
+		const { references, aggregator } = await captureRoleValues({
+			preset: { aggregatorProviderRouting: { sort: "throughput" } },
+			read: (_options, model) => openRouterRoutingOf(model),
+		});
 		// The aggregator (the dominant, unbounded per-turn cost) is pinned to the
 		// fastest-throughput OpenRouter backend, while the reference stays unrouted —
 		// the knob is aggregator-scoped and never touches reference requests.
-		expect(aggregatorRouting).toEqual({ sort: "throughput" });
-		expect(referenceRouting).toBeUndefined();
+		expect(aggregator).toEqual({ sort: "throughput" });
+		expect(references).toEqual([undefined]);
 	});
 
 	it("leaves the aggregator model unrouted when aggregatorProviderRouting is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let aggregatorRouting: unknown = "sentinel";
-		let sawCompat: unknown = "sentinel";
-		refA.setResponses([fauxAssistantMessage("advice")]);
-		agg.setResponses([
-			(_context, _options, _state, model) => {
-				sawCompat = model.compat;
-				aggregatorRouting = model.compat?.openRouterRouting;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { aggregator } = await captureRoleValues({
+			read: (_options, model) => model.compat,
+		});
 		// With no preset override the aggregator model is passed through untouched —
-		// no synthetic compat is injected, so the request is byte-identical to before.
-		expect(aggregatorRouting).toBeUndefined();
-		expect(sawCompat).toBeUndefined();
+		// no synthetic compat is injected (which also means no routing), so the
+		// request is byte-identical to before.
+		expect(aggregator).toBeUndefined();
 	});
 
 	it("applies referenceProviderRouting to reference models only, leaving the aggregator unrouted", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const refB = registerFaux("ref-b", "b");
-		const agg = registerFaux("agg", "main");
-		const referenceRoutings: unknown[] = [];
-		let aggregatorRouting: unknown = "sentinel";
-		refA.setResponses([
-			(_context, _options, _state, model) => {
-				referenceRoutings.push(model.compat?.openRouterRouting);
-				return fauxAssistantMessage("advice a");
-			},
-		]);
-		refB.setResponses([
-			(_context, _options, _state, model) => {
-				referenceRoutings.push(model.compat?.openRouterRouting);
-				return fauxAssistantMessage("advice b");
-			},
-		]);
-		agg.setResponses([
-			(_context, _options, _state, model) => {
-				aggregatorRouting = model.compat?.openRouterRouting;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: refB.getModel("b")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [
-						{ provider: "ref-a", model: "a" },
-						{ provider: "ref-b", model: "b" },
-					],
-					referenceProviderRouting: { sort: "latency" },
-				}),
-			),
-		).result();
+		const { references, aggregator } = await captureRoleValues({
+			referenceCount: 2,
+			preset: { referenceProviderRouting: { sort: "latency" } },
+			read: (_options, model) => openRouterRoutingOf(model),
+		});
 		// Every reference is pinned to the lowest-latency OpenRouter backend (they sit
 		// on the aggregator-blocking critical path), while the aggregator stays unrouted
 		// — the knob is reference-scoped and never touches the aggregator request.
-		expect(referenceRoutings).toEqual([{ sort: "latency" }, { sort: "latency" }]);
-		expect(aggregatorRouting).toBeUndefined();
+		expect(references).toEqual([{ sort: "latency" }, { sort: "latency" }]);
+		expect(aggregator).toBeUndefined();
 	});
 
 	it("leaves reference models unrouted when referenceProviderRouting is unset", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceRouting: unknown = "sentinel";
-		let sawCompat: unknown = "sentinel";
-		refA.setResponses([
-			(_context, _options, _state, model) => {
-				sawCompat = model.compat;
-				referenceRouting = model.compat?.openRouterRouting;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([fauxAssistantMessage("final answer")]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
-		).result();
+		const { references } = await captureRoleValues({
+			read: (_options, model) => model.compat,
+		});
 		// With no preset override the reference model is passed through untouched — no
-		// synthetic compat is injected, so the reference request is byte-identical.
-		expect(referenceRouting).toBeUndefined();
-		expect(sawCompat).toBeUndefined();
-	});
-
-	it("applies aggregatorGatewayRouting to the aggregator model only, leaving references unrouted", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const agg = registerFaux("agg", "main");
-		let referenceGateway: unknown = "sentinel";
-		let aggregatorGateway: unknown;
-		// The faux responder's 4th arg is the exact model object pi-moa handed to
-		// streamSimple, so `model.compat.vercelGatewayRouting` reflects the routing that
-		// would reach Vercel AI Gateway's `providerOptions.gateway` payload field.
-		refA.setResponses([
-			(_context, _options, _state, model) => {
-				referenceGateway = model.compat?.vercelGatewayRouting;
-				return fauxAssistantMessage("advice");
-			},
-		]);
-		agg.setResponses([
-			(_context, _options, _state, model) => {
-				aggregatorGateway = model.compat?.vercelGatewayRouting;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [{ provider: "ref-a", model: "a" }],
-					aggregatorGatewayRouting: { order: ["anthropic", "bedrock"] },
-				}),
-			),
-		).result();
-		// The aggregator is pinned to a preferred Vercel-gateway provider order while the
-		// reference stays unrouted — the knob is aggregator-scoped and, being a distinct
-		// compat field from the OpenRouter knob, never populates openRouterRouting either.
-		expect(aggregatorGateway).toEqual({ order: ["anthropic", "bedrock"] });
-		expect(referenceGateway).toBeUndefined();
-	});
-
-	it("applies referenceGatewayRouting to reference models only, leaving the aggregator unrouted", async () => {
-		const refA = registerFaux("ref-a", "a");
-		const refB = registerFaux("ref-b", "b");
-		const agg = registerFaux("agg", "main");
-		const referenceGateways: unknown[] = [];
-		let aggregatorGateway: unknown = "sentinel";
-		refA.setResponses([
-			(_context, _options, _state, model) => {
-				referenceGateways.push(model.compat?.vercelGatewayRouting);
-				return fauxAssistantMessage("advice a");
-			},
-		]);
-		refB.setResponses([
-			(_context, _options, _state, model) => {
-				referenceGateways.push(model.compat?.vercelGatewayRouting);
-				return fauxAssistantMessage("advice b");
-			},
-		]);
-		agg.setResponses([
-			(_context, _options, _state, model) => {
-				aggregatorGateway = model.compat?.vercelGatewayRouting;
-				return fauxAssistantMessage("final answer");
-			},
-		]);
-		const registry = createRegistry([
-			{ model: refA.getModel("a")! },
-			{ model: refB.getModel("b")! },
-			{ model: agg.getModel("main")! },
-		]);
-		const context: Context = {
-			messages: [{ role: "user", content: "question", timestamp: 1 }],
-		};
-		await streamMoA(
-			makeSyntheticMoAModel(agg.getModel("main")!),
-			context,
-			undefined,
-			registry,
-			baseConfig(
-				basePreset({
-					referenceModels: [
-						{ provider: "ref-a", model: "a" },
-						{ provider: "ref-b", model: "b" },
-					],
-					referenceGatewayRouting: { only: ["anthropic"] },
-				}),
-			),
-		).result();
-		// Every reference is restricted to the chosen Vercel-gateway provider while the
-		// aggregator stays unrouted — the knob is reference-scoped and never touches the
-		// aggregator request.
-		expect(referenceGateways).toEqual([{ only: ["anthropic"] }, { only: ["anthropic"] }]);
-		expect(aggregatorGateway).toBeUndefined();
+		// synthetic compat is injected (so no routing either), and the reference
+		// request is byte-identical.
+		expect(references).toEqual([undefined]);
 	});
 
 	it("pre-warms the aggregator's prompt cache over the guidance-free prefix during the reference phase", async () => {
@@ -2084,6 +1454,7 @@ describe("MoA orchestration", () => {
 		const agg = registerFaux("agg", "main");
 		let warmContextText: string | undefined;
 		let warmReasoning: unknown;
+		let warmCacheRetention: unknown;
 		let realContextText: string | undefined;
 		let warmRanWhileReferencePending = false;
 		let resolveWarm!: () => void;
@@ -2097,6 +1468,9 @@ describe("MoA orchestration", () => {
 			(context, options) => {
 				warmContextText = serializeContextText(context);
 				warmReasoning = (options as { reasoning?: unknown })?.reasoning;
+				warmCacheRetention = (
+					options as { cacheRetention?: unknown }
+				)?.cacheRetention;
 				resolveWarm();
 				return fauxAssistantMessage("warm");
 			},
@@ -2139,6 +1513,7 @@ describe("MoA orchestration", () => {
 					referenceModels: [{ provider: "ref-a", model: "a" }],
 					referenceConcurrency: 1,
 					aggregatorPrewarm: true,
+					aggregatorCacheRetention: "long",
 				}),
 			),
 		).result();
@@ -2151,6 +1526,9 @@ describe("MoA orchestration", () => {
 		// ...pinned to minimal reasoning so a reasoning aggregator does not burn a full
 		// thinking budget on the throwaway ping (the caller asked for "high")...
 		expect(warmReasoning).toBe("minimal");
+		// ...asking for the same cache TTL the real request will, so the warm write's
+		// retention matches what the real read expects...
+		expect(warmCacheRetention).toBe("long");
 		// ...while the real request keeps the guidance for the aggregator to act on.
 		expect(realContextText).toContain(MOA_GUIDANCE_MARKER);
 	});
@@ -2482,10 +1860,7 @@ describe("MoA orchestration", () => {
 				}),
 			),
 		);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		// The aggregator's answer arrives as incremental text_delta events (live
 		// streaming / time-to-first-token) — not just the final `done` burst.
@@ -2542,10 +1917,7 @@ describe("MoA orchestration", () => {
 				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
 			),
 		);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		// With the knob unset the aggregator's answer is NOT streamed — no text_delta
 		// events reach the outer stream; the answer arrives only in the final `done`.
@@ -2630,10 +2002,7 @@ describe("MoA orchestration", () => {
 			registry,
 			baseConfig(basePreset({ streamReferences: true })),
 		);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		const thinkingDeltas = events.filter(
 			(
@@ -2691,10 +2060,7 @@ describe("MoA orchestration", () => {
 				basePreset({ streamReferences: true, streamAggregator: true }),
 			),
 		);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		// Exactly one `start` — the progressive prelude's; the aggregator's own start
 		// is skipped so no duplicate assistant message is pushed to the consumer.
@@ -2743,10 +2109,7 @@ describe("MoA orchestration", () => {
 			registry,
 			baseConfig(basePreset()),
 		);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		// The default prelude emits the whole reference block in a single thinking
 		// delta after the phase completes — the byte-identical baseline the progressive
@@ -3620,10 +2983,7 @@ describe("MoA shipped default streaming", () => {
 			DEFAULT_MOA_CONFIG,
 		);
 
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of stream) {
-			events.push(event);
-		}
+		const events = await collectEvents(stream);
 
 		// streamReferences: the reference thinking block fills in progressively at
 		// content index 0 — more than the single atomic delta the buffered path emits.

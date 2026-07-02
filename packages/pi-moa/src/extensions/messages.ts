@@ -395,7 +395,7 @@ export function buildGuidanceBlock(args: {
 export function renderToolResult(
 	content: unknown,
 	headChars: number,
-	tailChars: number = TOOL_RESULT_TAIL_CHARS,
+	tailChars: number,
 ): string {
 	const rendered = renderUnknownContent(content);
 	return truncateWithHeadTail(rendered, headChars, tailChars);

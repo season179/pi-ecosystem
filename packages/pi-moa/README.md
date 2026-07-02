@@ -36,6 +36,13 @@ verbose references off the critical path:
   ever lowers a caller-supplied limit; presets that omit it run uncapped. The built-in
   `default` preset sets it to `1024` (well above the ~500 tokens kept), so the kept
   text is unchanged while runaway references stop early even before the char budget.
+  The cap **stands down when a reasoning effort is in play** for the reference
+  (inherited from the caller or set via `referenceReasoning`): on completions-style
+  APIs thinking tokens share the `max_tokens` budget (OpenRouter derives the Anthropic
+  thinking budget as a fraction of `max_tokens`, with a provider-side minimum), so a
+  small cap on a thinking reference could get the request rejected or let thinking
+  starve the kept advice. A thinking reference is still bounded by the stream-level
+  abort above and, optionally, `referenceTimeoutMs`.
 
 Both mechanisms above bound reference *length/cost*, not *time*. A separate, opt-in
 `referenceTimeoutMs` bounds each reference's *wall-clock* time so a stalled or slow
@@ -76,24 +83,6 @@ the reference's text is kept), and the stream-and-abort above counts text — no
   caller's reasoning, exactly as before); a non-reasoning reference model clamps it away
   to a no-op. Because thinking still improves the reference's kept advice, this trades a
   little advice quality for latency, so it stays opt-in.
-
-- `referenceThinkingBudgets` is the finer-grained companion to `referenceReasoning` (and
-  the reference-side mirror of `aggregatorThinkingBudgets`). A reasoning effort level maps
-  to a *default* thinking-token budget (roughly `minimal: 1024`, `low: 2048`, `medium:
-  8192`, `high: 16384`); this `{ minimal?, low?, medium?, high? }` map of positive-integer
-  token counts overrides those exact numbers per level for reference requests only, so a
-  preset can keep a reference's effort level while precisely bounding how many thinking
-  tokens it burns before emitting its (discarded-downstream) advice — e.g. keep
-  `referenceReasoning: "high"` but set `{ high: 2000 }`. Because a reference's thinking
-  never reaches the aggregator or the display (only its text is kept), trimming its budget
-  is a *purer* latency win than the aggregator side, where thinking shapes the answer. It
-  is applied **after** the caller's options and to **only the references**, so a preset
-  governs reference budgets independent of the caller *and* of `aggregatorThinkingBudgets`
-  — completing the role-scoped thinking-budgets matrix. It is honored by **token-based
-  providers** (native Anthropic / Google / Bedrock); pi-ai's OpenAI-completions provider
-  (the default `openrouter` fleet) ignores it, so it is a safe provider-side **no-op**
-  there — this lever pays off when a reference is a native token-based model. **Unset by
-  default** (references inherit the caller's budgets exactly as before).
 
 The knobs above all bound reference *output* (length, cost, time, thinking). The
 remaining critical-path cost is reference *input*: on a large, uncached transcript the
@@ -177,13 +166,15 @@ re-prefill on every tool-loop iteration. `aggregatorGuidancePlacement` controls 
   be rejected; the existing consecutive-user fallback then folds the guidance into the system
   prompt, so correctness is preserved regardless of provider.
 
-  Because whether a provider accepts a trailing user turn is a **stable property of its API**
-  (not a transient failure), the first such rejection for a given aggregator provider is
-  remembered for the rest of the process: subsequent turns skip the doomed trailing attempt and
-  go straight to the system-prompt placement. This bounds the worst case of `trailing-message`
-  on a strict provider to **one wasted request per process** instead of one on every tool-loop
-  turn. Providers that accept the trailing turn are never recorded, so their behavior is
-  unchanged, and the default `latest-user` placement never attempts a trailing turn at all.
+  Because whether a trailing user turn is accepted is a **stable property of the serving API**
+  (not a transient failure), the first such rejection for a given aggregator model
+  (keyed `provider/model`, since a gateway fronts many upstream APIs with different
+  alternation rules) is remembered for the rest of the process: subsequent turns skip the
+  doomed trailing attempt and go straight to the system-prompt placement. This bounds the
+  worst case of `trailing-message` on a strict model to **one wasted request per process**
+  instead of one on every tool-loop turn. Models that accept the trailing turn are never
+  recorded, so their behavior is unchanged, and the default `latest-user` placement never
+  attempts a trailing turn at all.
 
 `aggregatorGuidancePlacement` keeps the prefix **byte-stable** so the cache *can* be reused;
 `aggregatorCacheRetention` controls how **long** that cache lives:
@@ -241,60 +232,34 @@ default. `aggregatorReasoning` decouples them (the aggregator-side mirror of
   reasoning shapes the *final answer*, this trades answer quality for latency directly — a
   sharper trade-off than the reference knobs — so it stays opt-in.
 
-`aggregatorThinkingBudgets` is the finer-grained companion to `aggregatorReasoning`. A
-reasoning effort level maps to a *default* thinking-token budget (roughly
-`minimal: 1024`, `low: 2048`, `medium: 8192`, `high: 16384`); this knob overrides those
-exact numbers per level, so a preset can keep an effort level's behavior while precisely
-bounding (or raising) how many thinking tokens the aggregator spends before it answers —
-with finer granularity than the five discrete effort levels.
-
-- `aggregatorThinkingBudgets` takes a `{ minimal?, low?, medium?, high? }` map of positive
-  integer token counts, applied **after** the caller's options and to **only the
-  aggregator** (references keep the caller's budgets). Example: keep `reasoning: "high"`
-  but set `{ high: 4000 }` to cut the thinking budget from ~16384 to 4000 tokens.
-- It is honored by **token-based providers** (native Anthropic / Google / Bedrock);
-  pi-ai's OpenAI-completions provider (the default `openrouter` fleet) ignores it, so it is
-  a safe provider-side **no-op** there — this lever pays off when the aggregator is a native
-  token-based model. Like `aggregatorReasoning` it shapes the thinking budget and so trades
-  a little answer quality for latency, so it is **unset by default** (the aggregator
-  inherits the caller's budgets exactly as before).
-
-### Steering provider routing (which upstream backend serves the request)
+### Steering OpenRouter provider routing (which upstream backend serves the request)
 
 The reasoning/retention/placement knobs tune *how* a request runs; these tune *which
-upstream backend* serves it. A gateway fronts several providers per model and, by default,
+upstream backend* serves it. OpenRouter fronts several providers per model and, by default,
 balances routing (weighted by price/uptime) — which can land a request on a slow backend.
-Symmetric knobs steer that selection, one per role, per gateway:
+Symmetric knobs steer that selection, one per role:
 
-- `aggregatorProviderRouting` / `referenceProviderRouting` steer **OpenRouter**.
-- `aggregatorGatewayRouting` / `referenceGatewayRouting` steer **Vercel AI Gateway**.
+- `aggregatorProviderRouting` pins the **aggregator's** request — its generation is the
+  dominant, **un-bounded** per-turn cost (references are already bounded by
+  quorum/timeout/output caps), so routing it to a faster backend is a direct latency lever.
+- `referenceProviderRouting` pins **every reference's** request — references sit on the
+  aggregator-blocking critical path (the aggregator waits for the slowest, or the quorum-th
+  fastest, reference), so routing them for lowest time-to-first-token / highest throughput
+  directly shortens that phase.
 
-The aggregator knobs pin the **aggregator's** request — its generation is the dominant,
-**un-bounded** per-turn cost (references are already bounded by quorum/timeout/output caps),
-so routing it to a faster backend is a direct latency lever. The reference knobs pin **every
-reference's** request — references sit on the aggregator-blocking critical path (the
-aggregator waits for the slowest, or the quorum-th fastest, reference), so routing them for
-lowest time-to-first-token / highest throughput directly shortens that phase.
+Both pass an OpenRouter [provider-routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+object through to the request. The speed-relevant fields are `sort: "throughput"` (route to
+the highest tokens/sec provider), `sort: "latency"` (lowest time-to-first-token), and
+`preferred_min_throughput` / `preferred_max_latency` (explicit floors/ceilings). Applied by
+pi-ai **only for models whose baseUrl is `openrouter.ai`**, so each knob is a safe **no-op
+for non-OpenRouter models**. Example: `"referenceProviderRouting": { "sort": "latency" }`.
 
-- **OpenRouter** knobs pass an [provider-routing](https://openrouter.ai/docs/guides/routing/provider-selection)
-  object through to the request. The speed-relevant fields are `sort: "throughput"` (route to
-  the highest tokens/sec provider), `sort: "latency"` (lowest time-to-first-token), and
-  `preferred_min_throughput` / `preferred_max_latency` (explicit floors/ceilings). Applied by
-  pi-ai **only for models whose baseUrl is `openrouter.ai`**.
-  Example: `"referenceProviderRouting": { "sort": "latency" }`.
-- **Vercel AI Gateway** knobs pass an `order` / `only` provider-slug list (prefer, or
-  restrict to, a specific — presumably faster — upstream provider). Applied by pi-ai **only
-  for models whose baseUrl is `ai-gateway.vercel.sh`**.
-  Example: `"aggregatorGatewayRouting": { "order": ["anthropic", "bedrock"] }`.
-
-Each knob is **role-scoped** (the aggregator knob never touches references and vice versa)
-and, since routing lives on a gateway-specific field of the model's `compat`, a safe
-**no-op for a model on the other gateway** (or on neither). All four are **unset by default**
-and, unlike the pure cache/TTL hints, are **not** shipped in the `default` preset: a different
-backend can differ in quantization or behavior and so could subtly shift the aggregator's
-answer (directly, or — for the reference knobs — via the reference advice it feeds into the
-aggregator), so they stay opt-in (constrain with OpenRouter's `quantizations` / `only` /
-`ignore`, or the gateway's `only`, if that matters).
+Each knob is **role-scoped** (the aggregator knob never touches references and vice versa).
+Both are **unset by default** and, unlike the pure cache/TTL hints, are **not** shipped in
+the `default` preset: a different backend can differ in quantization or behavior and so
+could subtly shift the aggregator's answer (directly, or — for the reference knob — via the
+reference advice it feeds into the aggregator), so they stay opt-in (constrain with
+OpenRouter's `quantizations` / `only` / `ignore` if that matters).
 
 ### Pre-warming the aggregator's prompt cache (overlapping prefill with the reference phase)
 
@@ -316,12 +281,14 @@ of a session, or after the cache TTL expires) that prefill is pure added latency
   The warm-up is deliberately cheap and side-effect-free: its `onPayload`/`onResponse` hooks
   are dropped, its reasoning is pinned to `minimal` (so a reasoning aggregator doesn't burn a
   thinking budget on the ping — the cached prefix is keyed by message content, not generation
-  params), and its request is **aborted the instant the provider emits its first event** (by
-  then the prompt has been processed and the cache written, so it pays for the prefill but
-  generates essentially nothing). Any failure is swallowed — the warm-up can never affect the
-  real turn. The real request awaits the warm-up before reading, so the cache write is
-  committed first; since the reference phase dominates the wall-clock this await almost never
-  blocks.
+  params), it carries the preset's `aggregatorCacheRetention` (so the warm cache write asks
+  for the same TTL the real request will), and its request is **aborted at the provider's
+  first content event** — not at the stream's `start`, which fires when the HTTP headers
+  arrive and may precede the prefill — since the first token proves the prompt has been fully
+  processed and the cache written, so it pays for the prefill but generates essentially
+  nothing. Any failure is swallowed — the warm-up can never affect the real turn. The real
+  request awaits the warm-up before reading, so the cache write is committed first; since the
+  reference phase dominates the wall-clock this await almost never blocks.
 
   It is **unset by default** — no warming request fires, so the turn is byte-identical to
   before the knob existed. Kept opt-in because the warm-up costs an extra prefill (a
