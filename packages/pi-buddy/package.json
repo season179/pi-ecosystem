@@ -1,0 +1,57 @@
+{
+  "name": "@season179/pi-buddy",
+  "version": "26.5.5",
+  "description": "Gives Pi a sparring partner to discuss, debate, push back, and fact-check.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Season Saw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-buddy"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "buddy",
+    "review",
+    "fact-check"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extensions/buddy.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --experimental-strip-types test/buddy.test.ts",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  }
+}
