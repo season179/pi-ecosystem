@@ -49,6 +49,10 @@ export interface MoAConfig {
 	// When set, appends one JSON line of per-turn timing/usage metadata (no prompt
 	// or completion text) to this file. Unset = no timers, no writes.
 	telemetryPath?: string;
+	// Size cap for the telemetry file in bytes (default 16 MB). Once the file
+	// reaches the cap, the oldest lines are dropped in place so the newest records
+	// that fit in half the cap survive — always a single file. 0 = unlimited.
+	telemetryMaxBytes?: number;
 }
 
 export interface ReferenceOutput {

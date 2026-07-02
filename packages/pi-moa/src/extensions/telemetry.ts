@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
@@ -13,6 +13,14 @@ import type { ModelSlot } from "./types.js";
 // fire-and-forget — a telemetry failure must never affect the turn — and none of
 // it runs unless the top-level `telemetryPath` config field is set, keeping the
 // default byte-identical (no timers, no writes).
+//
+// The file is self-trimming: once it reaches `telemetryMaxBytes` (default 16 MB,
+// 0 = unlimited), the oldest lines are dropped so the newest records that fit in
+// half the cap survive. The rewrite goes through a `.tmp` sibling + atomic
+// rename, so a crash mid-trim never corrupts the file. Steady-state disk usage
+// stays between half the cap and the cap (+ one record).
+
+export const DEFAULT_TELEMETRY_MAX_BYTES = 16 * 1024 * 1024;
 
 // All times are integer milliseconds relative to the turn's start.
 interface UsageSnapshot {
@@ -81,6 +89,7 @@ export class TurnTelemetry {
 	constructor(
 		private readonly path: string,
 		private readonly presetName: string,
+		private readonly maxBytes: number,
 	) {}
 
 	private now(): number {
@@ -180,6 +189,43 @@ export class TurnTelemetry {
 		this.outcome = outcome;
 	}
 
+	// Drop the oldest lines once the file reaches the cap, keeping the newest
+	// records that fit in half the cap (so the full read/rewrite happens once per
+	// half-cap of growth, not on every emit). Cut on a line boundary so no torn
+	// record survives; write to a `.tmp` sibling and rename for atomicity. Any
+	// failure (including the file not existing yet) is swallowed — trimming must
+	// never block the append.
+	private async maybeTrim(): Promise<void> {
+		if (this.maxBytes <= 0) {
+			return;
+		}
+		try {
+			const { size } = await stat(this.path);
+			if (size < this.maxBytes) {
+				return;
+			}
+			const content = await readFile(this.path, "utf-8");
+			const keepFrom = content.length - Math.floor(this.maxBytes / 2);
+			// Advance to the start of the first complete line within the kept tail.
+			const boundary = content.indexOf("\n", Math.max(keepFrom, 0));
+			const kept = boundary === -1 ? "" : content.slice(boundary + 1);
+			const tmpPath = `${this.path}.tmp`;
+			await writeFile(tmpPath, kept);
+			await rename(tmpPath, this.path);
+		} catch {
+			// Best-effort: a failed trim never blocks the append.
+		}
+	}
+
+	private async append(line: string): Promise<void> {
+		try {
+			await appendFile(this.path, line);
+		} catch {
+			await mkdir(dirname(this.path), { recursive: true });
+			await appendFile(this.path, line);
+		}
+	}
+
 	// Serialize the turn record and append it, without ever surfacing a failure.
 	// A missing parent directory is created on first use.
 	emit(): void {
@@ -199,13 +245,11 @@ export class TurnTelemetry {
 			trailingFellBack: this.trailingFellBack,
 			aggregator: this.aggregator,
 		})}\n`;
-		void appendFile(this.path, line).catch(async () => {
-			try {
-				await mkdir(dirname(this.path), { recursive: true });
-				await appendFile(this.path, line);
-			} catch {
-				// Telemetry is best-effort: never let a write failure reach the turn.
-			}
+		void (async () => {
+			await this.maybeTrim();
+			await this.append(line);
+		})().catch(() => {
+			// Telemetry is best-effort: never let a write failure reach the turn.
 		});
 	}
 }
@@ -213,11 +257,12 @@ export class TurnTelemetry {
 export function createTurnTelemetry(
 	path: string | undefined,
 	presetName: string,
+	maxBytes: number = DEFAULT_TELEMETRY_MAX_BYTES,
 ): TurnTelemetry | undefined {
 	if (path === undefined) {
 		return undefined;
 	}
-	return new TurnTelemetry(expandHome(path), presetName);
+	return new TurnTelemetry(expandHome(path), presetName, maxBytes);
 }
 
 function expandHome(path: string): string {

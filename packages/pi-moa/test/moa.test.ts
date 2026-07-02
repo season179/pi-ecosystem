@@ -43,6 +43,10 @@ import {
 	beginProgressiveReferenceThinking,
 	streamMoA,
 } from "../src/extensions/orchestrator.js";
+import {
+	createTurnTelemetry,
+	TurnTelemetry,
+} from "../src/extensions/telemetry.js";
 import type {
 	MoAConfig,
 	MoAPreset,
@@ -318,6 +322,19 @@ describe("MoA config", () => {
 				presets: { default: basePreset() },
 			}),
 		).toThrow(/defaultPreset "missing"/);
+	});
+
+	it("rejects an invalid telemetryMaxBytes", () => {
+		for (const bad of [-1, 1.5, "big"]) {
+			expect(() =>
+				validateMoAConfig({ ...baseConfig(), telemetryMaxBytes: bad }),
+			).toThrow(/telemetryMaxBytes/);
+		}
+		for (const ok of [0, 1024]) {
+			expect(() =>
+				validateMoAConfig({ ...baseConfig(), telemetryMaxBytes: ok }),
+			).not.toThrow();
+		}
 	});
 
 	it("rejects recursive moa providers", () => {
@@ -3373,5 +3390,71 @@ describe("MoA telemetry", () => {
 		);
 		expect(stops.a).toBe("stop");
 		expect(stops.b).toBe("aborted");
+	});
+
+	// emit() is fire-and-forget, so each step polls until the record lands before
+	// emitting the next — otherwise the trim's stat could race the prior append.
+	async function emitAndWait(
+		path: string,
+		preset: string,
+		maxBytes: number,
+	): Promise<void> {
+		new TurnTelemetry(path, preset, maxBytes).emit();
+		for (let attempt = 0; attempt < 100; attempt++) {
+			try {
+				if ((await readFile(path, "utf-8")).includes(`"${preset}"`)) {
+					return;
+				}
+			} catch {
+				// Not written yet.
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		throw new Error(`Telemetry record for "${preset}" never appeared`);
+	}
+
+	it("trims the oldest lines in place once the file reaches telemetryMaxBytes", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "moa-telemetry-"));
+		const path = join(dir, "timings.jsonl");
+		// Each bare record is ~150 bytes; a 400-byte cap forces a trim within a few
+		// turns while half the cap still fits at least one whole record.
+		const cap = 400;
+		for (let turn = 1; turn <= 6; turn++) {
+			await emitAndWait(path, `turn-${turn}`, cap);
+		}
+
+		const content = await readFile(path, "utf-8");
+		const lines = content.split("\n").filter((line) => line !== "");
+		// Oldest records were dropped, newest survived, and the file stayed capped.
+		expect(lines.length).toBeLessThan(6);
+		expect(content).not.toContain('"turn-1"');
+		expect(content).toContain('"turn-6"');
+		expect(content.length).toBeLessThanOrEqual(cap + 200);
+		// Every surviving line is a complete record — the cut landed on a boundary.
+		for (const line of lines) {
+			expect(JSON.parse(line).v).toBe(1);
+		}
+		// The atomic-rewrite scratch file was renamed away, not left behind.
+		await expect(readFile(`${path}.tmp`, "utf-8")).rejects.toThrow();
+	});
+
+	it("never trims when telemetryMaxBytes is 0", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "moa-telemetry-"));
+		const path = join(dir, "timings.jsonl");
+		for (let turn = 1; turn <= 6; turn++) {
+			await emitAndWait(path, `turn-${turn}`, 0);
+		}
+		const lines = (await readFile(path, "utf-8"))
+			.split("\n")
+			.filter((line) => line !== "");
+		expect(lines.length).toBe(6);
+	});
+
+	it("applies the default cap when telemetryMaxBytes is unset", () => {
+		const telemetry = createTurnTelemetry("/tmp/unused.jsonl", "default");
+		expect(telemetry).toBeInstanceOf(TurnTelemetry);
+		expect(
+			(telemetry as unknown as { maxBytes: number }).maxBytes,
+		).toBe(16 * 1024 * 1024);
 	});
 });

@@ -169,7 +169,11 @@ export function streamMoA(
 
 		const presetName = model.id || config.defaultPreset;
 		const preset = getPreset(config, presetName);
-		telemetry = createTurnTelemetry(config.telemetryPath, presetName);
+		telemetry = createTurnTelemetry(
+			config.telemetryPath,
+			presetName,
+			config.telemetryMaxBytes,
+		);
 
 		const referenceTasks: ReferenceTask[] = [];
 		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(

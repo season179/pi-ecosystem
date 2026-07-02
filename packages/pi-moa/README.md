@@ -364,7 +364,15 @@ wall-clock went:
 
 The records are **metadata only** — no prompt or completion text is ever written — and
 emission is fire-and-forget (a write failure never affects the turn). Unset by default: no
-timers run and nothing is written. Analyze with `jq`, DuckDB, or anything that reads JSONL;
+timers run and nothing is written.
+
+The file is **self-trimming**, so leaving telemetry on permanently never grows it without
+bound: once it reaches `telemetryMaxBytes` (top-level field, default 16 MB — roughly
+10–15k turn records), the oldest lines are dropped in place, keeping the newest records
+that fit in half the cap. It is always a single file — no `.1` rotation siblings — and the
+trim rewrites through a `.tmp` + atomic rename, so a crash mid-trim never corrupts it.
+Steady-state size stays between half the cap and the cap. Set `telemetryMaxBytes: 0` to
+disable trimming and grow the file indefinitely. Analyze with `jq`, DuckDB, or anything that reads JSONL;
 the interesting first questions are *slowest reference vs aggregator generation* (which phase
 dominates), *reference `firstTokenMs` vs `settleMs`* (prefill-bound or generation-bound), and
 *aggregator `headersMs`→`firstTokenMs` across turns* (whether placement/retention/pre-warm

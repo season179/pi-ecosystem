@@ -90,6 +90,14 @@ export function validateMoAConfig(config: unknown): asserts config is MoAConfig 
 	if (config.telemetryPath !== undefined && !isNonEmptyString(config.telemetryPath)) {
 		throw new Error('MoA config: "telemetryPath" must be a non-empty string');
 	}
+	if (
+		config.telemetryMaxBytes !== undefined &&
+		(typeof config.telemetryMaxBytes !== "number" ||
+			!Number.isInteger(config.telemetryMaxBytes) ||
+			config.telemetryMaxBytes < 0)
+	) {
+		throw new Error('MoA config: "telemetryMaxBytes" must be a non-negative integer');
+	}
 
 	for (const [presetName, preset] of Object.entries(config.presets)) {
 		validatePreset(presetName, preset);
