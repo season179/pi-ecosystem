@@ -30,6 +30,7 @@ export interface MoAPreset {
 	referenceProviderRouting?: OpenRouterRouting;
 	referenceMaxRetries?: number;
 	referenceCacheRetention?: CacheRetention;
+	referenceCadence?: "every-turn" | "user-turn";
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorReasoning?: ThinkingLevel;
@@ -45,6 +46,9 @@ export interface MoAPreset {
 export interface MoAConfig {
 	defaultPreset: string;
 	presets: Record<string, MoAPreset>;
+	// When set, appends one JSON line of per-turn timing/usage metadata (no prompt
+	// or completion text) to this file. Unset = no timers, no writes.
+	telemetryPath?: string;
 }
 
 export interface ReferenceOutput {

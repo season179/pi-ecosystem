@@ -287,8 +287,11 @@ of a session, or after the cache TTL expires) that prefill is pure added latency
   arrive and may precede the prefill — since the first token proves the prompt has been fully
   processed and the cache written, so it pays for the prefill but generates essentially
   nothing. Any failure is swallowed — the warm-up can never affect the real turn. The real
-  request awaits the warm-up before reading, so the cache write is committed first; since the
-  reference phase dominates the wall-clock this await almost never blocks.
+  request gives the warm-up a **short bounded grace** (250ms) to settle before reading: when
+  the reference phase dominated the wall-clock the warm-up finished long ago and the grace
+  costs ~0ms, but a warm-up still mid-prefill (fast references, huge transcript, stalled
+  provider) is a full aggregator prefill that would otherwise hold the turn hostage — after
+  the grace the real request proceeds cold and the straggling warm-up is cancelled.
 
   It is **unset by default** — no warming request fires, so the turn is byte-identical to
   before the knob existed. Kept opt-in because the warm-up costs an extra prefill (a
@@ -298,6 +301,49 @@ of a session, or after the cache TTL expires) that prefill is pure added latency
   which keep the shared prefix byte-stable and the warm cache alive; with the default
   `latest-user` placement in a tool loop the guidance mutates an early message, so the warmed
   prefix still covers the (large, fixed) system prompt but not the whole transcript.
+
+### Reference cadence (skipping the reference phase on tool-loop turns)
+
+Every knob above shrinks or overlaps the reference phase; this one asks whether it needs to
+run at all. In an agentic tool loop MoA re-runs the whole reference phase on **every model
+turn**, but new strategic input mostly arrives at user-turn boundaries — the tool-loop turns
+in between re-derive near-identical advice at full reference latency.
+
+- `referenceCadence: "user-turn"` runs the references only when the transcript ends on a
+  **fresh user message**. Tool-loop turns (transcript ends on an assistant/tool message) reuse
+  the guidance computed for the *same* user turn, taking the entire reference phase off those
+  turns' critical path — the aggregator starts immediately with the cached advice. The cache
+  is per-preset and anchored to the identity of the latest user message, so a new user message
+  (or a different conversation on the same preset) always recomputes. The default
+  (`"every-turn"` / unset) re-runs references on every turn exactly as before.
+
+  This is a **semantic trade**, which is why it is opt-in: mid-loop tool results never update
+  the advice, so guidance can go stale during a long tool run. It fits workflows where
+  references provide strategic direction (set when the user asks for something) rather than
+  step-by-step tactical review.
+
+### Per-turn timing telemetry
+
+Whether any of these knobs is worth its trade-off is an empirical question — the answer needs
+timings, not intuition. Setting the **top-level** config field `telemetryPath` (e.g.
+`"~/.pi/agent/moa-timings.jsonl"`) appends one JSON line per MoA turn recording where the
+wall-clock went:
+
+- auth resolution, reference-context render, and total turn time;
+- per reference: request start, response headers, first token, settle time, stop cause
+  (`stop` / `length` / `error`), kept chars, and token usage + cost;
+- the pre-warm's start/settle times and how long the real request actually blocked on it;
+- the aggregator: request start, headers, first token, done, guidance placement used,
+  whether the trailing-placement fallback fired, and usage + cost;
+- whether the turn reused cached guidance (`referenceCadence`).
+
+The records are **metadata only** — no prompt or completion text is ever written — and
+emission is fire-and-forget (a write failure never affects the turn). Unset by default: no
+timers run and nothing is written. Analyze with `jq`, DuckDB, or anything that reads JSONL;
+the interesting first questions are *slowest reference vs aggregator generation* (which phase
+dominates), *reference `firstTokenMs` vs `settleMs`* (prefill-bound or generation-bound), and
+*aggregator `headersMs`→`firstTokenMs` across turns* (whether placement/retention/pre-warm
+actually produce cache hits).
 
 ### Streaming the aggregator answer (time-to-first-token)
 

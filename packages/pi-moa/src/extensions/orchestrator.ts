@@ -31,6 +31,12 @@ import {
 	stripPriorMoAGuidanceMessages,
 	stripPrivateMoAGuidance,
 } from "./messages.js";
+import {
+	type AggregatorTimer,
+	createTurnTelemetry,
+	type ReferenceTimer,
+	type TurnTelemetry,
+} from "./telemetry.js";
 import type {
 	MoAConfig,
 	MoAPreset,
@@ -70,6 +76,64 @@ export function __resetTrailingPlacementCacheForTests(): void {
 	trailingPlacementUnsupported.clear();
 }
 
+// Reference guidance cached per synthetic MoA model for the "user-turn"
+// reference cadence: the outputs computed on a fresh user turn are reused by
+// that turn's subsequent tool-loop turns instead of re-running the whole
+// reference phase. Validity is anchored to the identity of the latest user
+// message (position + timestamp in the guidance-stripped transcript), so a new
+// user message — or a different conversation hitting the same preset in this
+// process — misses the cache and recomputes. Stays empty (byte-identical
+// behavior) unless a preset opts into referenceCadence: "user-turn".
+const referenceGuidanceCache = new Map<
+	string,
+	{ userTurnKey: string; outputs: ReferenceOutput[] }
+>();
+
+// Test-only hook: clears the process-wide reference-guidance cache.
+export function __resetReferenceGuidanceCacheForTests(): void {
+	referenceGuidanceCache.clear();
+}
+
+function latestUserTurnKey(context: Context): string | undefined {
+	for (let index = context.messages.length - 1; index >= 0; index--) {
+		const message = context.messages[index];
+		if (message.role === "user") {
+			return `${index}:${message.timestamp}`;
+		}
+	}
+	return undefined;
+}
+
+function contextEndsOnUserTurn(context: Context): boolean {
+	const last = context.messages[context.messages.length - 1];
+	return last?.role === "user";
+}
+
+// How long the real aggregator request will wait for a still-running pre-warm
+// before proceeding cold. A warm-up this close to finishing is worth a beat
+// (its committed cache write saves the real request's whole prefill); anything
+// slower would ADD unbounded latency for the same bounded benefit.
+const PREWARM_MAX_WAIT_MS = 250;
+
+async function settlesWithin(
+	promise: Promise<unknown>,
+	timeoutMs: number,
+): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise.then(() => true),
+			new Promise<boolean>((resolve) => {
+				timer = setTimeout(() => resolve(false), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+	}
+}
+
 interface ReferenceTask {
 	slot: ModelSlot;
 	model: Model<Api>;
@@ -90,6 +154,7 @@ export function streamMoA(
 	config: MoAConfig,
 ): AssistantMessageEventStream {
 	const outerStream = createAssistantMessageEventStream();
+	let telemetry: TurnTelemetry | undefined;
 
 	(async () => {
 		if (options?.signal?.aborted) {
@@ -104,6 +169,7 @@ export function streamMoA(
 
 		const presetName = model.id || config.defaultPreset;
 		const preset = getPreset(config, presetName);
+		telemetry = createTurnTelemetry(config.telemetryPath, presetName);
 
 		const referenceTasks: ReferenceTask[] = [];
 		const prefilledOutputs: Array<ReferenceOutput | undefined> = new Array(
@@ -169,6 +235,9 @@ export function streamMoA(
 		// concurrency-limited fleet takes the per-reference auth latency off the
 		// reference-streaming critical path.
 		const aggregatorAuthPromise = registry.getApiKeyAndHeaders(aggregatorModel);
+		void aggregatorAuthPromise.then(() =>
+			telemetry?.markAggregatorAuthResolved(),
+		);
 		const referenceAuthPromises = referenceTasks.map((task) =>
 			registry.getApiKeyAndHeaders(task.model),
 		);
@@ -201,62 +270,121 @@ export function streamMoA(
 		// opt-in because the warming request costs an extra prefill (a prompt-cache
 		// write) and only pays off on caching providers (the default openrouter/anthropic
 		// aggregator is one).
-		const prewarmPromise =
-			preset.aggregatorPrewarm === true
-				? prewarmAggregatorCache(
-						aggregatorStreamModel,
-						strippedContext,
-						options,
-						aggregatorAuthPromise,
-						preset.aggregatorCacheRetention,
+		let prewarmPromise: Promise<void> | undefined;
+		let cancelPrewarm: (() => void) | undefined;
+		if (preset.aggregatorPrewarm === true) {
+			// Give the pre-warm its own abort handle (still linked to the caller's
+			// signal) so the bounded wait below can cancel a straggling warm-up when
+			// the turn proceeds cold, instead of leaving it streaming in the background.
+			const { controller, dispose } = linkAbortController(options?.signal);
+			cancelPrewarm = () => controller.abort();
+			telemetry?.markPrewarmStart();
+			prewarmPromise = prewarmAggregatorCache(
+				aggregatorStreamModel,
+				strippedContext,
+				{ ...(options ?? {}), signal: controller.signal },
+				aggregatorAuthPromise,
+				preset.aggregatorCacheRetention,
+			).finally(() => {
+				dispose();
+				telemetry?.markPrewarmSettled();
+			});
+		}
+
+		// Reference cadence: in an agentic tool loop MoA re-runs the whole reference
+		// phase on EVERY model turn, but new strategic input mostly arrives at
+		// user-turn boundaries — the tool-loop turns in between re-derive
+		// near-identical advice at full reference latency. With referenceCadence:
+		// "user-turn", references run only when the transcript ends on a fresh user
+		// message; tool-loop turns (transcript ends on an assistant/tool message)
+		// reuse the guidance computed for the SAME user turn, taking the entire
+		// reference phase off those turns' critical path. Validity is anchored to the
+		// latest user message's identity, so a new user message — or a different
+		// conversation on the same preset — always recomputes. Opt-in and unset by
+		// default: references run every turn exactly as before. The up-front
+		// reference-auth prefetch still fires on reused turns (it is launched before
+		// the cadence decision is knowable); that is one cached-token round-trip per
+		// reference, not a reference request.
+		const guidanceCacheKey = `${model.provider}/${model.id}`;
+		const latestUserKey = latestUserTurnKey(strippedContext);
+		const cachedGuidance =
+			preset.referenceCadence === "user-turn"
+				? referenceGuidanceCache.get(guidanceCacheKey)
+				: undefined;
+		const reuseGuidance =
+			cachedGuidance !== undefined &&
+			latestUserKey !== undefined &&
+			cachedGuidance.userTurnKey === latestUserKey &&
+			!contextEndsOnUserTurn(strippedContext);
+		telemetry?.setGuidanceReused(reuseGuidance);
+
+		let referenceOutputs: ReferenceOutput[];
+		let progressiveReferenceStream:
+			| ReturnType<typeof beginProgressiveReferenceThinking>
+			| undefined;
+		if (reuseGuidance) {
+			referenceOutputs = cachedGuidance.outputs;
+		} else {
+			const renderStart = performance.now();
+			const referenceContext = renderReferenceContext(strippedContext, preset);
+			telemetry?.setRenderMs(performance.now() - renderStart);
+
+			// Progressive reference streaming reveals the reference thinking block as it
+			// fills in — the header immediately (before any reference finishes) and each
+			// reference's advice the moment it settles — instead of one atomic burst after
+			// the whole reference phase completes. This closes the reference-phase feedback
+			// gap (the phase otherwise shows nothing until its slowest reference returns),
+			// complementing streamAggregator's answer streaming. It is display-only: the
+			// persisted `done` message is still built atomically below, so the streamed
+			// prelude never changes what re-enters model context. Opt-in and unset by
+			// default. Scoped to the clean case — no quorum (dropped references would leave
+			// gaps in the slot-ordered reveal) and no prefilled model-not-found failures
+			// (their slots shift the merged output order) — otherwise the atomic prelude
+			// runs, so those paths are byte-identical.
+			const useProgressiveReferenceStream =
+				preset.streamReferences === true &&
+				preset.referenceQuorum === undefined &&
+				!hasPrefilledOutput &&
+				referenceTasks.length > 0;
+			progressiveReferenceStream = useProgressiveReferenceStream
+				? beginProgressiveReferenceThinking(
+						outerStream,
+						model,
+						preset,
+						referenceTasks.length,
 					)
 				: undefined;
 
-		const referenceContext = renderReferenceContext(strippedContext, preset);
-
-		// Progressive reference streaming reveals the reference thinking block as it
-		// fills in — the header immediately (before any reference finishes) and each
-		// reference's advice the moment it settles — instead of one atomic burst after
-		// the whole reference phase completes. This closes the reference-phase feedback
-		// gap (the phase otherwise shows nothing until its slowest reference returns),
-		// complementing streamAggregator's answer streaming. It is display-only: the
-		// persisted `done` message is still built atomically below, so the streamed
-		// prelude never changes what re-enters model context. Opt-in and unset by
-		// default. Scoped to the clean case — no quorum (dropped references would leave
-		// gaps in the slot-ordered reveal) and no prefilled model-not-found failures
-		// (their slots shift the merged output order) — otherwise the atomic prelude
-		// runs, so those paths are byte-identical.
-		const useProgressiveReferenceStream =
-			preset.streamReferences === true &&
-			preset.referenceQuorum === undefined &&
-			!hasPrefilledOutput &&
-			referenceTasks.length > 0;
-		const progressiveReferenceStream = useProgressiveReferenceStream
-			? beginProgressiveReferenceThinking(
-					outerStream,
-					model,
-					preset,
-					referenceTasks.length,
-				)
-			: undefined;
-
-		const resolvedReferenceOutputs = await runReferenceTasks({
-			presetName,
-			preset,
-			referenceTasks,
-			referenceAuthPromises,
-			refContext: referenceContext,
-			options,
-			registry,
-			onReferenceSettled: progressiveReferenceStream?.reveal,
-		});
-		const referenceOutputs = mergeReferenceOutputs(
-			preset,
-			prefilledOutputs,
-			resolvedReferenceOutputs,
-		);
+			const resolvedReferenceOutputs = await runReferenceTasks({
+				presetName,
+				preset,
+				referenceTasks,
+				referenceAuthPromises,
+				refContext: referenceContext,
+				options,
+				registry,
+				onReferenceSettled: progressiveReferenceStream?.reveal,
+				telemetry,
+			});
+			referenceOutputs = mergeReferenceOutputs(
+				preset,
+				prefilledOutputs,
+				resolvedReferenceOutputs,
+			);
+			if (
+				preset.referenceCadence === "user-turn" &&
+				latestUserKey !== undefined
+			) {
+				referenceGuidanceCache.set(guidanceCacheKey, {
+					userTurnKey: latestUserKey,
+					outputs: referenceOutputs,
+				});
+			}
+		}
+		telemetry?.markReferencePhaseDone();
 
 		if (options?.signal?.aborted) {
+			telemetry?.setOutcome("aborted");
 			pushFatalError(
 				outerStream,
 				model,
@@ -366,21 +494,32 @@ export function streamMoA(
 				strippedContext,
 				guidanceBlock,
 			);
+			telemetry?.setPlacement("trailing-message");
 		} else if (wantsTrailing) {
 			// Trailing requested, but this provider already rejected it this process:
 			// skip straight to the always-valid system-prompt placement.
 			primaryContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
+			telemetry?.setPlacement("system");
 		} else {
 			primaryContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
+			telemetry?.setPlacement("latest-user");
 		}
-		// Let the pre-warm (fired at the top of the turn, overlapping the reference
-		// phase) settle before the real aggregator request reads its cache. It almost
-		// always finished long ago — references dominate the wall-clock — so this rarely
-		// waits; it just guarantees the warm prefill's prompt-cache write is committed
-		// before the real read, rather than racing it. It never rejects (best-effort,
-		// self-contained) and is undefined when pre-warm is off, so this is a no-op then.
+		// Give the pre-warm (fired at the top of the turn, overlapping the reference
+		// phase) a short grace to settle before the real aggregator request reads its
+		// cache. When the references dominated the wall-clock it settled long ago and
+		// this waits ~0ms — the common case. But the warm-up is a FULL aggregator
+		// prefill, so with fast references, a huge transcript, or a stalled provider
+		// it can still be mid-flight here, and waiting for it would add unbounded
+		// latency for a benefit that at best saves one prefill. After the grace the
+		// turn proceeds cold and cancels the straggling warm-up (stopping its
+		// background cost) rather than paying an unbounded wait.
 		if (prewarmPromise) {
-			await prewarmPromise;
+			const waitStart = performance.now();
+			const settled = await settlesWithin(prewarmPromise, PREWARM_MAX_WAIT_MS);
+			if (!settled) {
+				cancelPrewarm?.();
+			}
+			telemetry?.setPrewarmWait(performance.now() - waitStart, !settled);
 		}
 		const streamIncremental = preset.streamAggregator === true;
 		const primaryResult = await forwardAggregatorStream({
@@ -390,6 +529,7 @@ export function streamMoA(
 			outerStream,
 			referenceThinking,
 			streamIncremental,
+			timing: telemetry?.aggregatorTimer(),
 		});
 
 		if (primaryResult.kind === "consecutive-user-rejected") {
@@ -401,6 +541,8 @@ export function streamMoA(
 			if (attemptTrailing) {
 				trailingPlacementUnsupported.add(aggregatorProviderKey);
 			}
+			telemetry?.markTrailingFallback();
+			telemetry?.setPlacement("system");
 			const systemContext = injectGuidanceAsSystem(
 				strippedContext,
 				guidanceBlock,
@@ -412,12 +554,15 @@ export function streamMoA(
 				outerStream,
 				referenceThinking,
 				streamIncremental,
+				timing: telemetry?.aggregatorTimer(),
 			});
 			if (systemResult.kind === "error") {
+				telemetry?.setOutcome("error");
 				outerStream.end(systemResult.error);
 				return;
 			}
 			if (systemResult.kind === "consecutive-user-rejected") {
+				telemetry?.setOutcome("error");
 				pushFatalError(
 					outerStream,
 					model,
@@ -427,18 +572,22 @@ export function streamMoA(
 				return;
 			}
 		} else if (primaryResult.kind === "error") {
+			telemetry?.setOutcome("error");
 			outerStream.end(primaryResult.error);
 			return;
 		}
 		outerStream.end();
-	})().catch((error: unknown) => {
-		pushFatalError(
-			outerStream,
-			model,
-			redactErrorMessage(errorToString(error)),
-			"error",
-		);
-	});
+	})()
+		.catch((error: unknown) => {
+			telemetry?.setOutcome("error");
+			pushFatalError(
+				outerStream,
+				model,
+				redactErrorMessage(errorToString(error)),
+				"error",
+			);
+		})
+		.finally(() => telemetry?.emit());
 
 	return outerStream;
 }
@@ -468,9 +617,12 @@ async function forwardAggregatorStream(args: {
 	// streams to the user token-by-token (time-to-first-token) instead of appearing
 	// in one burst on `done`. Off by default, so the default path is byte-identical.
 	streamIncremental: boolean;
+	timing?: AggregatorTimer;
 }): Promise<AggregatorForwardResult> {
+	args.timing?.requestStart();
 	const innerStream = streamSimple(args.model, args.context, args.options);
 	let isFirstEvent = true;
+	let sawFirstContent = false;
 
 	for await (const event of innerStream) {
 		if (
@@ -483,6 +635,7 @@ async function forwardAggregatorStream(args: {
 		isFirstEvent = false;
 
 		if (event.type === "done") {
+			args.timing?.done(event.message.usage);
 			const message = prepareAggregatorMessage(
 				event.message,
 				args.referenceThinking,
@@ -494,6 +647,12 @@ async function forwardAggregatorStream(args: {
 			const error = prepareAggregatorMessage(event.error);
 			args.outerStream.push({ ...event, error });
 			return { kind: "error", error };
+		}
+		if (event.type === "start") {
+			args.timing?.headers();
+		} else if (!sawFirstContent) {
+			sawFirstContent = true;
+			args.timing?.firstToken();
 		}
 		// event is now `start` or an incremental content event.
 		if (args.streamIncremental && event.type !== "start") {
@@ -604,6 +763,7 @@ async function runReferenceTasks(args: {
 	// quorum is unset, so every task records exactly once and this fires once per
 	// reference; superseded-by-quorum references never record and so never fire it.
 	onReferenceSettled?: (index: number, output: ReferenceOutput) => void;
+	telemetry?: TurnTelemetry;
 }): Promise<ReferenceOutput[]> {
 	const concurrency = Math.min(
 		getReferenceConcurrency(args.preset),
@@ -649,6 +809,7 @@ async function runReferenceTasks(args: {
 				options: phaseOptions,
 				task,
 				authPromise: args.referenceAuthPromises?.[index],
+				referenceTimer: args.telemetry?.referenceTimer(index, task.slot),
 			});
 			// A reference superseded mid-flight by an already-reached quorum (the
 			// phase was aborted without a caller abort) is a benign drop: its advice
@@ -709,6 +870,7 @@ async function runSingleReference(args: {
 	refContext: Context;
 	options: SimpleStreamOptions | undefined;
 	registry: ModelRegistry;
+	referenceTimer?: ReferenceTimer;
 }): Promise<ReferenceOutput> {
 	try {
 		if (args.refContext.tools !== undefined) {
@@ -835,6 +997,7 @@ async function runSingleReference(args: {
 			referenceOptions,
 			getMaxReferenceOutputChars(args.preset),
 			args.preset.referenceTimeoutMs,
+			args.referenceTimer,
 		);
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(
@@ -849,13 +1012,20 @@ async function runSingleReference(args: {
 				"Reference attempted to use a tool, but MoA reference models run without tools",
 			);
 		}
+		const text = extractAssistantText(message);
+		args.referenceTimer?.settle({
+			stop: message.stopReason,
+			keptChars: text.length,
+			usage: message.usage,
+		});
 		return {
 			slot: args.task.slot,
 			success: true,
-			text: extractAssistantText(message),
+			text,
 			usage: message.usage,
 		};
 	} catch (error) {
+		args.referenceTimer?.settle({ stop: "error" });
 		const output = failedReferenceOutput(args.task.slot, errorToString(error));
 		if (args.preset.failOnReferenceError) {
 			throw new Error(output.errorMessage);
@@ -887,6 +1057,7 @@ async function streamReferenceUntilBudget(
 	referenceOptions: SimpleStreamOptions,
 	keptOutputChars: number,
 	timeoutMs?: number,
+	referenceTimer?: ReferenceTimer,
 ): Promise<AssistantMessage> {
 	const { controller, dispose: unlinkAbort } = linkAbortController(
 		referenceOptions.signal,
@@ -901,7 +1072,9 @@ async function streamReferenceUntilBudget(
 	// Consume the reference stream to its budget/abort. Shares the mutable state
 	// above with the deadline timer (single-threaded, so no data race) so a
 	// timeout can surface the partial advice produced up to that point.
+	let sawFirstContent = false;
 	const consume = async (): Promise<AssistantMessage> => {
+		referenceTimer?.requestStart();
 		const stream = streamSimple(model, refContext, {
 			...referenceOptions,
 			signal: controller.signal,
@@ -922,6 +1095,12 @@ async function streamReferenceUntilBudget(
 					event.error.errorMessage ??
 						`Reference stopped with ${event.error.stopReason}`,
 				);
+			}
+			if (event.type === "start") {
+				referenceTimer?.headers();
+			} else if (!sawFirstContent) {
+				sawFirstContent = true;
+				referenceTimer?.firstToken();
 			}
 			latestPartial = event.partial;
 			if (

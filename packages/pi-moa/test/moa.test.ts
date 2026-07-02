@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessageEvent,
@@ -35,6 +39,7 @@ import {
 } from "../src/extensions/messages.js";
 import setup, { buildSyntheticModels } from "../src/extensions/moa.js";
 import {
+	__resetReferenceGuidanceCacheForTests,
 	__resetTrailingPlacementCacheForTests,
 	beginProgressiveReferenceThinking,
 	streamMoA,
@@ -3016,5 +3021,237 @@ describe("MoA shipped default streaming", () => {
 		const finalMessage = done[0].message;
 		expect(finalMessage.content[0]?.type).toBe("thinking");
 		expect(textFromResult(finalMessage)).toContain("the final answer streams in");
+	});
+});
+
+describe("MoA pre-warm wait policy", () => {
+	it("proceeds cold after a bounded grace instead of waiting for a stalled pre-warm", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		let warmAborted = false;
+		agg.setResponses([
+			// The warm-up request stalls forever (a provider that accepts the request
+			// but never streams). Before the bounded grace, this held the whole turn
+			// hostage; now the real request proceeds cold after the grace elapses.
+			(_context, options) =>
+				new Promise((_resolve, reject) => {
+					(options as { signal?: AbortSignal }).signal?.addEventListener(
+						"abort",
+						() => {
+							warmAborted = true;
+							reject(new Error("aborted"));
+						},
+						{ once: true },
+					);
+				}),
+			fauxAssistantMessage("final answer"),
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					aggregatorPrewarm: true,
+				}),
+			),
+		).result();
+		expect(textFromResult(result)).toContain("final answer");
+		// The straggling warm-up is cancelled when the turn proceeds cold, so it
+		// stops consuming in the background.
+		expect(warmAborted).toBe(true);
+	});
+});
+
+describe("MoA reference cadence", () => {
+	const toolLoopMessages = (): Context["messages"] => [
+		{ role: "user", content: "question", timestamp: 1 },
+		fauxAssistantMessage([fauxToolCall("echo", { text: "hi" }, { id: "tool-1" })]),
+		{
+			role: "toolResult",
+			toolCallId: "tool-1",
+			toolName: "echo",
+			content: [{ type: "text", text: "tool output" }],
+			isError: false,
+			timestamp: 3,
+		},
+	];
+
+	it("reuses the user turn's guidance on tool-loop turns and recomputes on a new user message", async () => {
+		__resetReferenceGuidanceCacheForTests();
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceRuns = 0;
+		const advise = () => {
+			referenceRuns += 1;
+			return fauxAssistantMessage("cached advice");
+		};
+		refA.setResponses([advise, advise, advise]);
+		const aggregatorContexts: string[] = [];
+		const answer = (context: Context) => {
+			aggregatorContexts.push(serializeContextText(context));
+			return fauxAssistantMessage("final answer");
+		};
+		agg.setResponses([answer, answer, answer]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const config = baseConfig(
+			basePreset({
+				referenceModels: [{ provider: "ref-a", model: "a" }],
+				referenceCadence: "user-turn",
+			}),
+		);
+		const moaModel = makeSyntheticMoAModel(agg.getModel("main")!);
+
+		// Turn 1: fresh user input → references run.
+		await streamMoA(
+			moaModel,
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+		expect(referenceRuns).toBe(1);
+
+		// Turn 2: the tool loop continues the SAME user turn (transcript ends on a
+		// tool result) → the cached guidance is reused, no reference request fires...
+		await streamMoA(
+			moaModel,
+			{ messages: toolLoopMessages() },
+			undefined,
+			registry,
+			config,
+		).result();
+		expect(referenceRuns).toBe(1);
+		// ...but the aggregator still receives the cached advice as guidance.
+		expect(aggregatorContexts[1]).toContain("cached advice");
+
+		// Turn 3: a NEW user message arrives → the cache misses and references re-run.
+		await streamMoA(
+			moaModel,
+			{
+				messages: [
+					...toolLoopMessages(),
+					fauxAssistantMessage("done"),
+					{ role: "user", content: "follow-up", timestamp: 5 },
+				],
+			},
+			undefined,
+			registry,
+			config,
+		).result();
+		expect(referenceRuns).toBe(2);
+	});
+
+	it("runs references every turn when the cadence knob is unset", async () => {
+		__resetReferenceGuidanceCacheForTests();
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let referenceRuns = 0;
+		const advise = () => {
+			referenceRuns += 1;
+			return fauxAssistantMessage("advice");
+		};
+		refA.setResponses([advise, advise]);
+		agg.setResponses([
+			fauxAssistantMessage("final answer"),
+			fauxAssistantMessage("final answer"),
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const config = baseConfig(
+			basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+		);
+		const moaModel = makeSyntheticMoAModel(agg.getModel("main")!);
+		await streamMoA(
+			moaModel,
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+		await streamMoA(
+			moaModel,
+			{ messages: toolLoopMessages() },
+			undefined,
+			registry,
+			config,
+		).result();
+		// Default cadence: the tool-loop turn re-runs the references exactly as before.
+		expect(referenceRuns).toBe(2);
+	});
+});
+
+describe("MoA telemetry", () => {
+	async function waitForLine(path: string): Promise<string> {
+		for (let attempt = 0; attempt < 100; attempt++) {
+			try {
+				const content = await readFile(path, "utf-8");
+				if (content.includes("\n")) {
+					return content.slice(0, content.indexOf("\n"));
+				}
+			} catch {
+				// Not written yet — the emit is fire-and-forget after the stream ends.
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		throw new Error(`No telemetry line appeared at ${path}`);
+	}
+
+	it("appends one JSONL timing record per turn when telemetryPath is set", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice")]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const telemetryPath = join(
+			mkdtempSync(join(tmpdir(), "moa-telemetry-")),
+			"timings.jsonl",
+		);
+		const config: MoAConfig = {
+			...baseConfig(
+				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
+			),
+			telemetryPath,
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+
+		const record = JSON.parse(await waitForLine(telemetryPath));
+		expect(record.preset).toBe("default");
+		expect(record.outcome).toBe("ok");
+		expect(record.placement).toBe("latest-user");
+		expect(record.guidanceReused).toBe(false);
+		expect(record.references).toHaveLength(1);
+		expect(record.references[0]).toMatchObject({
+			provider: "ref-a",
+			model: "a",
+			stop: "stop",
+		});
+		expect(typeof record.references[0].firstTokenMs).toBe("number");
+		expect(typeof record.references[0].settleMs).toBe("number");
+		expect(typeof record.referencePhaseMs).toBe("number");
+		expect(typeof record.aggregator.doneMs).toBe("number");
+		expect(record.aggregator.usage).toBeDefined();
+		expect(typeof record.totalMs).toBe("number");
 	});
 });

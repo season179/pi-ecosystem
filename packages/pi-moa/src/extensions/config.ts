@@ -102,6 +102,9 @@ export function validateMoAConfig(config: unknown): asserts config is MoAConfig 
 	if (!isRecord(config.presets[config.defaultPreset])) {
 		throw new Error(`MoA config: defaultPreset "${config.defaultPreset}" does not exist in presets`);
 	}
+	if (config.telemetryPath !== undefined && !isNonEmptyString(config.telemetryPath)) {
+		throw new Error('MoA config: "telemetryPath" must be a non-empty string');
+	}
 
 	for (const [presetName, preset] of Object.entries(config.presets)) {
 		validatePreset(presetName, preset);
@@ -210,6 +213,12 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		"referenceCacheRetention",
 		CACHE_RETENTIONS,
 	);
+	readOptionalEnum(
+		value.referenceCadence,
+		presetName,
+		"referenceCadence",
+		REFERENCE_CADENCES,
+	);
 	readOptionalOpenRouterRouting(
 		value.aggregatorProviderRouting,
 		presetName,
@@ -291,6 +300,13 @@ const GUIDANCE_PLACEMENTS = ["latest-user", "trailing-message"] as const;
 // transcript prefix on each tool-loop turn, so they can re-hit their own cache too).
 // Both are pure cache-TTL hints: the generated output is byte-identical regardless.
 const CACHE_RETENTIONS = ["none", "short", "long"] as const;
+
+// The reference-cadence knob decides how often the reference phase runs in an
+// agentic tool loop. "every-turn" (default) re-runs the references on every
+// model turn as before; "user-turn" runs them only when the transcript ends on
+// a fresh user message and reuses that turn's guidance on the tool-loop turns
+// in between — taking the whole reference phase off those turns' critical path.
+const REFERENCE_CADENCES = ["every-turn", "user-turn"] as const;
 
 // The provider-routing knobs steer OpenRouter's upstream provider selection (a
 // speed lever: `sort: "throughput"` / `"latency"` route to a faster backend).
