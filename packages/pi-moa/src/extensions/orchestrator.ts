@@ -506,14 +506,17 @@ export function streamMoA(
 				guidanceBlock,
 			);
 			telemetry?.setPlacement("trailing-message");
+			telemetry?.setGuidanceChars(guidanceBlock.length);
 		} else if (wantsTrailing) {
 			// Trailing requested, but this provider already rejected it this process:
 			// skip straight to the always-valid system-prompt placement.
 			primaryContext = injectGuidanceAsSystem(strippedContext, guidanceBlock);
 			telemetry?.setPlacement("system");
+			telemetry?.setGuidanceChars(guidanceBlock.length);
 		} else {
 			primaryContext = appendGuidanceToLatestUser(strippedContext, guidanceBlock);
 			telemetry?.setPlacement("latest-user");
+			telemetry?.setGuidanceChars(guidanceBlock.length);
 		}
 		// Give the pre-warm (fired at the top of the turn, overlapping the reference
 		// phase) a short grace to settle before the real aggregator request reads its
@@ -558,6 +561,7 @@ export function streamMoA(
 				strippedContext,
 				guidanceBlock,
 			);
+			telemetry?.setGuidanceChars(guidanceBlock.length);
 			const systemResult = await forwardAggregatorStream({
 				model: aggregatorStreamModel,
 				context: systemContext,

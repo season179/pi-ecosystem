@@ -61,6 +61,7 @@ interface AggregatorEntry {
 	headersMs?: number;
 	firstTokenMs?: number;
 	doneMs?: number;
+	guidanceChars?: number;
 	usage?: UsageSnapshot;
 }
 
@@ -192,6 +193,10 @@ export class TurnTelemetry {
 		this.placement = placement;
 	}
 
+	setGuidanceChars(chars: number): void {
+		this.aggregator.guidanceChars = chars;
+	}
+
 	markTrailingFallback(): void {
 		this.trailingFellBack = true;
 	}
@@ -200,7 +205,9 @@ export class TurnTelemetry {
 	// gets a fresh entry; the record keeps the last attempt's numbers alongside
 	// the trailingFellBack flag that says a retry happened.
 	aggregatorTimer(): AggregatorTimer {
-		const entry: AggregatorEntry = {};
+		const entry: AggregatorEntry = {
+			guidanceChars: this.aggregator.guidanceChars,
+		};
 		this.aggregator = entry;
 		return {
 			requestStart: () => {

@@ -3641,19 +3641,26 @@ describe("MoA reference cadence", () => {
 });
 
 describe("MoA telemetry", () => {
-	async function waitForLine(path: string): Promise<string> {
+	async function waitForLines(path: string, count: number): Promise<string[]> {
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
-				const content = await readFile(path, "utf-8");
-				if (content.includes("\n")) {
-					return content.slice(0, content.indexOf("\n"));
+				const lines = (await readFile(path, "utf-8"))
+					.trimEnd()
+					.split("\n")
+					.filter((line) => line.length > 0);
+				if (lines.length >= count) {
+					return lines;
 				}
 			} catch {
 				// Not written yet — the emit is fire-and-forget after the stream ends.
 			}
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
-		throw new Error(`No telemetry line appeared at ${path}`);
+		throw new Error(`Expected ${count} telemetry line(s) at ${path}`);
+	}
+
+	async function waitForLine(path: string): Promise<string> {
+		return (await waitForLines(path, 1))[0];
 	}
 
 	it("appends one JSONL timing record per turn when telemetryPath is set", async () => {
@@ -3669,10 +3676,11 @@ describe("MoA telemetry", () => {
 			mkdtempSync(join(tmpdir(), "moa-telemetry-")),
 			"timings.jsonl",
 		);
+		const preset = basePreset({
+			referenceModels: [{ provider: "ref-a", model: "a" }],
+		});
 		const config: MoAConfig = {
-			...baseConfig(
-				basePreset({ referenceModels: [{ provider: "ref-a", model: "a" }] }),
-			),
+			...baseConfig(preset),
 			telemetryPath,
 		};
 		await streamMoA(
@@ -3699,7 +3707,95 @@ describe("MoA telemetry", () => {
 		expect(typeof record.referencePhaseMs).toBe("number");
 		expect(typeof record.aggregator.doneMs).toBe("number");
 		expect(record.aggregator.usage).toBeDefined();
+		const expectedGuidance = buildGuidanceBlock({
+			presetName: "default",
+			preset,
+			referenceOutputs: [
+				{ slot: preset.referenceModels[0], success: true, text: "advice" },
+			],
+		});
+		expect(record.aggregator.guidanceChars).toBeGreaterThan(0);
+		expect(record.aggregator.guidanceChars).toBe(expectedGuidance.length);
 		expect(typeof record.totalMs).toBe("number");
+	});
+
+	it("records guidanceChars when reference cadence reuses cached guidance", async () => {
+		__resetReferenceGuidanceCacheForTests();
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("cached advice")]);
+		agg.setResponses([
+			fauxAssistantMessage("final answer"),
+			fauxAssistantMessage("final answer"),
+		]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const telemetryPath = join(
+			mkdtempSync(join(tmpdir(), "moa-telemetry-")),
+			"timings.jsonl",
+		);
+		const preset = basePreset({
+			referenceModels: [{ provider: "ref-a", model: "a" }],
+			referenceCadence: "user-turn",
+		});
+		const config: MoAConfig = {
+			...baseConfig(preset),
+			telemetryPath,
+		};
+		const moaModel = makeSyntheticMoAModel(agg.getModel("main")!);
+
+		await streamMoA(
+			moaModel,
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+		await waitForLines(telemetryPath, 1);
+
+		await streamMoA(
+			moaModel,
+			{
+				messages: [
+					{ role: "user", content: "question", timestamp: 1 },
+					fauxAssistantMessage([
+						fauxToolCall("echo", { text: "hi" }, { id: "tool-1" }),
+					]),
+					{
+						role: "toolResult",
+						toolCallId: "tool-1",
+						toolName: "echo",
+						content: [{ type: "text", text: "tool output" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			},
+			undefined,
+			registry,
+			config,
+		).result();
+
+		const lines = await waitForLines(telemetryPath, 2);
+		const reusedRecord = JSON.parse(lines[1]);
+		const expectedGuidance = buildGuidanceBlock({
+			presetName: "default",
+			preset,
+			referenceOutputs: [
+				{
+					slot: preset.referenceModels[0],
+					success: true,
+					text: "cached advice",
+				},
+			],
+		});
+		expect(reusedRecord.guidanceReused).toBe(true);
+		expect(reusedRecord.aggregator.guidanceChars).toBeGreaterThan(0);
+		expect(reusedRecord.aggregator.guidanceChars).toBe(
+			expectedGuidance.length,
+		);
 	});
 
 	it("records agentic reference rounds, tool-call metadata, and round usage without text", async () => {

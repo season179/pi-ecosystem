@@ -423,7 +423,7 @@ wall-clock went:
   `rounds` / `toolCalls` / `roundUsage` metadata when enabled;
 - the pre-warm's start/settle times and how long the real request actually blocked on it;
 - the aggregator: request start, headers, first token, done, guidance placement used,
-  whether the trailing-placement fallback fired, and usage + cost;
+  attached guidance char count, whether the trailing-placement fallback fired, and usage + cost;
 - whether the turn reused cached guidance (`referenceCadence`).
 
 The records are **metadata only** — no prompt or completion text is ever written — and
