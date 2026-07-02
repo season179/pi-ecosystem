@@ -1,25 +1,32 @@
 /**
  * Tests for pi-buddy's pure logic: transcript serialization, budget trimming,
- * and watchdog PASS detection.
- *
- * Run with: npm test (builds first, then runs node --test against dist).
+ * watchdog PASS detection, and telemetry records.
  */
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, it } from "vitest";
 import {
 	branchToBlocks,
 	entryToBlock,
 	estimateTokens,
 	renderTranscript,
 	TRIM_MARKER,
-} from "../dist/extensions/transcript.js";
+} from "../src/extensions/transcript.js";
 import {
 	buildStanceSystemPrompt,
 	buildWatchdogSystemPrompt,
 	isWatchdogPass,
 	WATCHDOG_PASS_TOKEN,
-} from "../dist/extensions/stances.js";
+} from "../src/extensions/stances.js";
+import {
+	__setTelemetryPathForTests,
+	recordConsultation,
+	telemetryPath,
+} from "../src/extensions/telemetry.js";
 
 function messageEntry(message: unknown, id = "e1"): any {
 	return {
@@ -196,6 +203,59 @@ describe("stances", () => {
 
 	it("watchdog prompt demands the PASS token", () => {
 		assert.ok(buildWatchdogSystemPrompt().includes(WATCHDOG_PASS_TOKEN));
+	});
+});
+
+describe("telemetry", () => {
+	afterEach(() => {
+		__setTelemetryPathForTests(undefined);
+	});
+
+	it("appends one JSONL record per consultation", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-telemetry-"));
+		const path = join(dir, "nested", "buddy-telemetry.jsonl");
+		__setTelemetryPathForTests(path);
+
+		await recordConsultation({
+			source: "watchdog",
+			stance: "watchdog",
+			outcome: "pass",
+			model: "zai/glm-5.2",
+			totalMs: 1234,
+			rounds: 2,
+			toolCalls: 3,
+		});
+		await recordConsultation({
+			source: "tool",
+			stance: "fact_check",
+			outcome: "error",
+			model: "zai/glm-5.2",
+			totalMs: 42,
+			error: "boom",
+		});
+
+		const lines = (await readFile(path, "utf8")).trim().split("\n");
+		assert.equal(lines.length, 2);
+		const first = JSON.parse(lines[0]);
+		assert.equal(first.v, 1);
+		assert.equal(first.outcome, "pass");
+		assert.equal(first.toolCalls, 3);
+		assert.ok(typeof first.ts === "string");
+		const second = JSON.parse(lines[1]);
+		assert.equal(second.outcome, "error");
+		assert.equal(second.error, "boom");
+	});
+
+	it("never throws when the path is unwritable", async () => {
+		__setTelemetryPathForTests("/dev/null/impossible/file.jsonl");
+		await recordConsultation({
+			source: "command",
+			stance: "discuss",
+			outcome: "ok",
+			model: "zai/glm-5.2",
+			totalMs: 1,
+		});
+		assert.ok(telemetryPath().includes("impossible"));
 	});
 });
 

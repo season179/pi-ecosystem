@@ -31,7 +31,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test --experimental-strip-types test/buddy.test.ts",
+    "test": "vitest run",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run clean && npm run build"
   },

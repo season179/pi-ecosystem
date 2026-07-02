@@ -24,6 +24,11 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { consultBuddy, type ConsultResult } from "./consult.js";
 import {
+	type BuddyOutcome,
+	type BuddySource,
+	recordConsultation,
+} from "./telemetry.js";
+import {
 	buildStanceSystemPrompt,
 	buildWatchdogSystemPrompt,
 	isWatchdogPass,
@@ -69,12 +74,18 @@ export default function setup(pi: ExtensionAPI): void {
 		ctx: ExtensionContext;
 		systemPrompt: string;
 		requestText: string;
+		source: BuddySource;
+		stance: string;
+		/** Maps a successful answer to a telemetry outcome (watchdog: pass/concern). */
+		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
 		onActivity?: (line: string) => void;
 	}): Promise<ConsultResult> {
 		const model = resolveBuddyModel(args.ctx);
+		const modelSpec = `${model.provider}/${model.id}`;
+		const startedAt = Date.now();
 		args.ctx.ui.setStatus(STATUS_KEY, "buddy: consulting...");
 		try {
-			return await consultBuddy({
+			const result = await consultBuddy({
 				requestText: args.requestText,
 				systemPrompt: args.systemPrompt,
 				entries: args.ctx.sessionManager.getBranch(),
@@ -87,6 +98,28 @@ export default function setup(pi: ExtensionAPI): void {
 					args.onActivity?.(line);
 				},
 			});
+			await recordConsultation({
+				source: args.source,
+				stance: args.stance,
+				outcome: args.outcomeOf?.(result) ?? "ok",
+				model: modelSpec,
+				totalMs: Date.now() - startedAt,
+				rounds: result.rounds,
+				toolCalls: result.activity.length,
+				transcriptTokens: result.transcriptTokens,
+				answerChars: result.answer.length,
+			});
+			return result;
+		} catch (error) {
+			await recordConsultation({
+				source: args.source,
+				stance: args.stance,
+				outcome: "error",
+				model: modelSpec,
+				totalMs: Date.now() - startedAt,
+				error: errorToString(error),
+			});
+			throw error;
 		} finally {
 			args.ctx.ui.setStatus(STATUS_KEY, undefined);
 		}
@@ -130,6 +163,8 @@ export default function setup(pi: ExtensionAPI): void {
 				ctx,
 				systemPrompt: buildStanceSystemPrompt(stance),
 				requestText: params.question,
+				source: "tool",
+				stance,
 				onActivity: (line) => {
 					activity.push(line);
 					onUpdate?.({
@@ -212,6 +247,8 @@ export default function setup(pi: ExtensionAPI): void {
 					systemPrompt: buildStanceSystemPrompt("discuss"),
 					requestText:
 						`The HUMAN USER is asking you directly (not the agent):\n\n${question}`,
+					source: "command",
+					stance: "discuss",
 				});
 				pi.sendMessage(
 					{
@@ -255,6 +292,9 @@ export default function setup(pi: ExtensionAPI): void {
 					`Automatic watchdog check-in: the agent has completed ` +
 					`${WATCHDOG_TURN_THRESHOLD} turns without consulting you. Review ` +
 					`the recent turns. Reply PASS if there is no real problem.`,
+				source: "watchdog",
+				stance: "watchdog",
+				outcomeOf: (r) => (isWatchdogPass(r.answer) ? "pass" : "concern"),
 			});
 			if (isWatchdogPass(result.answer)) return;
 			pi.sendMessage(
