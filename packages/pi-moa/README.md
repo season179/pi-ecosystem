@@ -331,7 +331,9 @@ wall-clock went:
 
 - auth resolution, reference-context render, and total turn time;
 - per reference: request start, response headers, first token, settle time, stop cause
-  (`stop` / `length` / `error`), kept chars, and token usage + cost;
+  (`stop` / `length` / `error` / `aborted` — `aborted` marks our own cancellation, e.g.
+  a reference superseded by a reached `referenceQuorum`, so `error` always means a
+  genuine upstream failure), kept chars, and token usage + cost;
 - the pre-warm's start/settle times and how long the real request actually blocked on it;
 - the aggregator: request start, headers, first token, done, guidance placement used,
   whether the trailing-placement fallback fired, and usage + cost;

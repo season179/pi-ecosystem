@@ -3269,4 +3269,54 @@ describe("MoA telemetry", () => {
 		expect(record.aggregator.usage).toBeDefined();
 		expect(typeof record.totalMs).toBe("number");
 	});
+
+	it("records a quorum-cancelled reference as aborted, not error", async () => {
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([fauxAssistantMessage("advice A")]);
+		// refB is mid-flight when the quorum is reached and honors the phase abort
+		// by rejecting — the shape of a real provider stream being cancelled.
+		refB.setResponses([
+			(_context, options) =>
+				new Promise((_resolve, reject) => {
+					(options as { signal?: AbortSignal }).signal?.addEventListener(
+						"abort",
+						() => reject(new Error("cancelled by quorum")),
+						{ once: true },
+					);
+				}),
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: refB.getModel("b")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const telemetryPath = join(
+			mkdtempSync(join(tmpdir(), "moa-telemetry-")),
+			"timings.jsonl",
+		);
+		const config: MoAConfig = {
+			...baseConfig(basePreset({ referenceQuorum: 1 })),
+			telemetryPath,
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+
+		const record = JSON.parse(await waitForLine(telemetryPath));
+		expect(record.outcome).toBe("ok");
+		const stops = Object.fromEntries(
+			(record.references as Array<{ model: string; stop?: string }>).map(
+				(ref) => [ref.model, ref.stop],
+			),
+		);
+		expect(stops.a).toBe("stop");
+		expect(stops.b).toBe("aborted");
+	});
 });

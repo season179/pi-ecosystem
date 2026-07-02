@@ -1025,7 +1025,14 @@ async function runSingleReference(args: {
 			usage: message.usage,
 		};
 	} catch (error) {
-		args.referenceTimer?.settle({ stop: "error" });
+		// Distinguish our own cancellation from a genuine upstream failure: the
+		// phase signal fires when a reached quorum supersedes this reference (or
+		// the whole turn is aborted), and that cancellation used to be recorded as
+		// "error" — indistinguishable in the timings from a provider that is
+		// actually failing. Label it "aborted" so "error" keeps meaning unhealthy.
+		args.referenceTimer?.settle({
+			stop: args.options?.signal?.aborted ? "aborted" : "error",
+		});
 		const output = failedReferenceOutput(args.task.slot, errorToString(error));
 		if (args.preset.failOnReferenceError) {
 			throw new Error(output.errorMessage);
