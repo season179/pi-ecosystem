@@ -6,57 +6,28 @@ import type { MoAConfig, MoAPreset, ModelSlot } from "./types.js";
 const DEFAULT_MAX_REFERENCES = 8;
 const DEFAULT_REFERENCE_CONCURRENCY = 4;
 const DEFAULT_MAX_REFERENCE_OUTPUT_CHARS = 2000;
-const DEFAULT_REFERENCE_MAX_TOKENS = 1024;
 
-export const DEFAULT_MOA_CONFIG: MoAConfig = {
-	defaultPreset: "default",
-	presets: {
-		default: {
-			enabled: true,
-			referenceModels: [
-				{ provider: "openrouter", model: "anthropic/claude-haiku-4.5" },
-				{ provider: "openrouter", model: "google/gemini-3-flash-preview" },
-			],
-			aggregator: {
-				provider: "openrouter",
-				model: "anthropic/claude-sonnet-4.5",
-			},
-			referenceConcurrency: DEFAULT_REFERENCE_CONCURRENCY,
-			maxReferences: DEFAULT_MAX_REFERENCES,
-			maxReferenceOutputChars: DEFAULT_MAX_REFERENCE_OUTPUT_CHARS,
-			// References are truncated to maxReferenceOutputChars (~500 tokens) before
-			// they reach the aggregator or the display, so generation beyond that is
-			// discarded. Cap it well above the kept budget: English/code advisory text
-			// runs ~3-4 chars/token, so 2000 chars fits in <700 tokens — the kept text
-			// is unchanged while verbose references stop early instead of running long.
-			referenceMaxTokens: DEFAULT_REFERENCE_MAX_TOKENS,
-			// Stream the shipped default end-to-end so the out-of-box experience gets the
-			// perceived-latency win the validated streaming machinery enables. Both knobs
-			// are DISPLAY-ONLY: the persisted `done` message (and thus next-turn model
-			// context) is byte-identical to the buffered path either way — only WHEN the
-			// live deltas surface differs. MoA registers as an ordinary provider, and pi's
-			// agent loop already renders incremental content events from every real
-			// streaming provider, so this just makes the default behave like a normal
-			// streaming provider instead of buffering its whole turn.
-			//
-			// - streamReferences reveals the reference thinking block as it fills in (the
-			//   header immediately, then each reference's advice on settle) instead of one
-			//   burst after the phase; it self-protects, falling back to the atomic burst
-			//   when referenceQuorum is set or a reference model is missing.
-			// - streamAggregator forwards the aggregator's answer token-by-token, dropping
-			//   time-to-first-token from the whole generation to the first token. The
-			//   default "latest-user" guidance placement never creates the consecutive-user
-			//   sequence, so the streaming path always runs on its primary attempt.
-			//
-			// The TYPE-level default stays unset (undefined ⇒ buffered), so only this
-			// shipped preset opts in; a custom preset that omits the knobs is unaffected.
-			streamReferences: true,
-			streamAggregator: true,
-			failOnReferenceError: false,
-		},
-	},
-};
+// Shown when no moa.json exists: the smallest config that passes validation,
+// as a copy-paste starting point. The provider/model pairs must name models
+// that exist in pi's own model registry.
+const MINIMAL_MOA_CONFIG_EXAMPLE = `{
+  "defaultPreset": "default",
+  "presets": {
+    "default": {
+      "enabled": true,
+      "referenceModels": [
+        { "provider": "openrouter", "model": "anthropic/claude-haiku-4.5" }
+      ],
+      "aggregator": { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+    }
+  }
+}`;
 
+// moa.json is compulsory by design: there is no bundled default config, so
+// which models advise and aggregate is always an explicit user decision. A
+// missing or invalid config throws here, setup() propagates it, and pi turns
+// a failed extension load into a fatal startup diagnostic — the app refuses
+// to run rather than running with models the user never chose.
 export function loadMoAConfig(cwd: string): MoAConfig {
 	const projectPath = join(cwd, ".pi", "moa.json");
 	if (existsSync(projectPath)) {
@@ -68,8 +39,15 @@ export function loadMoAConfig(cwd: string): MoAConfig {
 		return readMoAConfig(globalPath);
 	}
 
-	validateMoAConfig(DEFAULT_MOA_CONFIG);
-	return DEFAULT_MOA_CONFIG;
+	throw new Error(
+		[
+			"MoA requires a moa.json config file and none was found. Searched:",
+			`  - ${projectPath} (project)`,
+			`  - ${globalPath} (global)`,
+			"Create one with at least one enabled preset. Minimal example:",
+			MINIMAL_MOA_CONFIG_EXAMPLE,
+		].join("\n"),
+	);
 }
 
 function getGlobalConfigDir(): string {
@@ -85,7 +63,14 @@ function readMoAConfig(path: string): MoAConfig {
 		throw new Error(`Failed to parse MoA config at ${path}: ${message}`);
 	}
 
-	validateMoAConfig(parsed);
+	// Validation messages name the offending field; add WHICH file is bad so
+	// the user can go fix it directly.
+	try {
+		validateMoAConfig(parsed);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Invalid MoA config at ${path} — ${message}`);
+	}
 	return parsed;
 }
 

@@ -20,7 +20,6 @@ import {
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	DEFAULT_MOA_CONFIG,
 	getPreset,
 	loadMoAConfig,
 	validateMoAConfig,
@@ -253,6 +252,56 @@ function makeSyntheticMoAModel(
 		baseUrl: "https://moa.invalid",
 	};
 }
+
+describe("MoA compulsory config", () => {
+	// moa.json is required: there is no bundled default config, so loading with
+	// no file anywhere must fail loudly — pi turns the throwing setup() into a
+	// fatal startup diagnostic.
+	function withAgentDir<T>(agentDir: string, fn: () => T): T {
+		const prev = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		try {
+			return fn();
+		} finally {
+			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prev;
+		}
+	}
+
+	it("throws a guiding error when no moa.json exists anywhere", () => {
+		const emptyCwd = mkdtempSync(join(tmpdir(), "moa-nocfg-cwd-"));
+		const emptyAgentDir = mkdtempSync(join(tmpdir(), "moa-nocfg-agent-"));
+		withAgentDir(emptyAgentDir, () => {
+			let thrown: Error | undefined;
+			try {
+				loadMoAConfig(emptyCwd);
+			} catch (error) {
+				thrown = error as Error;
+			}
+			// The error names both searched locations and includes a minimal
+			// example the user can copy as a starting point.
+			expect(thrown).toBeDefined();
+			expect(thrown?.message).toContain(join(emptyCwd, ".pi", "moa.json"));
+			expect(thrown?.message).toContain(join(emptyAgentDir, "moa.json"));
+			expect(thrown?.message).toContain('"defaultPreset"');
+			expect(thrown?.message).toContain('"referenceModels"');
+		});
+	});
+
+	it("names the offending file when a config is invalid", () => {
+		const emptyCwd = mkdtempSync(join(tmpdir(), "moa-badcfg-cwd-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "moa-badcfg-agent-"));
+		const configPath = join(agentDir, "moa.json");
+		writeFileSync(
+			configPath,
+			JSON.stringify({ defaultPreset: "default", presets: {} }),
+		);
+		withAgentDir(agentDir, () => {
+			expect(() => loadMoAConfig(emptyCwd)).toThrow(configPath);
+			expect(() => loadMoAConfig(emptyCwd)).toThrow(/"presets"/);
+		});
+	});
+});
 
 describe("MoA config", () => {
 	it("accepts a valid config and resolves enabled presets", () => {
@@ -2828,16 +2877,17 @@ describe("MoA extension wiring", () => {
 		expect(filtered.messages[1]).toBe(user);
 	});
 
-	// Runs one full MoA turn through the provider setup() registers, using whatever
-	// MoA config is active so the wiring is exercised end to end regardless of the
-	// config values (references succeed with distinctive advice; aggregator answers
-	// "final answer").
+	// Runs one full MoA turn through the provider setup() registers, against a
+	// fixture config staged where setup()'s own loadMoAConfig will find it —
+	// moa.json is compulsory, so the wiring test brings its own instead of
+	// depending on (or telemetry-polluting) the user's real one. References
+	// succeed with distinctive advice; the aggregator answers "final answer".
 	async function primeMoATurn(): Promise<{
 		fake: ReturnType<typeof createFakePi>;
 		preset: MoAPreset;
 		result: Awaited<ReturnType<typeof completeSimple>>;
 	}> {
-		const config = loadMoAConfig(process.cwd());
+		const config = baseConfig();
 		const preset = config.presets[config.defaultPreset];
 		const slots: ModelSlot[] = [...preset.referenceModels, preset.aggregator];
 
@@ -2879,14 +2929,10 @@ describe("MoA extension wiring", () => {
 		}
 		const registry = createRegistry(registryEntries);
 
-		// setup() loads the active config itself, so redirect it to a
-		// telemetry-free copy of that config — otherwise these end-to-end turns
-		// append junk records to the user's real telemetryPath on every test run.
+		// setup() loads the config itself, so stage the fixture where its
+		// loadMoAConfig will find it.
 		const agentDir = mkdtempSync(join(tmpdir(), "moa-wiring-"));
-		writeFileSync(
-			join(agentDir, "moa.json"),
-			JSON.stringify({ ...config, telemetryPath: undefined }),
-		);
+		writeFileSync(join(agentDir, "moa.json"), JSON.stringify(config));
 		const fake = createFakePi();
 		const prevAgentDir = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -2955,17 +3001,26 @@ describe("MoA extension wiring", () => {
 
 });
 
-describe("MoA shipped default streaming", () => {
-	it("streams the shipped default preset end-to-end (references progressively, aggregator live)", async () => {
-		// The shipped DEFAULT_MOA_CONFIG opts into both streaming knobs so the out-of-box
-		// turn gives live feedback. Run it through streamMoA directly (loadMoAConfig would
-		// pick up a user's global moa.json) and iterate the real event stream — not just
-		// result() — to prove the deltas actually surface, while confirming the persisted
-		// `done` message is still the buffered shape: the safety property that makes
-		// streaming a zero-regression, display-only speedup.
-		const preset = DEFAULT_MOA_CONFIG.presets[DEFAULT_MOA_CONFIG.defaultPreset];
-		expect(preset.streamAggregator).toBe(true);
-		expect(preset.streamReferences).toBe(true);
+describe("MoA fully-streamed preset", () => {
+	it("streams a both-knobs preset end-to-end (references progressively, aggregator live)", async () => {
+		// A preset with both streaming knobs on gives live feedback for the whole
+		// turn. Iterate the real event stream — not just result() — to prove the
+		// deltas actually surface, while confirming the persisted `done` message is
+		// still the buffered shape: the safety property that makes streaming a
+		// zero-regression, display-only speedup.
+		const config = baseConfig(
+			basePreset({
+				// One shared provider so a single faux registration serves all slots.
+				referenceModels: [
+					{ provider: "faux", model: "ref-one" },
+					{ provider: "faux", model: "ref-two" },
+				],
+				aggregator: { provider: "faux", model: "agg-main" },
+				streamReferences: true,
+				streamAggregator: true,
+			}),
+		);
+		const preset = config.presets[config.defaultPreset];
 
 		const slots = [...preset.referenceModels, preset.aggregator];
 		const modelIds = [...new Set(slots.map((slot) => slot.model))];
@@ -2995,12 +3050,12 @@ describe("MoA shipped default streaming", () => {
 		const stream = streamMoA(
 			makeSyntheticMoAModel(
 				registration.getModel(preset.aggregator.model)!,
-				DEFAULT_MOA_CONFIG.defaultPreset,
+				config.defaultPreset,
 			),
 			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
 			undefined,
 			registry,
-			DEFAULT_MOA_CONFIG,
+			config,
 		);
 
 		const events = await collectEvents(stream);

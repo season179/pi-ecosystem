@@ -13,11 +13,34 @@ pi --model moa/default
 
 ## Configuration
 
-MoA reads config from the first file found:
+**A `moa.json` is required — there is no built-in default config.** Which models
+advise and aggregate is always an explicit decision, never something the package
+picks for you. MoA reads the first file found:
 
 1. `<cwd>/.pi/moa.json`
 2. `~/.pi/agent/moa.json` or `$PI_CODING_AGENT_DIR/moa.json`
-3. built-in defaults
+
+If neither exists — or the file is invalid — the extension fails to load with an
+error naming the searched paths (or the offending file and field), and pi treats
+that as a fatal startup diagnostic: it prints the error and exits instead of
+running without the models you chose.
+
+Minimal config:
+
+```json
+{
+  "defaultPreset": "default",
+  "presets": {
+    "default": {
+      "enabled": true,
+      "referenceModels": [
+        { "provider": "openrouter", "model": "anthropic/claude-haiku-4.5" }
+      ],
+      "aggregator": { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+    }
+  }
+}
+```
 
 Each enabled preset appears as a synthetic model, for example `moa/default`.
 
@@ -33,9 +56,9 @@ verbose references off the critical path:
   kept advisory text is byte-identical to reading the full response and truncating;
   only the truncation marker's reported char total reflects the early stop.
 - `referenceMaxTokens` caps each reference's generation as an upper bound. It only
-  ever lowers a caller-supplied limit; presets that omit it run uncapped. The built-in
-  `default` preset sets it to `1024` (well above the ~500 tokens kept), so the kept
-  text is unchanged while runaway references stop early even before the char budget.
+  ever lowers a caller-supplied limit; presets that omit it run uncapped. A value
+  like `1024` (well above the ~500 tokens kept by the default char budget) leaves the
+  kept text unchanged while runaway references stop early even before the char budget.
   The cap **stands down when a reasoning effort is in play** for the reference
   (inherited from the caller or set via `referenceReasoning`): on completions-style
   APIs thinking tokens share the `max_tokens` budget (OpenRouter derives the Anthropic
@@ -362,9 +385,9 @@ once. On a long answer this pause is the dominant *perceived* latency of the tur
   carries that block, so the live message shape matches the final one. Any complete private
   guidance the aggregator echoes is stripped from the streamed partials just as it is from the
   final message. Streaming is **display-only** — the *final* persisted message (and thus next-turn
-  model context) is the same either way, so it is a zero-regression speedup. The **shipped
-  `default` preset enables it** so the out-of-box turn streams; the *type-level* default is unset
-  (buffered), so a custom preset that omits the knob is unaffected. (One display nuance: if the
+  model context) is the same either way, so it is a zero-regression speedup. The *type-level*
+  default is unset (buffered), so a preset that omits the knob is unaffected — set it in your
+  presets for a streamed turn. (One display nuance: if the
   aggregator errors mid-generation you'll see the partial answer before the error — standard
   streaming behavior — instead of only the error.)
 
@@ -383,10 +406,9 @@ does not touch this earlier gap.
   reference that finishes ahead of an earlier slot is buffered until that slot reveals), so the
   streamed order matches the final block and the accumulated text is byte-identical to the
   buffered prelude. Like `streamAggregator`, it is **display-only**: the persisted `done` message
-  is still built atomically, so what re-enters model context is unchanged. The **shipped `default`
-  preset enables it** alongside `streamAggregator` for a fully-streamed out-of-box turn; the
-  *type-level* default is unset (single burst), so a custom preset that omits the knob is
-  unaffected. It composes with `streamAggregator` (reference thinking streams at content index 0,
+  is still built atomically, so what re-enters model context is unchanged. The *type-level*
+  default is unset (single burst), so a preset that omits the knob is unaffected — enable it
+  alongside `streamAggregator` for a fully-streamed turn. It composes with `streamAggregator` (reference thinking streams at content index 0,
   the answer at index 1+). It is scoped to the common case — it falls back to the single burst (no
   live reveal) when `referenceQuorum` is set (dropped references would leave gaps in the
   slot-ordered reveal) or a reference model can't be found (a missing slot shifts the output
