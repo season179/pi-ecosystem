@@ -1,7 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { MoAConfig, MoAPreset, ModelSlot } from "./types.js";
+import type {
+	MoAConfig,
+	MoAPreset,
+	ModelSlot,
+	ReferenceToolName,
+} from "./types.js";
 
 const DEFAULT_MAX_REFERENCES = 8;
 const DEFAULT_REFERENCE_CONCURRENCY = 4;
@@ -222,6 +227,17 @@ function validatePreset(presetName: string, value: unknown): asserts value is Mo
 		presetName,
 		"referenceProviderRouting",
 	);
+	readOptionalReferenceTools(value.referenceTools, presetName);
+	if (value.referenceToolRounds !== undefined && value.referenceTools === undefined) {
+		throw new Error(
+			`MoA preset "${presetName}": "referenceToolRounds" requires "referenceTools"`,
+		);
+	}
+	readOptionalPositiveInteger(
+		value.referenceToolRounds,
+		presetName,
+		"referenceToolRounds",
+	);
 	readOptionalBoolean(value.aggregatorPrewarm, presetName, "aggregatorPrewarm");
 	readOptionalBoolean(value.streamAggregator, presetName, "streamAggregator");
 	readOptionalBoolean(value.streamReferences, presetName, "streamReferences");
@@ -300,6 +316,35 @@ const CACHE_RETENTIONS = ["none", "short", "long"] as const;
 // a fresh user message and reuses that turn's guidance on the tool-loop turns
 // in between — taking the whole reference phase off those turns' critical path.
 const REFERENCE_CADENCES = ["every-turn", "user-turn"] as const;
+
+const REFERENCE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const satisfies readonly ReferenceToolName[];
+
+function readOptionalReferenceTools(value: unknown, presetName: string): void {
+	if (value === undefined) return;
+	if (!Array.isArray(value)) {
+		throw new Error(`MoA preset "${presetName}": "referenceTools" must be an array`);
+	}
+	if (value.length === 0) {
+		throw new Error(`MoA preset "${presetName}": "referenceTools" must contain at least one tool`);
+	}
+	const seen = new Set<string>();
+	for (const [index, toolName] of value.entries()) {
+		if (
+			typeof toolName !== "string" ||
+			!REFERENCE_TOOL_NAMES.includes(toolName as ReferenceToolName)
+		) {
+			throw new Error(
+				`MoA preset "${presetName}": "referenceTools[${index}]" must be one of ${REFERENCE_TOOL_NAMES.join(", ")}`,
+			);
+		}
+		if (seen.has(toolName)) {
+			throw new Error(
+				`MoA preset "${presetName}": "referenceTools" must not contain duplicate tool "${toolName}"`,
+			);
+		}
+		seen.add(toolName);
+	}
+}
 
 // The provider-routing knobs steer OpenRouter's upstream provider selection (a
 // speed lever: `sort: "throughput"` / `"latency"` route to a faster backend).

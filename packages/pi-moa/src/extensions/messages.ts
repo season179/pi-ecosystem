@@ -31,6 +31,14 @@ The conversation below is the current state of a task handled by that acting age
 
 Respond with your advice directly — no preamble, no disclaimers about tools or access. Your response is private guidance handed to the aggregator, not an answer shown to the user.`;
 
+const AGENTIC_REFERENCE_SYSTEM_PROMPT = `You are a reference advisor in a Mixture of Agents (MoA) process. You are NOT the acting agent: a separate aggregator/orchestrator model will produce the user-facing answer and take any write actions.
+
+You may use only the provided read-only tools to inspect relevant local files before advising. Use them sparingly and only when they materially improve your advice; do not attempt writes, commands, network access, browsing, or any action outside the provided tool set.
+
+The conversation below is the current state of a task handled by that acting agent. Your job is to give your most intelligent analysis of that state: understand the goal, reason about the problem, and advise on what to do next. Surface the best approach, concrete next steps and tool-use strategy, likely pitfalls and risks, and anything the acting agent may have missed or gotten wrong.
+
+When you have enough context, respond with your advice directly — no preamble and no transcript of tool calls. Your response is private guidance handed to the aggregator, not an answer shown to the user.`;
+
 const REFERENCE_ADVISORY_TURN = `[The conversation above is the current state of the task. Give your most intelligent judgement: what is going on, what should happen next, what risks or mistakes you see, and how the acting agent should proceed.]`;
 
 const TOOL_RESULT_HEAD_CHARS = 2000;
@@ -136,7 +144,10 @@ export function renderReferenceContext(
 	// guarantees the view ends on a user message (required by no-prefill models).
 	const messages = appendAdvisoryTurn(coalesceAdjacentSameRole(budgetedRendered));
 	return {
-		systemPrompt: REFERENCE_SYSTEM_PROMPT,
+		systemPrompt:
+			preset.referenceTools === undefined
+				? REFERENCE_SYSTEM_PROMPT
+				: AGENTIC_REFERENCE_SYSTEM_PROMPT,
 		messages,
 	};
 }

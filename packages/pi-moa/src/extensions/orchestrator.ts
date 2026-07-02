@@ -10,6 +10,8 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 	type ThinkingContent,
+	type ToolCall,
+	type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
@@ -37,6 +39,11 @@ import {
 	type ReferenceTimer,
 	type TurnTelemetry,
 } from "./telemetry.js";
+import {
+	createReferenceTools,
+	executeReferenceToolCall,
+	type ReferenceTool,
+} from "./reference-tools.js";
 import type {
 	MoAConfig,
 	MoAPreset,
@@ -995,14 +1002,23 @@ async function runSingleReference(args: {
 			args.task.model,
 			args.preset.referenceProviderRouting,
 		);
-		const message = await streamReferenceUntilBudget(
-			referenceStreamModel,
-			args.refContext,
-			referenceOptions,
-			getMaxReferenceOutputChars(args.preset),
-			args.preset.referenceTimeoutMs,
-			args.referenceTimer,
-		);
+		const message =
+			args.preset.referenceTools === undefined
+				? await streamReferenceUntilBudget(
+						referenceStreamModel,
+						args.refContext,
+						referenceOptions,
+						getMaxReferenceOutputChars(args.preset),
+						args.preset.referenceTimeoutMs,
+						args.referenceTimer,
+					)
+				: await runAgenticReference({
+						preset: args.preset,
+						model: referenceStreamModel,
+						refContext: args.refContext,
+						referenceOptions,
+						referenceTimer: args.referenceTimer,
+					});
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(
 				message.errorMessage ?? `Reference stopped with ${message.stopReason}`,
@@ -1043,6 +1059,226 @@ async function runSingleReference(args: {
 		}
 		return output;
 	}
+}
+
+interface AgenticReferenceArgs {
+	preset: MoAPreset;
+	model: Model<Api>;
+	refContext: Context;
+	referenceOptions: SimpleStreamOptions;
+	referenceTimer?: ReferenceTimer;
+}
+
+async function runAgenticReference(args: AgenticReferenceArgs): Promise<AssistantMessage> {
+	const toolNames = args.preset.referenceTools;
+	if (toolNames === undefined) {
+		throw new Error("Agentic reference loop requires referenceTools");
+	}
+	const referenceTools = createReferenceTools(toolNames, process.cwd());
+	const maxToolRounds = args.preset.referenceToolRounds ?? 3;
+	const keptOutputChars = getMaxReferenceOutputChars(args.preset);
+	const { controller, dispose: unlinkAbort } = linkAbortController(
+		args.referenceOptions.signal,
+	);
+	const loopOptions: SimpleStreamOptions = {
+		...args.referenceOptions,
+		signal: controller.signal,
+	};
+	let messages = args.refContext.messages.slice();
+	let round = 0;
+	let forceFinal = false;
+	let finalAdviceStarted = false;
+	let latestFinalPartial: AssistantMessage | undefined;
+	let latestFinalUsageRound: number | undefined;
+
+	const runLoop = async (): Promise<AssistantMessage> => {
+		for (;;) {
+			round += 1;
+			args.referenceTimer?.setRounds(round);
+			const toolsForRound = forceFinal ? undefined : referenceTools;
+			const finalRound = toolsForRound === undefined;
+			const roundContext = buildAgenticRoundContext(
+				args.refContext,
+				messages,
+				toolsForRound,
+			);
+			const message = await streamAgenticReferenceRound({
+				model: args.model,
+				context: roundContext,
+				options: loopOptions,
+				controller,
+				referenceTimer: args.referenceTimer,
+				keptOutputChars: finalRound ? keptOutputChars : undefined,
+				onFinalText: (partial) => {
+					finalAdviceStarted = true;
+					latestFinalPartial = partial;
+					latestFinalUsageRound = round;
+				},
+			});
+			args.referenceTimer?.recordRoundUsage({ round, usage: message.usage });
+			messages = [...messages, message];
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				throw new Error(
+					message.errorMessage ?? `Reference stopped with ${message.stopReason}`,
+				);
+			}
+			const toolCalls = extractToolCalls(message);
+			if (
+				toolsForRound !== undefined &&
+				message.stopReason === "toolUse" &&
+				toolCalls.length > 0
+			) {
+				const toolResults = await executeReferenceToolCalls(
+					referenceTools,
+					toolCalls,
+					round,
+					controller.signal,
+					args.referenceTimer,
+				);
+				messages = [...messages, ...toolResults];
+				if (round >= maxToolRounds) {
+					forceFinal = true;
+				}
+				continue;
+			}
+			const text = extractAssistantText(message);
+			if (text.length === 0) {
+				throw new Error("Reference produced no final advice text");
+			}
+			return message;
+		}
+	};
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		if (args.preset.referenceTimeoutMs === undefined) {
+			return await runLoop();
+		}
+		const loopPromise = runLoop();
+		loopPromise.catch(() => {});
+		const deadline = new Promise<AssistantMessage>((resolve, reject) => {
+			timer = setTimeout(() => {
+				controller.abort();
+				if (finalAdviceStarted && latestFinalPartial) {
+					if (latestFinalUsageRound !== undefined) {
+						args.referenceTimer?.recordRoundUsage({
+							round: latestFinalUsageRound,
+							usage: latestFinalPartial.usage,
+						});
+					}
+					resolve(finalizeBudgetedReference(latestFinalPartial));
+					return;
+				}
+				reject(
+					new Error(
+						`Reference exceeded referenceTimeoutMs (${args.preset.referenceTimeoutMs}ms) before producing final advice`,
+					),
+				);
+			}, args.preset.referenceTimeoutMs);
+		});
+		return await Promise.race([loopPromise, deadline]);
+	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+		unlinkAbort();
+	}
+}
+
+function buildAgenticRoundContext(
+	base: Context,
+	messages: Context["messages"],
+	tools: ReferenceTool[] | undefined,
+): Context {
+	const context: Context = {
+		systemPrompt: base.systemPrompt,
+		messages,
+	};
+	if (tools !== undefined) {
+		context.tools = tools;
+	}
+	return context;
+}
+
+async function executeReferenceToolCalls(
+	referenceTools: readonly ReferenceTool[],
+	toolCalls: readonly ToolCall[],
+	round: number,
+	signal: AbortSignal,
+	referenceTimer: ReferenceTimer | undefined,
+): Promise<ToolResultMessage[]> {
+	const executed = await Promise.all(
+		toolCalls.map((toolCall) =>
+			executeReferenceToolCall(referenceTools, toolCall, signal),
+		),
+	);
+	for (const result of executed) {
+		if (result.telemetry) {
+			referenceTimer?.recordToolCall({ round, ...result.telemetry });
+		}
+	}
+	return executed.map((result) => result.message);
+}
+
+function extractToolCalls(message: AssistantMessage): ToolCall[] {
+	return message.content.filter(
+		(block): block is ToolCall => block.type === "toolCall",
+	);
+}
+
+async function streamAgenticReferenceRound(args: {
+	model: Model<Api>;
+	context: Context;
+	options: SimpleStreamOptions;
+	controller: AbortController;
+	referenceTimer?: ReferenceTimer;
+	keptOutputChars?: number;
+	onFinalText?: (partial: AssistantMessage) => void;
+}): Promise<AssistantMessage> {
+	let keptTextChars = 0;
+	let budgetReached = false;
+	let latestPartial: AssistantMessage | undefined;
+	let sawFirstContent = false;
+
+	args.referenceTimer?.requestStart();
+	const stream = streamSimple(args.model, args.context, {
+		...args.options,
+		signal: args.controller.signal,
+	});
+	for await (const event of stream) {
+		if (event.type === "done") {
+			return event.message;
+		}
+		if (event.type === "error") {
+			if (budgetReached && latestPartial) {
+				return finalizeBudgetedReference(latestPartial);
+			}
+			throw new Error(
+				event.error.errorMessage ??
+					`Reference stopped with ${event.error.stopReason}`,
+			);
+		}
+		if (event.type === "start") {
+			args.referenceTimer?.headers();
+		} else if (!sawFirstContent) {
+			sawFirstContent = true;
+			args.referenceTimer?.firstToken();
+		}
+		latestPartial = event.partial;
+		if (event.type === "text_delta" && args.keptOutputChars !== undefined) {
+			keptTextChars += event.delta.length;
+			args.onFinalText?.(latestPartial);
+			if (!budgetReached && keptTextChars >= args.keptOutputChars) {
+				budgetReached = true;
+				args.controller.abort();
+				return finalizeBudgetedReference(latestPartial);
+			}
+		}
+	}
+	if (latestPartial) {
+		return latestPartial;
+	}
+	throw new Error("Reference produced no output before the stream ended");
 }
 
 // Only the first `keptOutputChars` of a reference's text ever reaches the

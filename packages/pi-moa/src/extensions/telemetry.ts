@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/pr
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ModelSlot } from "./types.js";
+import type { ModelSlot, ReferenceToolName } from "./types.js";
 
 // Per-turn timing telemetry for MoA. One JSON line is appended to the configured
 // file per streamMoA turn, recording where the wall-clock went: auth, reference
@@ -41,6 +41,19 @@ interface ReferenceEntry {
 	stop?: string;
 	keptChars?: number;
 	usage?: UsageSnapshot;
+	rounds?: number;
+	toolCalls?: ReferenceToolCallSnapshot[];
+	roundUsage?: ReferenceRoundUsageSnapshot[];
+}
+
+interface ReferenceToolCallSnapshot {
+	round: number;
+	name: ReferenceToolName;
+	isError: boolean;
+}
+
+interface ReferenceRoundUsageSnapshot extends UsageSnapshot {
+	round: number;
 }
 
 interface AggregatorEntry {
@@ -57,6 +70,9 @@ export interface ReferenceTimer {
 	requestStart(): void;
 	headers(): void;
 	firstToken(): void;
+	setRounds(rounds: number): void;
+	recordToolCall(info: { round: number; name: ReferenceToolName; isError: boolean }): void;
+	recordRoundUsage(info: { round: number; usage: Usage }): void;
 	settle(info: { stop: string; keptChars?: number; usage?: Usage }): void;
 }
 
@@ -120,13 +136,31 @@ export class TurnTelemetry {
 		this.references[index] = entry;
 		return {
 			requestStart: () => {
-				entry.startMs = this.now();
+				entry.startMs ??= this.now();
 			},
 			headers: () => {
-				entry.headersMs = this.now();
+				entry.headersMs ??= this.now();
 			},
 			firstToken: () => {
-				entry.firstTokenMs = this.now();
+				entry.firstTokenMs ??= this.now();
+			},
+			setRounds: (rounds) => {
+				entry.rounds = rounds;
+			},
+			recordToolCall: (info) => {
+				entry.toolCalls ??= [];
+				entry.toolCalls.push({
+					round: info.round,
+					name: info.name,
+					isError: info.isError,
+				});
+			},
+			recordRoundUsage: (info) => {
+				entry.roundUsage ??= [];
+				entry.roundUsage.push({
+					round: info.round,
+					...snapshotUsage(info.usage),
+				});
 			},
 			settle: (info) => {
 				entry.settleMs = this.now();

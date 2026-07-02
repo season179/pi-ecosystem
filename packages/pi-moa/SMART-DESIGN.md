@@ -98,7 +98,7 @@ const toolFactories = {
 const tools = preset.referenceTools.map((name) => toolFactories[name](cwd));
 ```
 
-`cwd` is the base for relative paths. The path helpers expand `~`, accept absolute paths, and otherwise resolve against `cwd` in `node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:33-53`. For `moa/smart`, add a small safety wrapper before execution if references should be confined to the workspace; the built-in tools are read-only, but they are not a cwd jail by themselves.
+`cwd` is the base for relative paths. The path helpers expand `~`, accept absolute paths, and otherwise resolve against `cwd` in `node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:33-53`. Coordinator decision for v1: there is no cwd jail; references get the same read scope as the main agent's read-only tools, so read-only access is the security boundary.
 
 ### Execute Signature
 

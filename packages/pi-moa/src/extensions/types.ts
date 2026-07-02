@@ -13,6 +13,8 @@ export interface ModelSlot {
 	model: string;
 }
 
+export type ReferenceToolName = "read" | "grep" | "find" | "ls";
+
 export interface MoAPreset {
 	enabled: boolean;
 	referenceModels: ModelSlot[];
@@ -31,6 +33,8 @@ export interface MoAPreset {
 	referenceMaxRetries?: number;
 	referenceCacheRetention?: CacheRetention;
 	referenceCadence?: "every-turn" | "user-turn";
+	referenceTools?: ReferenceToolName[];
+	referenceToolRounds?: number;
 	referenceTemperature?: number;
 	aggregatorTemperature?: number;
 	aggregatorReasoning?: ThinkingLevel;

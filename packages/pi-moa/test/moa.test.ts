@@ -44,6 +44,10 @@ import {
 	streamMoA,
 } from "../src/extensions/orchestrator.js";
 import {
+	__setReferenceToolFactoryForTests,
+	type ReferenceTool,
+} from "../src/extensions/reference-tools.js";
+import {
 	createTurnTelemetry,
 	TurnTelemetry,
 } from "../src/extensions/telemetry.js";
@@ -65,6 +69,7 @@ interface RegistryEntry {
 const registrations: FauxRegistration[] = [];
 
 afterEach(() => {
+	__setReferenceToolFactoryForTests(undefined);
 	for (const registration of registrations.splice(0)) {
 		registration.unregister();
 	}
@@ -254,6 +259,29 @@ function makeSyntheticMoAModel(
 		provider: "moa",
 		api: "moa-api",
 		baseUrl: "https://moa.invalid",
+	};
+}
+
+function createTestReferenceTool(
+	name: "read" | "grep" | "find" | "ls" = "read",
+	execute: ReferenceTool["execute"] = async (_toolCallId, params) => ({
+		content: [
+			{
+				type: "text",
+				text: `tool result for ${name}: ${JSON.stringify(params)}`,
+			},
+		],
+		details: undefined,
+	}),
+): ReferenceTool {
+	return {
+		name,
+		description: `${name} test tool`,
+		parameters: Type.Object({
+			path: Type.Optional(Type.String()),
+			pattern: Type.Optional(Type.String()),
+		}),
+		execute,
 	};
 }
 
@@ -536,6 +564,44 @@ describe("MoA config", () => {
 		// 0 (disable retries) is a valid, meaningful value — not rejected.
 		expect(() =>
 			validateMoAConfig(baseConfig(basePreset({ referenceMaxRetries: 0 }))),
+		).not.toThrow();
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceTools: [] }))),
+		).toThrow(/referenceTools/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(basePreset({ referenceTools: ["read", "read"] })),
+			),
+		).toThrow(/duplicate/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({
+						referenceTools: [
+							"write" as unknown as NonNullable<
+								MoAPreset["referenceTools"]
+							>[number],
+						],
+					}),
+				),
+			),
+		).toThrow(/referenceTools\[0\]/);
+		expect(() =>
+			validateMoAConfig(baseConfig(basePreset({ referenceToolRounds: 3 }))),
+		).toThrow(/referenceToolRounds.*referenceTools/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({ referenceTools: ["read"], referenceToolRounds: 0 }),
+				),
+			),
+		).toThrow(/referenceToolRounds/);
+		expect(() =>
+			validateMoAConfig(
+				baseConfig(
+					basePreset({ referenceTools: ["read"], referenceToolRounds: 1 }),
+				),
+			),
 		).not.toThrow();
 	});
 
@@ -2401,6 +2467,300 @@ describe("MoA orchestration", () => {
 		);
 	});
 
+	it("runs an agentic reference through tool rounds and keeps only final advice", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) => createTestReferenceTool(name)),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxText("TOOL-ROUND-COMMENTARY-ONE"),
+					fauxToolCall("read", { path: "one.ts" }, { id: "read-1" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				[
+					fauxText("TOOL-ROUND-COMMENTARY-TWO"),
+					fauxToolCall("read", { path: "two.ts" }, { id: "read-2" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("FINAL_ADVICE_ONLY"),
+		]);
+		let aggregatorContext: Context | undefined;
+		agg.setResponses([
+			(context) => {
+				aggregatorContext = context;
+				return fauxAssistantMessage("final answer");
+			},
+		]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+					referenceToolRounds: 3,
+				}),
+			),
+		).result();
+
+		const references = thinkingFromResult(result);
+		expect(references).toContain("FINAL_ADVICE_ONLY");
+		expect(references).not.toContain("TOOL-ROUND-COMMENTARY");
+		const guidance = JSON.stringify(aggregatorContext?.messages);
+		expect(guidance).toContain("FINAL_ADVICE_ONLY");
+		expect(guidance).not.toContain("TOOL-ROUND-COMMENTARY");
+		expect(refA.state.callCount).toBe(3);
+	});
+
+	it("forces one no-tools final reference request when the tool-round cap is reached", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) => createTestReferenceTool(name)),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		let finalRoundTools: unknown;
+		refA.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "one.ts" }, { id: "t1" }), {
+				stopReason: "toolUse",
+			}),
+			(context) => {
+				finalRoundTools = context.tools;
+				return fauxAssistantMessage("forced final advice");
+			},
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+					referenceToolRounds: 1,
+				}),
+			),
+		).result();
+
+		expect(finalRoundTools).toBeUndefined();
+		expect(thinkingFromResult(result)).toContain("forced final advice");
+		expect(refA.state.callCount).toBe(2);
+	});
+
+	it("applies the reference character budget only to final agentic advice", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) => createTestReferenceTool(name)),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxText(`TOOL-COMMENTARY-${"x".repeat(500)}-TOOL-TAIL`),
+					fauxToolCall("read", { path: "one.ts" }, { id: "t1" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(`FINAL-${"y".repeat(500)}-FINAL-TAIL`),
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+					referenceToolRounds: 3,
+					maxReferenceOutputChars: 120,
+				}),
+			),
+		).result();
+
+		const references = thinkingFromResult(result);
+		expect(refA.state.callCount).toBe(2);
+		expect(references).toContain("FINAL-");
+		expect(references).not.toContain("FINAL-TAIL");
+		expect(references).not.toContain("TOOL-COMMENTARY");
+	});
+
+	it("fails an agentic reference gracefully when referenceTimeoutMs fires mid-model round", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) => createTestReferenceTool(name)),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([() => new Promise<never>(() => {})]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+					referenceTimeoutMs: 30,
+				}),
+			),
+		).result();
+
+		const references = thinkingFromResult(result);
+		expect(textFromResult(result)).toContain("final answer");
+		expect(references).toContain("ref-a/a (failed)");
+		expect(references).toContain("referenceTimeoutMs");
+	});
+
+	it("fails an agentic reference gracefully when referenceTimeoutMs aborts tool execution", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) =>
+				createTestReferenceTool(name, async (_toolCallId, _params, signal) => {
+					await new Promise<never>((_resolve, reject) => {
+						if (signal?.aborted) {
+							reject(new Error("slow tool aborted"));
+							return;
+						}
+						signal?.addEventListener(
+							"abort",
+							() => setTimeout(() => reject(new Error("slow tool aborted")), 0),
+							{ once: true },
+						);
+					});
+					return { content: [] };
+				}),
+			),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "slow.ts" }, { id: "t1" }), {
+				stopReason: "toolUse",
+			}),
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+					referenceTimeoutMs: 50,
+				}),
+			),
+		).result();
+
+		const references = thinkingFromResult(result);
+		expect(textFromResult(result)).toContain("final answer");
+		expect(references).toContain("ref-a/a (failed)");
+		expect(references).toContain("referenceTimeoutMs");
+	});
+
+	it("drops an in-flight agentic reference when referenceQuorum aborts the loop", async () => {
+		let slowToolStarted!: () => void;
+		const slowToolStart = new Promise<void>((resolve) => {
+			slowToolStarted = resolve;
+		});
+		let slowToolAborted = false;
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) =>
+				createTestReferenceTool(name, async (_toolCallId, _params, signal) => {
+					slowToolStarted();
+					await new Promise<never>((_resolve, reject) => {
+						if (signal?.aborted) {
+							slowToolAborted = true;
+							reject(new Error("slow tool aborted"));
+							return;
+						}
+						signal?.addEventListener(
+							"abort",
+							() => {
+								slowToolAborted = true;
+								reject(new Error("slow tool aborted"));
+							},
+							{ once: true },
+						);
+					});
+					return { content: [] };
+				}),
+			),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const refB = registerFaux("ref-b", "b");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([
+			async () => {
+				await slowToolStart;
+				return fauxAssistantMessage("advice A");
+			},
+		]);
+		refB.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "slow.ts" }, { id: "t1" }), {
+				stopReason: "toolUse",
+			}),
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+
+		const result = await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			createRegistry([
+				{ model: refA.getModel("a")! },
+				{ model: refB.getModel("b")! },
+				{ model: agg.getModel("main")! },
+			]),
+			baseConfig(
+				basePreset({
+					referenceQuorum: 1,
+					referenceTools: ["read"],
+				}),
+			),
+		).result();
+
+		expect(textFromResult(result)).toContain("final answer");
+		const references = thinkingFromResult(result);
+		expect(references).toContain("ref-a/a");
+		expect(references).toContain("advice A");
+		expect(references).not.toContain("ref-b/b");
+		expect(references).not.toContain("(failed)");
+		expect(slowToolAborted).toBe(true);
+	});
+
 	it("strips stale guidance before reference and aggregator contexts are built", async () => {
 		const refA = registerFaux("ref-a", "a");
 		const refB = registerFaux("ref-b", "b");
@@ -3340,6 +3700,63 @@ describe("MoA telemetry", () => {
 		expect(typeof record.aggregator.doneMs).toBe("number");
 		expect(record.aggregator.usage).toBeDefined();
 		expect(typeof record.totalMs).toBe("number");
+	});
+
+	it("records agentic reference rounds, tool-call metadata, and round usage without text", async () => {
+		__setReferenceToolFactoryForTests((names) =>
+			names.map((name) => createTestReferenceTool(name)),
+		);
+		const refA = registerFaux("ref-a", "a");
+		const agg = registerFaux("agg", "main");
+		refA.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "secret.ts" }, { id: "t1" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("FINAL_AGENTIC_ADVICE"),
+		]);
+		agg.setResponses([fauxAssistantMessage("final answer")]);
+		const registry = createRegistry([
+			{ model: refA.getModel("a")! },
+			{ model: agg.getModel("main")! },
+		]);
+		const telemetryPath = join(
+			mkdtempSync(join(tmpdir(), "moa-telemetry-")),
+			"timings.jsonl",
+		);
+		const config: MoAConfig = {
+			...baseConfig(
+				basePreset({
+					referenceModels: [{ provider: "ref-a", model: "a" }],
+					referenceTools: ["read"],
+				}),
+			),
+			telemetryPath,
+		};
+		await streamMoA(
+			makeSyntheticMoAModel(agg.getModel("main")!),
+			{ messages: [{ role: "user", content: "question", timestamp: 1 }] },
+			undefined,
+			registry,
+			config,
+		).result();
+
+		const recordText = await waitForLine(telemetryPath);
+		const record = JSON.parse(recordText);
+		expect(record.references[0].rounds).toBe(2);
+		expect(record.references[0].toolCalls).toEqual([
+			{ round: 1, name: "read", isError: false },
+		]);
+		expect(record.references[0].roundUsage).toHaveLength(2);
+		expect(record.references[0].roundUsage[0]).toMatchObject({
+			round: 1,
+			input: expect.any(Number),
+			output: expect.any(Number),
+			cacheRead: expect.any(Number),
+			cacheWrite: expect.any(Number),
+			costUsd: expect.any(Number),
+		});
+		expect(recordText).not.toContain("FINAL_AGENTIC_ADVICE");
+		expect(recordText).not.toContain("secret.ts");
 	});
 
 	it("records a quorum-cancelled reference as aborted, not error", async () => {
