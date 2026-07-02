@@ -44,6 +44,29 @@ Minimal config:
 
 Each enabled preset appears as a synthetic model, for example `moa/default`.
 
+A higher-latency `smart` preset can give fast advisors a private read-only
+investigation phase before they advise:
+
+```json
+{
+  "defaultPreset": "smart",
+  "presets": {
+    "smart": {
+      "enabled": true,
+      "referenceModels": [
+        { "provider": "openrouter", "model": "z-ai/glm-5.2:nitro" },
+        { "provider": "openrouter", "model": "anthropic/claude-haiku-4.5" }
+      ],
+      "aggregator": { "provider": "openrouter", "model": "anthropic/claude-haiku-4.5" },
+      "referenceTools": ["read", "grep", "find", "ls"],
+      "referenceToolRounds": 3,
+      "referenceCadence": "user-turn",
+      "referenceTimeoutMs": 120000
+    }
+  }
+}
+```
+
 ### Tuning reference latency
 
 Reference outputs are truncated to `maxReferenceOutputChars` before they reach the
@@ -163,6 +186,46 @@ reference settles). `referenceMaxRetries` bounds that backoff:
   exactly as before), and is forwarded to providers that support client-side retries (the
   default `openrouter` fleet) and ignored by those that don't. Set it (e.g. `0` or `1`) to
   trade a little reference resilience for a bounded worst-case turn.
+
+The knobs above all reduce or bound reference-phase cost. Sometimes the quality gap points
+the other way: references can only advise on what is in front of them, so an advisor that
+never reads the relevant file can only reason from the acting agent's transcript. Read-only
+reference tools let an advisor verify claims and explore beyond what the acting agent
+happened to read, trading reference-phase latency for better advice — the inverse trade of
+the other reference knobs:
+
+- `referenceTools` attaches read-only tools to each reference and runs a bounded private
+  investigation loop before the final advice is handed to the aggregator. It accepts a
+  non-empty array of unique tool names from `"read"`, `"grep"`, `"find"`, and `"ls"`, and uses
+  the same pi-coding-agent tool implementations as the acting agent. Those tools have the
+  same read scope as the acting agent's own tools: read-only access is the security line, not
+  path confinement. It is **unset by default** — presets that omit it make the same single
+  no-tools reference request as before, byte-for-byte.
+
+- `referenceToolRounds` caps the tool-use loop. It is an integer `>= 1`, defaults to `3` when
+  `referenceTools` is set, and is invalid without `referenceTools`. While the model stops to
+  request tools and rounds remain, MoA executes those tools privately and continues the
+  reference with its growing context. At the cap, MoA appends the last tool results and makes
+  exactly one final request with tools withheld so the reference must produce advice. If that
+  final no-tools request still produces no text, the reference fails gracefully (or fails the
+  turn when `failOnReferenceError` is set), just like other reference failures.
+
+Agentic references compose with the existing bounds role-by-role: `maxReferenceOutputChars`
+budgets only the **final advice text**, not earlier tool-use commentary; `referenceMaxTokens`
+applies to each model round; `referenceTimeoutMs` spans the whole loop, including tool
+execution, and keeps advice only if final advice text has already started; `referenceQuorum`
+drops in-flight loops cleanly once enough references have succeeded; and
+`referenceCacheRetention` applies to every round, where the reference's append-only private
+context gives caching providers a stable growing prefix. With `streamReferences`, the header
+still appears immediately, but tool activity is never revealed and an agentic reference's
+advice appears only when that reference settles; the accumulated thinking block stays
+byte-identical to the buffered output. Telemetry adds per-reference `rounds`, `toolCalls`, and
+`roundUsage` metadata for these loops, still never prompt text, advice text, tool arguments,
+paths, or search patterns.
+
+Strongly pair agentic references with `referenceCadence: "user-turn"`. Multi-round
+investigation on every tool-loop turn multiplies latency quickly, while user-turn boundaries
+are where strategic advice usually changes.
 
 ### Aggregator prompt-cache reuse across tool loops
 
@@ -356,7 +419,8 @@ wall-clock went:
 - per reference: request start, response headers, first token, settle time, stop cause
   (`stop` / `length` / `error` / `aborted` — `aborted` marks our own cancellation, e.g.
   a reference superseded by a reached `referenceQuorum`, so `error` always means a
-  genuine upstream failure), kept chars, and token usage + cost;
+  genuine upstream failure), kept chars, token usage + cost, and agentic loop
+  `rounds` / `toolCalls` / `roundUsage` metadata when enabled;
 - the pre-warm's start/settle times and how long the real request actually blocked on it;
 - the aggregator: request start, headers, first token, done, guidance placement used,
   whether the trailing-placement fallback fired, and usage + cost;

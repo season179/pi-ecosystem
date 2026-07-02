@@ -1,5 +1,7 @@
 # Agentic References Design Spike
 
+Status: implemented on branch `feat/moa-smart` in commit `461fe2f`; [README.md](./README.md) is now the user-facing documentation.
+
 This note covers the future `moa/smart` preset: reference models may run read-only tools in a bounded private loop before returning their final advice to the aggregator. The current package behavior must stay byte-identical when the new knobs are unset.
 
 ## Recommendation
