@@ -21,7 +21,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export type BuddySource = "tool" | "command" | "watchdog";
-export type BuddyOutcome = "ok" | "pass" | "concern" | "error";
+export type BuddyOutcome = "ok" | "pass" | "concern" | "error" | "discarded";
+/** Which automatic path launched a watchdog consultation. */
+export type BuddyTrigger = "turns" | "run_end";
 
 export interface BuddyTelemetryRecord {
 	v: 1;
@@ -32,6 +34,10 @@ export interface BuddyTelemetryRecord {
 	outcome: BuddyOutcome;
 	model: string;
 	totalMs: number;
+	/** For watchdog records: which automatic path launched it. */
+	trigger?: BuddyTrigger;
+	/** Turns the agent completed between launch and verdict (staleness). */
+	turnsElapsed?: number;
 	/** Tool-loop rounds the buddy used (absent on error). */
 	rounds?: number;
 	/** Number of read-only tool calls the buddy made. */

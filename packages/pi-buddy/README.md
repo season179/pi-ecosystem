@@ -3,8 +3,10 @@
 Gives [pi](https://github.com/badlogic/pi-mono) a sparring partner: a separate
 model that discusses, debates, pushes back, and fact-checks — like a candid
 senior colleague. The buddy sees the full session transcript and has
-**read-only** repository access (`read`, `grep`, `find`, `ls`). It can verify
-claims against actual files but can never write.
+**read-only** access to the repository (`read`, `grep`, `find`, `ls`) and the
+web (`lookup_docs` via DeepWiki, `read_webpage` via agent-browser). It can
+verify claims against actual files and current documentation — beyond both
+models' knowledge cutoffs — but it can never write, click, or act.
 
 ## How it works
 
@@ -19,10 +21,23 @@ claims against actual files but can never write.
 
 **Human pull** — `/buddy <question>` asks the buddy directly.
 
-**Push (watchdog)** — if the agent works 3 turns without consulting the buddy,
-the buddy quietly reviews recent work. If it finds nothing, it replies `PASS`
-and nothing happens (no noise). If it finds a real problem, the concern is
-injected as a steering message the agent must address — you see it too.
+**Push (detached watchdog)** — if the agent works 3 turns without consulting
+the buddy, the buddy investigates **in the background while the agent keeps
+working** — like a colleague who checks his suspicion before interrupting.
+`PASS` verdicts are suppressed (no noise). Real concerns are steered in when
+the verdict lands, with staleness framing ("this reflects ~N turns ago"); if
+the run already ended, the concern is queued for your next prompt — the agent
+is never auto-woken.
+
+**End-of-run review** — runs of ≥ 2 turns that never consulted the buddy get
+a quiet background review at completion (same PASS-suppression). Together
+with the watchdog and the agent's own pulls, you should rarely need `/buddy`.
+
+**Web fact-checking** — the buddy prefers evidence in this order: repository
+first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage`
+third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in
+an isolated `pi-buddy` browser session — no click, fill, type, or eval.
+Fetched web content is treated as data to evaluate, never instructions.
 
 **Memory** — the buddy is stateless per call, but because it receives the full
 transcript (including its own past consultations), it has continuity: "I
@@ -38,8 +53,11 @@ flagged this two turns ago."
 Each consultation appends one JSONL record to
 `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort, never breaks a
 consultation): source (`tool`/`command`/`watchdog`), stance, outcome
-(`ok`/`pass`/`concern`/`error`), rounds, tool-call count, transcript size,
-answer length, and duration.
+(`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
+watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
+count, transcript size, answer length, and duration. `discarded` means a
+background verdict was dropped because the session shut down or was replaced
+mid-investigation — expected in print mode, rare interactively.
 
 Health signals to watch:
 

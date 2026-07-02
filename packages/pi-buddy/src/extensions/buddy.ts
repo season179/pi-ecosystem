@@ -3,12 +3,17 @@
  *
  * - `consult_buddy` tool: the main agent pulls the buddy in for discussion,
  *   debate, fact-checking, or review. The buddy sees the full session
- *   transcript and has read-only tools (read/grep/find/ls) to verify claims.
+ *   transcript, has read-only repo tools (read/grep/find/ls), and read-only
+ *   web tools (lookup_docs via deepwiki, read_webpage via agent-browser) to
+ *   verify claims beyond both models' knowledge cutoffs.
  * - `/buddy <question>` command: the human summons the buddy directly.
- * - Watchdog push: if 3 turns elapse in an agent run without a consultation,
- *   the buddy quietly reviews recent work. It replies PASS (suppressed, no
- *   noise) or raises a concern, injected as a steering message the agent
- *   must address.
+ * - Detached watchdog: if 3 turns elapse in a run without a consultation, the
+ *   buddy investigates IN THE BACKGROUND while the agent keeps working — like
+ *   a colleague who checks his suspicion before interrupting. PASS verdicts
+ *   are suppressed; real concerns are steered in when they land (or queued
+ *   for the next turn if the run already ended — never auto-waking the agent).
+ * - End-of-run review: runs of >= 2 turns that never consulted the buddy get
+ *   a quiet background review at completion, same PASS-suppression.
  *
  * Buddy model defaults to zai/glm-5.2 (override with --buddy-model).
  * Stateless by design: continuity comes from the transcript itself.
@@ -22,12 +27,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
+import type { BuddyTool } from "./buddy-tools.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
-import {
-	type BuddyOutcome,
-	type BuddySource,
-	recordConsultation,
-} from "./telemetry.js";
+import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
 import {
 	buildStanceSystemPrompt,
 	buildWatchdogSystemPrompt,
@@ -35,17 +37,34 @@ import {
 	type Stance,
 	STANCES,
 } from "./stances.js";
+import {
+	type BuddyOutcome,
+	type BuddySource,
+	type BuddyTrigger,
+	recordConsultation,
+} from "./telemetry.js";
+import { closeBuddyBrowser, createWebTools, type ExecFn } from "./web-tools.js";
 
 const DEFAULT_BUDDY_MODEL = "zai/glm-5.2";
 const WATCHDOG_TURN_THRESHOLD = 3;
+const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
 const STATUS_KEY = "buddy";
+const BG_STATUS_KEY = "buddy-bg";
 
 export default function setup(pi: ExtensionAPI): void {
-	// --- Watchdog state (per agent run) ---
-	let turnsSinceConsult = 0;
-	let agentRunActive = false;
-	let watchdogInFlight = false;
+	const tracker = new BuddyRunTracker(
+		WATCHDOG_TURN_THRESHOLD,
+		RUN_END_REVIEW_MIN_TURNS,
+	);
+	let backgroundAbort: AbortController | undefined;
+	let browserUsed = false;
+
+	const execFn: ExecFn = async (command, args, options) => {
+		browserUsed = true;
+		return pi.exec(command, args, options);
+	};
+	const webTools: BuddyTool[] = createWebTools(execFn);
 
 	pi.registerFlag("buddy-model", {
 		description: `Buddy model as provider/id (default: ${DEFAULT_BUDDY_MODEL})`,
@@ -76,14 +95,21 @@ export default function setup(pi: ExtensionAPI): void {
 		requestText: string;
 		source: BuddySource;
 		stance: string;
+		/** Foreground consultations use ctx.signal; detached ones pass their own. */
+		signal?: AbortSignal;
+		statusKey?: string;
+		trigger?: BuddyTrigger;
 		/** Maps a successful answer to a telemetry outcome (watchdog: pass/concern). */
 		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
+		/** Extra telemetry computed at record time (e.g. verdict staleness). */
+		extraTelemetry?: () => { turnsElapsed?: number };
 		onActivity?: (line: string) => void;
 	}): Promise<ConsultResult> {
 		const model = resolveBuddyModel(args.ctx);
 		const modelSpec = `${model.provider}/${model.id}`;
+		const statusKey = args.statusKey ?? STATUS_KEY;
 		const startedAt = Date.now();
-		args.ctx.ui.setStatus(STATUS_KEY, "buddy: consulting...");
+		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
 		try {
 			const result = await consultBuddy({
 				requestText: args.requestText,
@@ -92,9 +118,10 @@ export default function setup(pi: ExtensionAPI): void {
 				cwd: args.ctx.cwd,
 				model,
 				registry: args.ctx.modelRegistry,
-				signal: args.ctx.signal,
+				signal: args.signal ?? args.ctx.signal,
+				extraTools: webTools,
 				onActivity: (line) => {
-					args.ctx.ui.setStatus(STATUS_KEY, `buddy: ${line}`);
+					args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
 					args.onActivity?.(line);
 				},
 			});
@@ -104,6 +131,8 @@ export default function setup(pi: ExtensionAPI): void {
 				outcome: args.outcomeOf?.(result) ?? "ok",
 				model: modelSpec,
 				totalMs: Date.now() - startedAt,
+				trigger: args.trigger,
+				...args.extraTelemetry?.(),
 				rounds: result.rounds,
 				toolCalls: result.activity.length,
 				transcriptTokens: result.transcriptTokens,
@@ -114,15 +143,104 @@ export default function setup(pi: ExtensionAPI): void {
 			await recordConsultation({
 				source: args.source,
 				stance: args.stance,
-				outcome: "error",
+				// Aborted background reviews (session shutdown/switch) are not failures.
+				outcome: args.signal?.aborted ? "discarded" : "error",
 				model: modelSpec,
 				totalMs: Date.now() - startedAt,
+				trigger: args.trigger,
 				error: errorToString(error),
 			});
 			throw error;
 		} finally {
-			args.ctx.ui.setStatus(STATUS_KEY, undefined);
+			args.ctx.ui.setStatus(statusKey, undefined);
 		}
+	}
+
+	// --- Detached background review (watchdog + end-of-run) ---
+
+	function launchBackgroundReview(
+		trigger: BackgroundTrigger,
+		ctx: ExtensionContext,
+	): void {
+		const launch = tracker.launchBackground(trigger);
+		const controller = new AbortController();
+		backgroundAbort = controller;
+
+		const requestText =
+			trigger === "turns"
+				? `Automatic watchdog check-in: the agent has completed ` +
+					`${WATCHDOG_TURN_THRESHOLD} turns without consulting you. Review ` +
+					`the recent turns. Reply PASS if there is no real problem.`
+				: `Automatic end-of-run review: the agent has finished its run ` +
+					`without consulting you. Review the work of this run. Reply PASS ` +
+					`if there is no real problem.`;
+
+		// Fire-and-forget: the agent keeps working while the buddy investigates.
+		void (async () => {
+			try {
+				const result = await runConsultation({
+					ctx,
+					systemPrompt: buildWatchdogSystemPrompt(),
+					requestText,
+					source: "watchdog",
+					stance: "watchdog",
+					signal: controller.signal,
+					statusKey: BG_STATUS_KEY,
+					trigger,
+					outcomeOf: (r) =>
+						!tracker.isCurrent(launch)
+							? "discarded"
+							: isWatchdogPass(r.answer)
+								? "pass"
+								: "concern",
+					extraTelemetry: () => ({
+						turnsElapsed: tracker.turnsElapsedSince(launch),
+					}),
+				});
+				// Session was replaced/forked while we investigated: drop the verdict.
+				if (!tracker.isCurrent(launch)) return;
+				if (isWatchdogPass(result.answer)) return;
+				const staleness = tracker.turnsElapsedSince(launch);
+				const framing =
+					staleness > 0
+						? `Your buddy reviewed the work in the background and raised a ` +
+							`concern. It reflects the state as of ~${staleness} turn(s) ago — ` +
+							`if you have since addressed it, say so briefly and continue. ` +
+							`Otherwise address it (fix, rebut with evidence, or ` +
+							`consult_buddy to discuss):`
+						: `Your buddy reviewed the recent work and raised a concern. ` +
+							`Address it (fix, rebut with evidence, or consult_buddy to ` +
+							`discuss) before continuing:`;
+				pi.sendMessage(
+					{
+						customType: BUDDY_REVIEW_TYPE,
+						content: `${framing}\n\n${result.answer}`,
+						display: true,
+						details: {
+							activity: result.activity,
+							source: "watchdog",
+							trigger,
+							turnsElapsed: staleness,
+						},
+					},
+					// Steer mid-run; queue for the next prompt when idle. Never
+					// auto-wake the agent (no triggerTurn) — nobody holds the leash.
+					{ deliverAs: tracker.deliveryMode() },
+				);
+			} catch (error) {
+				// Background review is best-effort: never surface as a failure,
+				// telemetry already recorded it. Notify only if the session is live.
+				if (tracker.isCurrent(launch) && !controller.signal.aborted) {
+					ctx.ui.notify(
+						`Buddy background review failed: ${errorToString(error)}`,
+						"warning",
+					);
+				}
+			} finally {
+				tracker.settleBackground();
+				if (backgroundAbort === controller) backgroundAbort = undefined;
+			}
+		})();
 	}
 
 	// --- The consult_buddy tool (pull) ---
@@ -132,17 +250,19 @@ export default function setup(pi: ExtensionAPI): void {
 		label: "Consult Buddy",
 		description:
 			"Consult your sparring partner (a separate model with read-only access " +
-			"to this repository and the full conversation transcript). Stances: " +
-			"'discuss' explores tradeoffs and alternatives; 'debate' steelmans the " +
-			"case AGAINST your proposal; 'fact_check' verifies claims against the " +
-			"actual files; 'review' checks recent work for correctness and missed " +
-			"requirements. The buddy is candid and will push back — treat its " +
-			"concerns seriously, but you remain responsible for the final decision.",
+			"to this repository, the web, and the full conversation transcript). " +
+			"Stances: 'discuss' explores tradeoffs and alternatives; 'debate' " +
+			"steelmans the case AGAINST your proposal; 'fact_check' verifies claims " +
+			"against actual files, library docs, and the web (useful past your " +
+			"knowledge cutoff); 'review' checks recent work for correctness and " +
+			"missed requirements. The buddy is candid and will push back — treat " +
+			"its concerns seriously, but you remain responsible for the final " +
+			"decision.",
 		promptSnippet:
 			"Consult a candid sparring partner to discuss, debate, fact-check, or review",
 		promptGuidelines: [
 			"Use consult_buddy (stance 'debate' or 'discuss') before committing to a significant design or architectural decision.",
-			"Use consult_buddy (stance 'fact_check') when making claims about the codebase you have not directly verified this session.",
+			"Use consult_buddy (stance 'fact_check') when making claims about the codebase, or about library APIs/versions/best practices, that you have not directly verified this session — the buddy can check current docs and the web beyond your knowledge cutoff.",
 			"Use consult_buddy (stance 'review') after completing a substantial piece of work and before declaring it done.",
 		],
 		parameters: Type.Object({
@@ -156,7 +276,7 @@ export default function setup(pi: ExtensionAPI): void {
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
-			turnsSinceConsult = 0; // pull resets the watchdog counter
+			tracker.onPull();
 			const stance = params.stance as Stance;
 			const activity: string[] = [];
 			const result = await runConsultation({
@@ -240,7 +360,7 @@ export default function setup(pi: ExtensionAPI): void {
 					"";
 			}
 			if (!question) return;
-			turnsSinceConsult = 0;
+			tracker.onPull();
 			try {
 				const result = await runConsultation({
 					ctx,
@@ -265,58 +385,33 @@ export default function setup(pi: ExtensionAPI): void {
 		},
 	});
 
-	// --- Watchdog (push) ---
+	// --- Automatic triggers ---
 
 	pi.on("agent_start", async () => {
-		agentRunActive = true;
-		turnsSinceConsult = 0;
-	});
-
-	pi.on("agent_end", async () => {
-		agentRunActive = false;
-		turnsSinceConsult = 0;
+		tracker.onAgentStart();
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
-		if (!agentRunActive || watchdogInFlight) return;
-		turnsSinceConsult += 1;
-		if (turnsSinceConsult < WATCHDOG_TURN_THRESHOLD) return;
+		if (tracker.onTurnEnd()) {
+			launchBackgroundReview("turns", ctx);
+		}
+	});
 
-		turnsSinceConsult = 0; // reset on push (fired or PASS)
-		watchdogInFlight = true;
-		try {
-			const result = await runConsultation({
-				ctx,
-				systemPrompt: buildWatchdogSystemPrompt(),
-				requestText:
-					`Automatic watchdog check-in: the agent has completed ` +
-					`${WATCHDOG_TURN_THRESHOLD} turns without consulting you. Review ` +
-					`the recent turns. Reply PASS if there is no real problem.`,
-				source: "watchdog",
-				stance: "watchdog",
-				outcomeOf: (r) => (isWatchdogPass(r.answer) ? "pass" : "concern"),
-			});
-			if (isWatchdogPass(result.answer)) return;
-			pi.sendMessage(
-				{
-					customType: BUDDY_REVIEW_TYPE,
-					content:
-						"Your buddy reviewed the recent work and raised a concern. " +
-						"Address it (fix, rebut with evidence, or consult_buddy to " +
-						`discuss) before continuing:\n\n${result.answer}`,
-					display: true,
-					details: { activity: result.activity, source: "watchdog" },
-				},
-				{ deliverAs: "steer" },
+	pi.on("agent_end", async (_event, ctx) => {
+		if (tracker.onAgentEnd()) {
+			launchBackgroundReview("run_end", ctx);
+		}
+	});
+
+	pi.on("session_shutdown", async () => {
+		tracker.invalidate();
+		backgroundAbort?.abort();
+		backgroundAbort = undefined;
+		if (browserUsed) {
+			await closeBuddyBrowser((command, args, options) =>
+				pi.exec(command, args, options),
 			);
-		} catch (error) {
-			// Watchdog is best-effort: never let it break the agent run.
-			ctx.ui.notify(
-				`Buddy watchdog failed: ${errorToString(error)}`,
-				"warning",
-			);
-		} finally {
-			watchdogInFlight = false;
+			browserUsed = false;
 		}
 	});
 

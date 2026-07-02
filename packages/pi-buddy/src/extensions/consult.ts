@@ -53,6 +53,8 @@ export interface ConsultRequest {
 	model: Model<Api>;
 	registry: ModelRegistry;
 	signal?: AbortSignal;
+	/** Additional read-only tools (e.g. web tools) beyond read/grep/find/ls. */
+	extraTools?: readonly BuddyTool[];
 	onActivity?: (line: string) => void;
 }
 
@@ -99,7 +101,10 @@ export async function consultBuddy(
 		timestamp: Date.now(),
 	};
 
-	const tools = createBuddyTools(request.cwd);
+	const tools = [
+		...createBuddyTools(request.cwd),
+		...(request.extraTools ?? []),
+	];
 	const options: SimpleStreamOptions = {
 		apiKey: auth.apiKey,
 		headers: auth.headers,

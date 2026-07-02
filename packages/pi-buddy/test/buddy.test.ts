@@ -27,6 +27,15 @@ import {
 	recordConsultation,
 	telemetryPath,
 } from "../src/extensions/telemetry.js";
+import { BuddyRunTracker } from "../src/extensions/policy.js";
+import {
+	BUDDY_BROWSER_SESSION,
+	createWebTools,
+	extractDeepwikiText,
+	type ExecFn,
+	parseDeepwikiBody,
+	truncateHead,
+} from "../src/extensions/web-tools.js";
 
 function messageEntry(message: unknown, id = "e1"): any {
 	return {
@@ -272,5 +281,185 @@ describe("isWatchdogPass", () => {
 		assert.equal(isWatchdogPass("PASS, but one concern: the API is misused"), false);
 		assert.equal(isWatchdogPass("The tests fail"), false);
 		assert.equal(isWatchdogPass(""), false);
+	});
+});
+
+describe("BuddyRunTracker", () => {
+	const mkTracker = () => new BuddyRunTracker(3, 2);
+
+	it("launches a watchdog after the threshold of unconsulted turns", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), true);
+	});
+
+	it("pull resets the counter", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		t.onPull();
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), true);
+	});
+
+	it("does not count turns outside an agent run", () => {
+		const t = mkTracker();
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		t.onAgentStart();
+		assert.equal(t.onTurnEnd(), false);
+	});
+
+	it("suppresses new launches while a background review is in flight", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		assert.equal(t.onTurnEnd(), true);
+		t.launchBackground("turns");
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		t.settleBackground();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		assert.equal(t.onTurnEnd(), true);
+	});
+
+	it("fires end-of-run review only for >= min turns with no consultation", () => {
+		// Long run, no consult: fires.
+		const a = mkTracker();
+		a.onAgentStart();
+		a.onTurnEnd();
+		a.onTurnEnd();
+		assert.equal(a.onAgentEnd(), true);
+		// Trivial 1-turn run: does not fire.
+		const b = mkTracker();
+		b.onAgentStart();
+		b.onTurnEnd();
+		assert.equal(b.onAgentEnd(), false);
+		// Consulted run: does not fire.
+		const c = mkTracker();
+		c.onAgentStart();
+		c.onTurnEnd();
+		c.onPull();
+		c.onTurnEnd();
+		assert.equal(c.onAgentEnd(), false);
+	});
+
+	it("a fired watchdog counts as consultation for run-end purposes", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		assert.equal(t.onTurnEnd(), true);
+		t.launchBackground("turns");
+		t.settleBackground();
+		assert.equal(t.onAgentEnd(), false);
+	});
+
+	it("delivery mode: steer during a run, nextTurn when idle", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		assert.equal(t.deliveryMode(), "steer");
+		t.onAgentEnd();
+		assert.equal(t.deliveryMode(), "nextTurn");
+	});
+
+	it("invalidate discards in-flight launches; staleness counts turns", () => {
+		const t = mkTracker();
+		t.onAgentStart();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		t.onTurnEnd();
+		const launch = t.launchBackground("turns");
+		assert.equal(t.isCurrent(launch), true);
+		assert.equal(t.turnsElapsedSince(launch), 0);
+		t.onTurnEnd();
+		t.onTurnEnd();
+		assert.equal(t.turnsElapsedSince(launch), 2);
+		t.invalidate();
+		assert.equal(t.isCurrent(launch), false);
+	});
+});
+
+describe("web tools", () => {
+	it("truncateHead caps output and marks the cut", () => {
+		const long = "a".repeat(60_000);
+		const out = truncateHead(long, 50_000);
+		assert.ok(out.length < 60_000);
+		assert.match(out, /output truncated at 50000 characters/);
+		assert.equal(truncateHead("short"), "short");
+	});
+
+	it("parses SSE-framed deepwiki responses", () => {
+		const body =
+			'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Answer here"}]}}\n';
+		assert.equal(extractDeepwikiText(parseDeepwikiBody(body)), "Answer here");
+	});
+
+	it("parses plain JSON deepwiki responses", () => {
+		const body = '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Plain"}]}}';
+		assert.equal(extractDeepwikiText(parseDeepwikiBody(body)), "Plain");
+	});
+
+	it("surfaces JSON-RPC and tool errors", () => {
+		assert.throws(
+			() => extractDeepwikiText(parseDeepwikiBody('{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad repo"}}')),
+			/bad repo/,
+		);
+		assert.throws(
+			() => extractDeepwikiText(parseDeepwikiBody('{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"repo not found"}]}}')),
+			/repo not found/,
+		);
+	});
+
+	it("read_webpage only ever invokes read verbs with the isolated session", async () => {
+		const invoked: string[][] = [];
+		const exec: ExecFn = async (_cmd, args) => {
+			invoked.push(args);
+			return { stdout: "page text", stderr: "", code: 0 };
+		};
+		const tools = createWebTools(exec);
+		const readWebpageTool = tools.find((t) => t.name === "read_webpage");
+		assert.ok(readWebpageTool);
+		await readWebpageTool.execute("t1", { url: "https://example.com" });
+		const verbs = invoked.map((args) => args[0]);
+		assert.deepEqual(verbs, ["open", "wait", "get"]);
+		const allowed = new Set(["open", "wait", "snapshot", "get"]);
+		for (const verb of verbs) assert.ok(allowed.has(verb), `forbidden verb: ${verb}`);
+		for (const args of invoked) {
+			const idx = args.indexOf("--session");
+			assert.ok(idx >= 0 && args[idx + 1] === BUDDY_BROWSER_SESSION);
+		}
+	});
+
+	it("read_webpage snapshot mode uses the snapshot verb", async () => {
+		const invoked: string[][] = [];
+		const exec: ExecFn = async (_cmd, args) => {
+			invoked.push(args);
+			return { stdout: "tree", stderr: "", code: 0 };
+		};
+		const tools = createWebTools(exec);
+		const tool = tools.find((t) => t.name === "read_webpage");
+		assert.ok(tool);
+		await tool.execute("t1", { url: "example.com", mode: "snapshot" });
+		assert.deepEqual(invoked.map((a) => a[0]), ["open", "wait", "snapshot"]);
+	});
+
+	it("read_webpage surfaces CLI failures", async () => {
+		const exec: ExecFn = async () => ({ stdout: "", stderr: "no browser", code: 1 });
+		const tools = createWebTools(exec);
+		const tool = tools.find((t) => t.name === "read_webpage");
+		assert.ok(tool);
+		await assert.rejects(
+			() => tool.execute("t1", { url: "example.com" }),
+			/no browser/,
+		);
 	});
 });

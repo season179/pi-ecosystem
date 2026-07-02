@@ -51,7 +51,11 @@ export function describeToolCall(toolCall: ToolCall): string {
 			? args.path
 			: typeof args.pattern === "string"
 				? args.pattern
-				: "";
+				: typeof args.url === "string"
+					? args.url
+					: typeof args.repo === "string"
+						? args.repo
+						: "";
 	return target ? `${toolCall.name} ${target}` : toolCall.name;
 }
 
@@ -67,7 +71,7 @@ export async function executeBuddyToolCall(
 	if (!tool) {
 		return buildToolError(
 			toolCall,
-			`Tool "${toolCall.name}" is not available. You have read-only access: ${BUDDY_TOOL_NAMES.join(", ")}.`,
+			`Tool "${toolCall.name}" is not available. You have read-only access: ${tools.map((t) => t.name).join(", ")}.`,
 		);
 	}
 	try {
