@@ -21,7 +21,9 @@ models' knowledge cutoffs — but it can never write, click, or act.
 | `review` | Quality review of recent work, ordered by severity |
 
 **BUDDY CONSULT (user-requested)** — `/buddy <question>` asks the buddy
-directly and injects the answer into the next turn for the agent to read.
+directly. When the agent is idle, the answer is rendered immediately without
+waking the agent. If it completes while the agent is still running, it is queued
+for the next user prompt so Buddy does not steer the active run.
 
 **BUDDY ADVISORY (auto, watchdog)** — if the agent works 3 turns without
 consulting the buddy, the buddy investigates **in the background while the

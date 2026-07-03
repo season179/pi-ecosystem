@@ -39,7 +39,11 @@ import {
 	type BuddyReviewDetails,
 } from "./message-format.js";
 import { deriveSlug, MemoryStore } from "./memory.js";
-import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
+import {
+	type BackgroundTrigger,
+	BuddyRunTracker,
+	commandConsultDelivery,
+} from "./policy.js";
 import {
 	delayWithAbort,
 	FOREGROUND_RETRY_ATTEMPTS,
@@ -605,15 +609,17 @@ export default function setup(pi: ExtensionAPI): void {
 					stance: "discuss",
 					harvest: true,
 				});
-				pi.sendMessage(
-					{
-						customType: BUDDY_REVIEW_TYPE,
-						content: formatBuddyConsult(result.answer),
-						display: true,
-						details: { activity: result.activity, source: "command" },
-					},
-					{ deliverAs: "nextTurn" },
-				);
+				const message = {
+					customType: BUDDY_REVIEW_TYPE,
+					content: formatBuddyConsult(result.answer),
+					display: true,
+					details: { activity: result.activity, source: "command" },
+				};
+				if (commandConsultDelivery(tracker.deliveryMode()) === "immediate") {
+					pi.sendMessage(message);
+				} else {
+					pi.sendMessage(message, { deliverAs: "nextTurn" });
+				}
 			} catch (error) {
 				ctx.ui.notify(`Buddy failed: ${errorToString(error)}`, "error");
 			}

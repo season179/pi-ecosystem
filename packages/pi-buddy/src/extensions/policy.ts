@@ -10,6 +10,23 @@
 
 export type BackgroundTrigger = "turns" | "run_end";
 export type DeliveryMode = "steer" | "nextTurn";
+export type CommandConsultDelivery = "immediate" | "nextTurn";
+
+/**
+ * User-requested `/buddy` answers should render immediately when the agent is
+ * idle, but should not steer an active agent run. Automatic reviews use
+ * DeliveryMode directly; the command path intentionally remaps idle `nextTurn`
+ * to immediate display/persistence.
+ *
+ * Known limitation: if the answer lands during an active run, we still queue it
+ * for `nextTurn` so it will not steer the agent. Pi does not currently expose a
+ * separate "render/persist now, inject later" path for streaming sessions.
+ */
+export function commandConsultDelivery(
+	mode: DeliveryMode,
+): CommandConsultDelivery {
+	return mode === "nextTurn" ? "immediate" : "nextTurn";
+}
 
 export interface BackgroundLaunch {
 	generation: number;

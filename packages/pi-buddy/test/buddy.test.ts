@@ -39,7 +39,10 @@ import {
 	recordConsultation,
 	telemetryPath,
 } from "../src/extensions/telemetry.js";
-import { BuddyRunTracker } from "../src/extensions/policy.js";
+import {
+	BuddyRunTracker,
+	commandConsultDelivery,
+} from "../src/extensions/policy.js";
 import {
 	BUDDY_BROWSER_SESSION,
 	createWebTools,
@@ -646,6 +649,11 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.deliveryMode(), "steer");
 		t.onAgentEnd();
 		assert.equal(t.deliveryMode(), "nextTurn");
+	});
+
+	it("user-requested /buddy renders immediately when idle without steering active runs", () => {
+		assert.equal(commandConsultDelivery("nextTurn"), "immediate");
+		assert.equal(commandConsultDelivery("steer"), "nextTurn");
 	});
 
 	it("invalidate discards in-flight launches; staleness counts turns", () => {
