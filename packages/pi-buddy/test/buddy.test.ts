@@ -66,6 +66,7 @@ import {
 	CONSULT_BUDDY_TOOL,
 	buddyDisabledFromFlag,
 	parseBuddyCommand,
+	seedBuddyEnabledFromFlag,
 } from "../src/extensions/switch.js";
 import {
 	deriveSlug,
@@ -415,6 +416,21 @@ describe("buddy switch helpers", () => {
 		assert.equal(buddyDisabledFromFlag(false), false);
 		assert.equal(buddyDisabledFromFlag(undefined), false);
 		assert.equal(buddyDisabledFromFlag("true"), false);
+	});
+
+	it("seeds buddy enabled from the CLI flag only once", () => {
+		assert.deepEqual(seedBuddyEnabledFromFlag(true, true, false), {
+			enabled: false,
+			seeded: true,
+		});
+		assert.deepEqual(seedBuddyEnabledFromFlag(false, false, true), {
+			enabled: false,
+			seeded: true,
+		});
+		assert.deepEqual(seedBuddyEnabledFromFlag(true, true, true), {
+			enabled: true,
+			seeded: true,
+		});
 	});
 
 	it("removes and restores consult_buddy in active tools", () => {

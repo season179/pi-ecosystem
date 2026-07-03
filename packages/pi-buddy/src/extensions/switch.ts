@@ -19,6 +19,15 @@ export function buddyDisabledFromFlag(value: unknown): boolean {
 	return value === true;
 }
 
+export function seedBuddyEnabledFromFlag(
+	currentEnabled: boolean,
+	flagValue: unknown,
+	alreadySeeded: boolean,
+): { enabled: boolean; seeded: boolean } {
+	if (alreadySeeded) return { enabled: currentEnabled, seeded: true };
+	return { enabled: !buddyDisabledFromFlag(flagValue), seeded: true };
+}
+
 export function activeToolsWithBuddyState(
 	activeTools: readonly string[],
 	enabled: boolean,

@@ -55,9 +55,9 @@ import {
 } from "./stances.js";
 import {
 	activeToolsWithBuddyState,
-	buddyDisabledFromFlag,
 	CONSULT_BUDDY_TOOL,
 	parseBuddyCommand,
+	seedBuddyEnabledFromFlag,
 } from "./switch.js";
 import {
 	type BuddyOutcome,
@@ -84,6 +84,7 @@ export default function setup(pi: ExtensionAPI): void {
 	let backgroundAbort: AbortController | undefined;
 	let browserUsed = false;
 	let buddyEnabled = true;
+	let buddySwitchSeeded = false;
 	let consultToolWasActiveWhenDisabled: boolean | undefined;
 	const memoryStore = new MemoryStore();
 	let memoryCuratedThisSession = false;
@@ -171,7 +172,13 @@ export default function setup(pi: ExtensionAPI): void {
 	function initializeBuddySwitch(): void {
 		const wasDisabled = !buddyEnabled;
 		const shouldRestoreTool = consultToolWasActiveWhenDisabled ?? false;
-		buddyEnabled = !buddyDisabledFromFlag(pi.getFlag("buddy-disabled"));
+		const seeded = seedBuddyEnabledFromFlag(
+			buddyEnabled,
+			buddySwitchSeeded ? undefined : pi.getFlag("buddy-disabled"),
+			buddySwitchSeeded,
+		);
+		buddyEnabled = seeded.enabled;
+		buddySwitchSeeded = seeded.seeded;
 		if (buddyEnabled) {
 			if (wasDisabled && shouldRestoreTool) {
 				applyBuddyToolState(true);
