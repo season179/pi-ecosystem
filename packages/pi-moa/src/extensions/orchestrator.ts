@@ -8,11 +8,13 @@ import {
 	type Model,
 	type OpenRouterRouting,
 	type SimpleStreamOptions,
-	streamSimple,
 	type ThinkingContent,
 	type ToolCall,
 	type ToolResultMessage,
 } from "@earendil-works/pi-ai";
+// streamSimple moved to the compat entrypoint in pi-ai 0.80.x; pi's runtime
+// aliases both specifiers to compat, so this is purely a type-resolution fix.
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
 	getMaxReferenceOutputChars,

@@ -26,7 +26,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 import type { BuddyTool } from "./buddy-tools.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
 import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
@@ -304,47 +304,53 @@ export default function setup(pi: ExtensionAPI): void {
 				},
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			const stance = typeof args.stance === "string" ? args.stance : "…";
 			const question =
 				typeof args.question === "string" ? args.question : "";
-			let text = theme.fg("toolTitle", theme.bold("buddy "));
-			text += theme.fg("accent", `[${stance}] `);
-			text += theme.fg("muted", question);
-			return new Text(text, 0, 0);
+			let content = theme.fg("toolTitle", theme.bold("buddy "));
+			content += theme.fg("accent", `[${stance}] `);
+			content += theme.fg("muted", question);
+			// Reuse the previous component instance per docs best practice.
+			const text =
+				(context?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(content);
+			return text;
 		},
-		renderResult(result, { expanded, isPartial }, theme) {
+		renderResult(result, { expanded, isPartial }, theme, context) {
+			const text =
+				(context?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const details = (result.details ?? {}) as {
 				activity?: string[];
 				rounds?: number;
 			};
 			if (isPartial) {
 				const last = details.activity?.at(-1);
-				return new Text(
+				text.setText(
 					theme.fg("warning", last ? `buddy: ${last}` : "buddy is thinking..."),
-					0,
-					0,
 				);
+				return text;
 			}
 			const answer = result.content
 				.filter((block) => block.type === "text")
 				.map((block) => (block as { text: string }).text)
 				.join("\n");
-			let text = answer;
+			let content = answer;
 			if (expanded && details.activity && details.activity.length > 0) {
-				text += "\n\n" + theme.fg("dim", "Buddy verified via:");
+				content += "\n\n" + theme.fg("dim", "Buddy verified via:");
 				for (const line of details.activity) {
-					text += "\n" + theme.fg("dim", `  ${line}`);
+					content += "\n" + theme.fg("dim", `  ${line}`);
 				}
 			} else if (details.activity && details.activity.length > 0) {
-				text +=
+				content +=
 					"\n" +
 					theme.fg(
 						"dim",
 						`(buddy ran ${details.activity.length} read-only lookup(s))`,
 					);
 			}
-			return new Text(text, 0, 0);
+			text.setText(content);
+			return text;
 		},
 	});
 
@@ -398,7 +404,12 @@ export default function setup(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (tracker.onAgentEnd()) {
+		const shouldReview = tracker.onAgentEnd();
+		// In print/json mode the process exits right after the run, so a
+		// run-end review would always be aborted mid-flight — telemetry showed
+		// only instant 'discarded' records. hasUI is false exactly in those
+		// modes; don't launch a doomed consultation there.
+		if (shouldReview && ctx.hasUI) {
 			launchBackgroundReview("run_end", ctx);
 		}
 	});
@@ -417,25 +428,37 @@ export default function setup(pi: ExtensionAPI): void {
 
 	// --- Rendering for pushed reviews ---
 
+	// Pushed buddy messages render as a visually distinct block: label header,
+	// an accent gutter bar on every line, and the custom-message background —
+	// so even a long concern cannot be mistaken for the agent's own prose.
 	pi.registerMessageRenderer(BUDDY_REVIEW_TYPE, (message, options, theme) => {
-		let text = theme.fg("accent", theme.bold("● buddy "));
-		text +=
+		const body =
 			typeof message.content === "string"
 				? message.content
 				: message.content
 						.filter((block) => block.type === "text")
 						.map((block) => (block as { text: string }).text)
 						.join("\n");
+		const lines: string[] = [
+			theme.fg("customMessageLabel", theme.bold("● buddy")),
+			...body.split("\n").map(
+				(line) =>
+					theme.fg("borderAccent", "▌ ") +
+					theme.fg("customMessageText", line),
+			),
+		];
 		if (options.expanded) {
 			const details = message.details as { activity?: string[] } | undefined;
 			if (details?.activity?.length) {
-				text += "\n" + theme.fg("dim", "Verified via:");
+				lines.push(theme.fg("dim", "Verified via:"));
 				for (const line of details.activity) {
-					text += "\n" + theme.fg("dim", `  ${line}`);
+					lines.push(theme.fg("dim", `  ${line}`));
 				}
 			}
 		}
-		return new Text(text, 0, 0);
+		const box = new Box(1, 0, (s) => theme.bg("customMessageBg", s));
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
 	});
 }
 

@@ -12,9 +12,11 @@ import {
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
-	streamSimple,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
+// streamSimple moved to the compat entrypoint in pi-ai 0.80.x; pi's runtime
+// aliases both specifiers to compat, so this is purely a type-resolution fix.
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ModelRegistry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	type BuddyTool,

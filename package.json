@@ -20,7 +20,9 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3",
     "@types/node": "^22.15.3",
     "typescript": "^5.9.2",
     "vitest": "^4.1.9"

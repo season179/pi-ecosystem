@@ -81,7 +81,10 @@ export function buildWatchdogSystemPrompt(): string {
 
 Stance: WATCHDOG REVIEW (automatic check-in).
 The agent has worked for several turns without consulting you. Review the
-recent turns of the transcript. You are looking for REAL problems only:
+recent turns of the transcript. On a long transcript, focus on the last few
+turns — earlier context matters only when it directly bears on a problem you
+spot; do not re-litigate old work that was already discussed or resolved.
+You are looking for REAL problems only:
 - heading in the wrong direction relative to the user's request,
 - factual or technical errors,
 - missed or misread requirements,
