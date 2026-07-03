@@ -177,6 +177,15 @@ escalation ladder in v1; the orchestrator taking over IS the escalation.
    exit code / `"error"` / `"aborted"`.
 2. **Tool + safety rails**: `registerTool` with brief schema, checkpoint,
    harness verify, result contract, timeouts.
+   ✅ Done 2026-07-03: `delegate` tool wired (src/git.ts checkpoint/changes,
+   src/brief.ts, src/result.ts, extension entry). End-to-end smoke
+   (`scripts/smoke-tool.mjs`) passed: dirty-tree auto-commit checkpoint →
+   glm-5.2 worker → harness verify → compact report. Two rails added beyond
+   the spec: (a) workers are spawned with `PI_DELEGATE_WORKER=1` and the tool
+   refuses to run when that marker is set — no recursive delegation (a smoke
+   harness bug fork-bombed ~1300 processes before this guard existed);
+   (b) `PI_DELEGATE_PI_COMMAND` env seam for driving the tool outside a real
+   pi process, where `getPiInvocation`'s argv[1] heuristic is invalid.
 3. **Steering + telemetry**: promptSnippet/promptGuidelines, JSONL
    telemetry, config loading.
 4. **Dogfood**: use it for a week on real tasks; judge with telemetry

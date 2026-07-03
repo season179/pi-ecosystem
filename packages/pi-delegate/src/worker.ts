@@ -195,6 +195,9 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 				cwd: options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				// Marker lets the delegate tool refuse to run inside a worker,
+				// preventing recursive delegation chains.
+				env: { ...process.env, PI_DELEGATE_WORKER: "1" },
 			});
 
 			const killProc = () => {
