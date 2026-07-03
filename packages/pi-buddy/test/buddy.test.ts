@@ -17,6 +17,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 import {
+	addUsage,
+	snapshotUsage,
+	usageTelemetry,
+} from "../src/extensions/consult.js";
+import {
 	branchToBlocks,
 	entryToBlock,
 	estimateTokens,
@@ -294,6 +299,89 @@ describe("buddy message formatting", () => {
 	});
 });
 
+describe("usage telemetry helpers", () => {
+	it("snapshots provider-reported usage and preserves zero cost", () => {
+		assert.deepEqual(
+			snapshotUsage({
+				input: 10,
+				output: 5,
+				cacheRead: 3,
+				cacheWrite: 2,
+				reasoning: 4,
+				totalTokens: 20,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			}),
+			{
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: 3,
+				cacheWriteTokens: 2,
+				reasoningTokens: 4,
+				totalTokens: 20,
+				costUsd: 0,
+			},
+		);
+	});
+
+	it("ignores malformed usage instead of throwing", () => {
+		assert.equal(snapshotUsage(undefined), undefined);
+		assert.equal(snapshotUsage({ cost: { total: 1 } }), undefined);
+		assert.deepEqual(snapshotUsage({ input: Number.NaN, output: 2 }), {
+			inputTokens: 0,
+			outputTokens: 2,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			reasoningTokens: undefined,
+			totalTokens: 2,
+			costUsd: 0,
+		});
+	});
+
+	it("keeps reasoning undefined when no round reports it", () => {
+		const first = snapshotUsage({ input: 1, output: 2, totalTokens: 3 });
+		const second = snapshotUsage({ input: 4, output: 5, totalTokens: 9 });
+		assert.ok(first);
+		assert.ok(second);
+		const aggregate = addUsage(addUsage(undefined, first), second);
+		assert.equal(aggregate.reasoningTokens, undefined);
+	});
+
+	it("aggregates cumulative usage and keeps final-round usage separate", () => {
+		const first = snapshotUsage({
+			input: 100,
+			output: 20,
+			cacheRead: 0,
+			cacheWrite: 0,
+			reasoning: 10,
+			totalTokens: 120,
+			cost: { total: 0.001 },
+		});
+		const second = snapshotUsage({
+			input: 150,
+			output: 30,
+			cacheRead: 5,
+			cacheWrite: 0,
+			reasoning: 15,
+			totalTokens: 185,
+			cost: { total: 0.002 },
+		});
+		assert.ok(first);
+		assert.ok(second);
+		const aggregate = addUsage(addUsage(undefined, first), second);
+		assert.deepEqual(usageTelemetry(aggregate, second), {
+			inputTokens: 250,
+			outputTokens: 50,
+			cacheReadTokens: 5,
+			cacheWriteTokens: 0,
+			reasoningTokens: 25,
+			totalTokens: 305,
+			costUsd: 0.003,
+			finalRoundInputTokens: 150,
+			finalRoundTotalTokens: 185,
+		});
+	});
+});
+
 describe("telemetry", () => {
 	afterEach(() => {
 		__setTelemetryPathForTests(undefined);
@@ -312,6 +400,12 @@ describe("telemetry", () => {
 			totalMs: 1234,
 			rounds: 2,
 			toolCalls: 3,
+			inputTokens: 100,
+			outputTokens: 25,
+			totalTokens: 125,
+			costUsd: 0,
+			finalRoundInputTokens: 100,
+			finalRoundTotalTokens: 125,
 		});
 		await recordConsultation({
 			source: "tool",
@@ -328,6 +422,10 @@ describe("telemetry", () => {
 		assert.equal(first.v, 1);
 		assert.equal(first.outcome, "pass");
 		assert.equal(first.toolCalls, 3);
+		assert.equal(first.inputTokens, 100);
+		assert.equal(first.totalTokens, 125);
+		assert.equal(first.costUsd, 0);
+		assert.equal(first.finalRoundTotalTokens, 125);
 		assert.ok(typeof first.ts === "string");
 		const second = JSON.parse(lines[1]);
 		assert.equal(second.outcome, "error");

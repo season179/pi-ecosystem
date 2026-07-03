@@ -236,6 +236,7 @@ export default function setup(pi: ExtensionAPI): void {
 				rounds: result.rounds,
 				toolCalls: result.activity.length,
 				transcriptTokens: result.transcriptTokens,
+				...result.usage,
 				answerChars: result.answer.length,
 				lessons: applied.lessons,
 				retractions: applied.retractions,
@@ -410,6 +411,7 @@ export default function setup(pi: ExtensionAPI): void {
 					activity: result.activity,
 					rounds: result.rounds,
 					transcriptTokens: result.transcriptTokens,
+					usage: result.usage,
 				},
 			};
 		},

@@ -13,6 +13,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 	type ToolCall,
+	type Usage,
 } from "@earendil-works/pi-ai";
 // streamSimple moved to the compat entrypoint in pi-ai 0.80.x; pi's runtime
 // aliases both specifiers to compat, so this is purely a type-resolution fix.
@@ -66,12 +67,45 @@ export interface ConsultRequest {
 	onActivity?: (line: string) => void;
 }
 
+export interface BuddyUsageTelemetry {
+	/** Provider-reported uncached input tokens, summed across model calls. */
+	inputTokens: number;
+	/** Provider-reported output tokens, summed across model calls. */
+	outputTokens: number;
+	/** Provider-reported cache-read input tokens, summed across model calls. */
+	cacheReadTokens: number;
+	/** Provider-reported cache-write input tokens, summed across model calls. */
+	cacheWriteTokens: number;
+	/** Provider-reported reasoning tokens, if the provider exposes them. */
+	reasoningTokens?: number;
+	/** Provider-reported total tokens, summed across model calls. */
+	totalTokens: number;
+	/** Provider-reported dollar cost, when pi-ai has pricing metadata. */
+	costUsd: number;
+	/** Provider-reported input tokens for the final model call only. */
+	finalRoundInputTokens: number;
+	/** Provider-reported total tokens for the final model call only. */
+	finalRoundTotalTokens: number;
+}
+
+export interface UsageSnapshot {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	reasoningTokens?: number;
+	totalTokens: number;
+	costUsd: number;
+}
+
 export interface ConsultResult {
 	answer: string;
 	/** One line per buddy tool call, e.g. "read src/foo.ts". */
 	activity: string[];
 	rounds: number;
 	transcriptTokens: number;
+	/** Best-effort provider-reported usage. Missing/malformed usage is ignored. */
+	usage?: BuddyUsageTelemetry;
 }
 
 export async function consultBuddy(
@@ -122,6 +156,8 @@ export async function consultBuddy(
 	const activity: string[] = [];
 	let messages: Message[] = [initialUserMessage];
 	let rounds = 0;
+	let cumulativeUsage: UsageSnapshot | undefined;
+	let finalRoundUsage: UsageSnapshot | undefined;
 
 	const baseSystemPrompt = request.memoryBlock
 		? `${request.systemPrompt}\n\n${request.memoryBlock}`
@@ -141,6 +177,11 @@ export async function consultBuddy(
 		}
 
 		const message = await streamToMessage(request.model, context, options);
+		const roundUsage = snapshotUsage(message.usage);
+		if (roundUsage) {
+			cumulativeUsage = addUsage(cumulativeUsage, roundUsage);
+			finalRoundUsage = roundUsage;
+		}
 		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			throw new Error(
 				message.errorMessage ?? `Buddy stopped with ${message.stopReason}`,
@@ -172,8 +213,76 @@ export async function consultBuddy(
 			activity,
 			rounds,
 			transcriptTokens: estimateTokens(transcript),
+			usage: usageTelemetry(cumulativeUsage, finalRoundUsage),
 		};
 	}
+}
+
+export function snapshotUsage(usage: unknown): UsageSnapshot | undefined {
+	if (typeof usage !== "object" || usage === null) return undefined;
+	const record = usage as Partial<Usage>;
+	const inputTokens = finiteNumber(record.input);
+	const outputTokens = finiteNumber(record.output);
+	const cacheReadTokens = finiteNumber(record.cacheRead);
+	const cacheWriteTokens = finiteNumber(record.cacheWrite);
+	const totalTokens = finiteNumber(record.totalTokens);
+	const hasAnyTokenField =
+		inputTokens !== undefined ||
+		outputTokens !== undefined ||
+		cacheReadTokens !== undefined ||
+		cacheWriteTokens !== undefined ||
+		totalTokens !== undefined;
+	if (!hasAnyTokenField) return undefined;
+	return {
+		inputTokens: inputTokens ?? 0,
+		outputTokens: outputTokens ?? 0,
+		cacheReadTokens: cacheReadTokens ?? 0,
+		cacheWriteTokens: cacheWriteTokens ?? 0,
+		reasoningTokens: finiteNumber(record.reasoning),
+		totalTokens:
+			totalTokens ??
+			(inputTokens ?? 0) +
+				(outputTokens ?? 0) +
+				(cacheReadTokens ?? 0) +
+				(cacheWriteTokens ?? 0),
+		costUsd: finiteNumber(record.cost?.total) ?? 0,
+	};
+}
+
+export function addUsage(
+	current: UsageSnapshot | undefined,
+	next: UsageSnapshot,
+): UsageSnapshot {
+	if (!current) return { ...next };
+	const reasoningTokens =
+		current.reasoningTokens === undefined && next.reasoningTokens === undefined
+			? undefined
+			: (current.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0);
+	return {
+		inputTokens: current.inputTokens + next.inputTokens,
+		outputTokens: current.outputTokens + next.outputTokens,
+		cacheReadTokens: current.cacheReadTokens + next.cacheReadTokens,
+		cacheWriteTokens: current.cacheWriteTokens + next.cacheWriteTokens,
+		reasoningTokens,
+		totalTokens: current.totalTokens + next.totalTokens,
+		costUsd: current.costUsd + next.costUsd,
+	};
+}
+
+export function usageTelemetry(
+	cumulative: UsageSnapshot | undefined,
+	finalRound: UsageSnapshot | undefined,
+): BuddyUsageTelemetry | undefined {
+	if (!cumulative || !finalRound) return undefined;
+	return {
+		...cumulative,
+		finalRoundInputTokens: finalRound.inputTokens,
+		finalRoundTotalTokens: finalRound.totalTokens,
+	};
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 async function streamToMessage(

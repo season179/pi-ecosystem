@@ -72,11 +72,27 @@ Each consultation appends one JSONL record to
 consultation): source (`tool`/`command`/`watchdog`), stance, outcome
 (`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
 watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
-count, transcript size, answer length, memory block size (`memoryChars`),
-retry metadata (`attempts`, `retried`), harvest counts (`lessons`,
-`retractions`, `retractMisses`), and duration.
+count, transcript size, provider-reported token usage, answer length, memory
+block size (`memoryChars`), retry metadata (`attempts`, `retried`), harvest
+counts (`lessons`, `retractions`, `retractMisses`), and duration.
 `discarded` means a background verdict was dropped because the session shut
 down or was replaced mid-investigation.
+
+Token telemetry has two layers:
+
+- `transcriptTokens` is a chars/4 heuristic for the rendered transcript only;
+  it is useful as a context-pressure estimate before provider formatting.
+- `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
+  `reasoningTokens`, `totalTokens`, and `costUsd` come from pi-ai's
+  provider-reported `AssistantMessage.usage`, summed across all Buddy model
+  calls in the consultation. `reasoningTokens` is a subset of `outputTokens`,
+  not an additive category. `finalRoundInputTokens` and
+  `finalRoundTotalTokens` report only the final model call, which is useful for
+  seeing how large the final tool-loop context became.
+
+`costUsd` depends on pi-ai model pricing metadata. The default
+`zai/glm-5.2` reports real token counts but currently has zero pricing metadata,
+so `costUsd: 0` is expected for that model.
 
 Health signals to watch:
 
@@ -87,6 +103,10 @@ Health signals to watch:
   agent is not consulting; strengthen `promptGuidelines`.
 - **toolCalls** — frequent `fact_check`/`review` with `toolCalls: 0` means the
   buddy is armchair-guessing instead of verifying.
+- **totalTokens / finalRoundTotalTokens** — provider-reported Buddy token use;
+  use this to spot expensive multi-round consults and large final contexts.
+- **costUsd** — only meaningful for models with nonzero pricing metadata; it is
+  expected to be `0` for the default `zai/glm-5.2` model.
 - **totalMs** — how much latency the buddy adds per consultation.
 - **outcome: error** — surfaces failures that would otherwise be invisible
   (especially silent watchdog failures).
@@ -98,6 +118,9 @@ Health signals to watch:
 ```bash
 # Quick look: outcomes by source
 jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
+
+# Recent provider-reported token usage
+jq -r '[.ts,.source,.outcome,(.totalTokens//"-"),(.finalRoundTotalTokens//"-"),(.costUsd//"-")] | @tsv' ~/.pi/agent/buddy-telemetry.jsonl | tail
 ```
 
 ## Development

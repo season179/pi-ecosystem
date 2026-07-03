@@ -762,3 +762,28 @@ npm run build --workspace @season179/pi-buddy
 - Human visibility is preserved (`display: true`).
 - PASS remains suppressed.
 - No runtime agent-facing surface uses ambiguous PUSH/PULL terminology.
+
+# Phase 5: Provider-Reported Buddy Usage Telemetry
+
+Status: IMPLEMENTED (2026-07-03).
+
+Buddy telemetry now records what pi-ai providers report on `AssistantMessage.usage`
+without changing Buddy behavior. Usage capture is best-effort and non-fatal:
+malformed or missing provider usage is ignored rather than breaking a
+consultation.
+
+Recorded fields:
+
+- `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
+  `reasoningTokens`, `totalTokens`, `costUsd`: cumulative provider-reported
+  usage across all Buddy model calls in one consultation. This reflects API
+  volume, including tool-loop rounds that resend growing context.
+  `reasoningTokens` is a subset of `outputTokens`, not an additive category.
+- `finalRoundInputTokens`, `finalRoundTotalTokens`: provider-reported usage for
+  the final model call only, useful for inspecting final context size.
+- `transcriptTokens` remains the existing chars/4 heuristic over the rendered
+  transcript only.
+
+Caveat: `costUsd` depends on pi-ai model pricing metadata. The default
+`zai/glm-5.2` reports real tokens but currently has zero pricing metadata, so
+`costUsd: 0` is expected.

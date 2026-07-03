@@ -4,8 +4,8 @@
  *
  * One line per consultation to ~/.pi/agent/buddy-telemetry.jsonl:
  * source (tool/command/watchdog), stance, outcome (ok/pass/concern/error),
- * rounds, tool activity count, transcript size, retry attempts, and
- * wall-clock duration.
+ * rounds, tool activity count, transcript size, provider-reported token usage,
+ * retry attempts, and wall-clock duration.
  *
  * This answers "is the buddy working well?":
  * - watchdog pass/concern ratio (too many concerns => noisy; all pass => useless)
@@ -45,6 +45,24 @@ export interface BuddyTelemetryRecord {
 	toolCalls?: number;
 	/** Estimated tokens of the transcript sent to the buddy. */
 	transcriptTokens?: number;
+	/** Provider-reported uncached input tokens, summed across model calls. */
+	inputTokens?: number;
+	/** Provider-reported output tokens, summed across model calls. */
+	outputTokens?: number;
+	/** Provider-reported cache-read input tokens, summed across model calls. */
+	cacheReadTokens?: number;
+	/** Provider-reported cache-write input tokens, summed across model calls. */
+	cacheWriteTokens?: number;
+	/** Provider-reported reasoning tokens, if the provider exposes them. */
+	reasoningTokens?: number;
+	/** Provider-reported total tokens, summed across model calls. */
+	totalTokens?: number;
+	/** Provider-reported dollar cost, when pi-ai has pricing metadata. */
+	costUsd?: number;
+	/** Provider-reported input tokens for the final model call only. */
+	finalRoundInputTokens?: number;
+	/** Provider-reported total tokens for the final model call only. */
+	finalRoundTotalTokens?: number;
 	/** Length of the buddy's answer in characters. */
 	answerChars?: number;
 	/** Lessons harvested into memory (phase 3). */
