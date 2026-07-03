@@ -563,6 +563,14 @@ contention the pass is skipped entirely (retried on next consultation).
 
 ## 7.11 Risks
 
+- **Verdict digest inherits watchdog noise:** telemetry showed a 5/5 concern
+  rate at ~75K transcript tokens vs 3/3 PASS at small sizes — likely a
+  context-size effect. A recency-focus prompt mitigation shipped (32afccf)
+  but is unverified. If the watchdog over-barks, the digest (7.6) feeds that
+  distorted track record back to the buddy. Check the concern rate in
+  telemetry before trusting digest-derived lessons; tune the watchdog prompt
+  first if it is still inflated.
+
 - **Leniency drift** (the big one): mitigations are the facts-not-injunctions
   rule, the injection framing ("never overrides your duty"), low caps, and
   user-visible learning. Watch telemetry: if watchdog concern-rate drops
