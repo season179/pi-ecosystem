@@ -46,6 +46,14 @@ export interface BuddyTelemetryRecord {
 	transcriptTokens?: number;
 	/** Length of the buddy's answer in characters. */
 	answerChars?: number;
+	/** Lessons harvested into memory (phase 3). */
+	lessons?: number;
+	/** Retractions applied to memory (phase 3). */
+	retractions?: number;
+	/** RETRACT directives that matched no entry (buddy hallucinating memory). */
+	retractMisses?: number;
+	/** Size of the injected memory block in characters. */
+	memoryChars?: number;
 	error?: string;
 }
 

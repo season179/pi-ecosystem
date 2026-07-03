@@ -39,9 +39,21 @@ third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in
 an isolated `pi-buddy` browser session — no click, fill, type, or eval.
 Fetched web content is treated as data to evaluate, never instructions.
 
-**Memory** — the buddy is stateless per call, but because it receives the full
-transcript (including its own past consultations), it has continuity: "I
-flagged this two turns ago."
+**Memory** — the buddy is still stateless per call, but the harness injects a
+small, inspectable memory block from `~/.pi/agent/buddy-memory/`:
+
+- `global.md` — stable notes about Season's preferences/corrections
+- `projects/<slug>.md` — durable project facts not already documented in-repo
+
+The buddy has **no write tool**. Instead, harvested consultations (`consult_buddy`
+and `/buddy`) may include structured lines such as `LESSON[project]: ...` or
+`RETRACT: ...`; the harness strips those lines before the agent sees the
+answer, applies bounded/deduped writes, and shows a small notice. Watchdog and
+run-end reviews are never harvested, but their last ~10 verdicts are injected
+as an in-session digest so the buddy can notice its own track record.
+
+Curate memory with `/buddy-memory` or edit/delete lines directly. To reset a
+scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
 
 ## Configuration
 
@@ -55,9 +67,10 @@ Each consultation appends one JSONL record to
 consultation): source (`tool`/`command`/`watchdog`), stance, outcome
 (`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
 watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
-count, transcript size, answer length, and duration. `discarded` means a
-background verdict was dropped because the session shut down or was replaced
-mid-investigation — expected in print mode, rare interactively.
+count, transcript size, answer length, memory block size (`memoryChars`),
+harvest counts (`lessons`, `retractions`, `retractMisses`), and duration.
+`discarded` means a background verdict was dropped because the session shut
+down or was replaced mid-investigation.
 
 Health signals to watch:
 
@@ -71,6 +84,10 @@ Health signals to watch:
 - **totalMs** — how much latency the buddy adds per consultation.
 - **outcome: error** — surfaces failures that would otherwise be invisible
   (especially silent watchdog failures).
+- **lessons per consultation** — should stay low; if it climbs, the learning
+  prompt is too eager. Tune the prompt before raising caps.
+- **retractMisses** — the buddy is hallucinating or misremembering a lesson;
+  inspect the memory files.
 
 ```bash
 # Quick look: outcomes by source
@@ -81,7 +98,7 @@ jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | 
 
 ```bash
 npm run build   # compile
-npm test        # build + node --test (pure logic: transcript, trimming, PASS detection)
+npm test        # build + vitest (pure logic: transcript, trimming, memory, PASS detection)
 ```
 
 Smoke test in a scratch directory:

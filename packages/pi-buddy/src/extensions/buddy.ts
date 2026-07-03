@@ -29,9 +29,13 @@ import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import type { BuddyTool } from "./buddy-tools.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
+import { harvestDirectives, harvestNotice } from "./harvest.js";
+import { deriveSlug, MemoryStore } from "./memory.js";
 import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
 import {
+	buildMemoryBlock,
 	buildStanceSystemPrompt,
+	buildVerdictDigest,
 	buildWatchdogSystemPrompt,
 	isWatchdogPass,
 	type Stance,
@@ -51,6 +55,7 @@ const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
 const STATUS_KEY = "buddy";
 const BG_STATUS_KEY = "buddy-bg";
+const VERDICT_RING_SIZE = 10;
 
 export default function setup(pi: ExtensionAPI): void {
 	const tracker = new BuddyRunTracker(
@@ -59,6 +64,29 @@ export default function setup(pi: ExtensionAPI): void {
 	);
 	let backgroundAbort: AbortController | undefined;
 	let browserUsed = false;
+	const memoryStore = new MemoryStore();
+	let memoryCuratedThisSession = false;
+	const verdictRing: string[] = [];
+
+	function recordVerdict(trigger: BackgroundTrigger, verdict: string): void {
+		const time = new Date().toISOString().slice(11, 16);
+		verdictRing.push(`[${time}] ${trigger}: ${verdict}`);
+		if (verdictRing.length > VERDICT_RING_SIZE) verdictRing.shift();
+	}
+
+	function buildInjectionBlock(cwd: string): string | undefined {
+		const slug = deriveSlug(cwd);
+		if (!memoryCuratedThisSession && memoryStore.curate(slug)) {
+			memoryCuratedThisSession = true;
+		}
+		const sections: string[] = [];
+		const memory = memoryStore.readForInjection(slug);
+		if (memory) sections.push(buildMemoryBlock(memory));
+		if (verdictRing.length > 0) {
+			sections.push(buildVerdictDigest(verdictRing));
+		}
+		return sections.length > 0 ? sections.join("\n\n") : undefined;
+	}
 
 	const execFn: ExecFn = async (command, args, options) => {
 		browserUsed = true;
@@ -103,6 +131,8 @@ export default function setup(pi: ExtensionAPI): void {
 		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
 		/** Extra telemetry computed at record time (e.g. verdict staleness). */
 		extraTelemetry?: () => { turnsElapsed?: number };
+		/** Apply harvested directives to memory (pull + /buddy only). */
+		harvest?: boolean;
 		onActivity?: (line: string) => void;
 	}): Promise<ConsultResult> {
 		const model = resolveBuddyModel(args.ctx);
@@ -110,10 +140,12 @@ export default function setup(pi: ExtensionAPI): void {
 		const statusKey = args.statusKey ?? STATUS_KEY;
 		const startedAt = Date.now();
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
+		const memoryBlock = buildInjectionBlock(args.ctx.cwd);
 		try {
-			const result = await consultBuddy({
+			const raw = await consultBuddy({
 				requestText: args.requestText,
 				systemPrompt: args.systemPrompt,
+				memoryBlock,
 				entries: args.ctx.sessionManager.getBranch(),
 				cwd: args.ctx.cwd,
 				model,
@@ -125,6 +157,21 @@ export default function setup(pi: ExtensionAPI): void {
 					args.onActivity?.(line);
 				},
 			});
+			const harvested = harvestDirectives(raw.answer);
+			const result: ConsultResult = { ...raw, answer: harvested.stripped };
+			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
+			if (
+				args.harvest &&
+				(harvested.lessons.length > 0 || harvested.retractions.length > 0)
+			) {
+				applied = memoryStore.applyDirectives(
+					deriveSlug(args.ctx.cwd),
+					harvested.lessons,
+					harvested.retractions,
+				);
+				const notice = harvestNotice(applied);
+				if (notice && args.ctx.hasUI) args.ctx.ui.notify(notice, "info");
+			}
 			await recordConsultation({
 				source: args.source,
 				stance: args.stance,
@@ -137,6 +184,10 @@ export default function setup(pi: ExtensionAPI): void {
 				toolCalls: result.activity.length,
 				transcriptTokens: result.transcriptTokens,
 				answerChars: result.answer.length,
+				lessons: applied.lessons,
+				retractions: applied.retractions,
+				retractMisses: applied.retractMisses,
+				memoryChars: memoryBlock?.length ?? 0,
 			});
 			return result;
 		} catch (error) {
@@ -199,7 +250,16 @@ export default function setup(pi: ExtensionAPI): void {
 				});
 				// Session was replaced/forked while we investigated: drop the verdict.
 				if (!tracker.isCurrent(launch)) return;
-				if (isWatchdogPass(result.answer)) return;
+				// runConsultation already stripped directives, so PASS detection cannot
+				// be spoofed by `PASS\n\nLESSON[...]`.
+				if (isWatchdogPass(result.answer)) {
+					recordVerdict(trigger, "PASS");
+					return;
+				}
+				recordVerdict(
+					trigger,
+					`concern: ${result.answer.split("\n")[0].slice(0, 120)}`,
+				);
 				const staleness = tracker.turnsElapsedSince(launch);
 				const framing =
 					staleness > 0
@@ -285,6 +345,7 @@ export default function setup(pi: ExtensionAPI): void {
 				requestText: params.question,
 				source: "tool",
 				stance,
+				harvest: true,
 				onActivity: (line) => {
 					activity.push(line);
 					onUpdate?.({
@@ -375,6 +436,7 @@ export default function setup(pi: ExtensionAPI): void {
 						`The HUMAN USER is asking you directly (not the agent):\n\n${question}`,
 					source: "command",
 					stance: "discuss",
+					harvest: true,
 				});
 				pi.sendMessage(
 					{
@@ -391,7 +453,69 @@ export default function setup(pi: ExtensionAPI): void {
 		},
 	});
 
+	// --- /buddy-memory command (user curation surface) ---
+
+	pi.registerCommand("buddy-memory", {
+		description:
+			"Show buddy memory (usage: /buddy-memory [clear <global|project>])",
+		handler: async (args, ctx) => {
+			const slug = deriveSlug(ctx.cwd);
+			const parts = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			if (parts[0] === "clear") {
+				const scope = parts[1];
+				if (scope !== "global" && scope !== "project") {
+					if (ctx.hasUI) {
+						ctx.ui.notify("Usage: /buddy-memory clear <global|project>", "warning");
+					}
+					return;
+				}
+				const cleared = memoryStore.clear(scope, slug);
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						cleared
+							? `Buddy ${scope} memory archived and cleared.`
+							: `No ${scope} memory to clear.`,
+						"info",
+					);
+				}
+				return;
+			}
+			const sections: string[] = [];
+			for (const [label, file] of [
+				["Global", memoryStore.globalPath()],
+				["Project", memoryStore.projectPath(slug)],
+			] as const) {
+				const lines = memoryStore.readLines(file);
+				sections.push(`${label} (${file}):`);
+				if (lines.length === 0) {
+					sections.push("  (empty)");
+				} else {
+					lines.forEach((line, i) => {
+						sections.push(
+							line.kind === "entry"
+								? `  ${i + 1}. [${line.date}] ${line.text}`
+								: `  ${i + 1}. ${line.line}`,
+						);
+					});
+				}
+				sections.push("");
+			}
+			sections.push("Edit the files directly to curate; delete a line to forget it.");
+			pi.sendMessage({
+				customType: BUDDY_REVIEW_TYPE,
+				content: sections.join("\n"),
+				display: true,
+				details: { source: "memory" },
+			});
+		},
+	});
+
 	// --- Automatic triggers ---
+
+	pi.on("session_start", async () => {
+		memoryCuratedThisSession = false;
+		verdictRing.length = 0;
+	});
 
 	pi.on("agent_start", async () => {
 		tracker.onAgentStart();
@@ -418,6 +542,8 @@ export default function setup(pi: ExtensionAPI): void {
 		tracker.invalidate();
 		backgroundAbort?.abort();
 		backgroundAbort = undefined;
+		memoryCuratedThisSession = false;
+		verdictRing.length = 0;
 		if (browserUsed) {
 			await closeBuddyBrowser((command, args, options) =>
 				pi.exec(command, args, options),

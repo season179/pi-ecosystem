@@ -50,6 +50,12 @@ export interface ConsultRequest {
 	requestText: string;
 	/** System prompt (stance or watchdog persona). */
 	systemPrompt: string;
+	/**
+	 * Optional memory/digest block appended to the system prompt after the
+	 * persona. Rides the SYSTEM prompt, so it is not subject to transcript
+	 * trimming — callers keep it small (≤4KB by construction).
+	 */
+	memoryBlock?: string;
 	entries: readonly SessionEntry[];
 	cwd: string;
 	model: Model<Api>;
@@ -117,13 +123,17 @@ export async function consultBuddy(
 	let messages: Message[] = [initialUserMessage];
 	let rounds = 0;
 
+	const baseSystemPrompt = request.memoryBlock
+		? `${request.systemPrompt}\n\n${request.memoryBlock}`
+		: request.systemPrompt;
+
 	for (;;) {
 		rounds += 1;
 		const finalRound = rounds > MAX_TOOL_ROUNDS;
 		const context: Context = {
 			systemPrompt: finalRound
-				? `${request.systemPrompt}\n\nYour tool budget is exhausted. Give your final answer now from what you already know.`
-				: request.systemPrompt,
+				? `${baseSystemPrompt}\n\nYour tool budget is exhausted. Give your final answer now from what you already know.`
+				: baseSystemPrompt,
 			messages,
 		};
 		if (!finalRound) {

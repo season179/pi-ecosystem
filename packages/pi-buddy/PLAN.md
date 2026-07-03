@@ -323,7 +323,7 @@ Makes /buddy unnecessary: coverage during runs (watchdog), at completion
 
 # Phase 3: Buddy Memory and the Feedback Loop
 
-Status: PLANNED (no code yet). Inspired by hermes-agent's
+Status: IMPLEMENTED (commit pending in this working session). Inspired by hermes-agent's
 `SELF_IMPROVEMENT_IMPLEMENTATION_GUIDE.md` (studied 2026-07-03), heavily
 adapted. Four ideas adopted: (1) bounded durable memory, (2) a write path
 that preserves the never-write invariant, (3) closing the verdict feedback

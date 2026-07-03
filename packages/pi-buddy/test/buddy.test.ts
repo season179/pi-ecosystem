@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,6 +37,16 @@ import {
 	parseDeepwikiBody,
 	truncateHead,
 } from "../src/extensions/web-tools.js";
+import { harvestDirectives, harvestNotice } from "../src/extensions/harvest.js";
+import {
+	deriveSlug,
+	evictForBudget,
+	MemoryStore,
+	parseMemoryFile,
+	retractEntry,
+	serializeMemory,
+	splitExpired,
+} from "../src/extensions/memory.js";
 
 function messageEntry(message: unknown, id = "e1"): any {
 	return {
@@ -385,6 +396,108 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.turnsElapsedSince(launch), 2);
 		t.invalidate();
 		assert.equal(t.isCurrent(launch), false);
+	});
+});
+
+describe("harvest directives", () => {
+	it("strips directives and caps harvested lessons/retractions", () => {
+		const answer = [
+			"Here is my review.",
+			"LESSON[global]: Season prefers concise answers.",
+			"LESSON[project]: Build before declaring fixes live.",
+			"LESSON[project]: Build before declaring fixes live.",
+			"LESSON[project]: Third lesson.",
+			"LESSON[global]: Fourth lesson should be stripped but not applied.",
+			"RETRACT: old bad rule",
+			"RETRACT: another old rule",
+			"RETRACT: excess retract",
+			"Done.",
+		].join("\n");
+		const h = harvestDirectives(answer);
+		assert.equal(h.lessons.length, 3);
+		assert.deepEqual(h.lessons.map((l) => l.scope), ["global", "project", "project"]);
+		assert.equal(h.retractions.length, 2);
+		assert.doesNotMatch(h.stripped, /LESSON|RETRACT|Fourth lesson/);
+		assert.match(h.stripped, /Here is my review/);
+		assert.match(h.stripped, /Done/);
+	});
+
+	it("formats a visible learning notice", () => {
+		assert.equal(harvestNotice({ lessons: 2, retractions: 1 }), "buddy: remembered 2 lesson(s), retracted 1");
+		assert.equal(harvestNotice({ lessons: 0, retractions: 0 }), undefined);
+	});
+});
+
+describe("memory store", () => {
+	it("parses, serializes, expires, evicts, and retracts entries", () => {
+		const lines = parseMemoryFile([
+			"# hand edited heading",
+			"- [2026-01-01] Old thing.",
+			"- [2026-07-03] New thing.",
+		].join("\n"));
+		assert.equal(lines.length, 3);
+		assert.match(serializeMemory(lines), /hand edited heading/);
+		const split = splitExpired(lines, new Date("2026-07-03T00:00:00Z"));
+		assert.equal(split.expired.length, 1);
+		const retracted = retractEntry(lines, "new thing");
+		assert.ok(retracted.removed);
+		assert.doesNotMatch(serializeMemory(retracted.lines), /New thing/);
+		const evicted = evictForBudget(lines, 35);
+		assert.equal(evicted.evicted.length, 2);
+		assert.match(serializeMemory(evicted.kept), /hand edited heading/);
+	});
+
+	it("derives a project slug from git root instead of cwd", () => {
+		const slug = deriveSlug("/Users/season/proj/packages/pi-buddy", (p) =>
+			p === "/Users/season/proj/.git",
+		);
+		assert.equal(slug, "Users-season-proj");
+	});
+
+	it("applies lessons, duplicate suppression, retractions, and archive writes", () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-"));
+		const store = new MemoryStore(dir);
+		const slug = "Project";
+		const applied = store.applyDirectives(
+			slug,
+			[
+				{ scope: "global", text: "Season prefers short answers." },
+				{ scope: "global", text: "Season prefers short answers." },
+				{ scope: "project", text: "Build before declaring fixes live." },
+			],
+			[],
+			new Date("2026-07-03T00:00:00Z"),
+		);
+		assert.equal(applied.lessons, 2);
+		assert.match(readFileSync(store.globalPath(), "utf8"), /short answers/);
+		assert.match(readFileSync(store.projectPath(slug), "utf8"), /Build before/);
+
+		const retracted = store.applyDirectives(slug, [], ["Build before", "missing"]);
+		assert.equal(retracted.retractions, 1);
+		assert.equal(retracted.retractMisses, 1);
+		assert.equal(existsSync(store.projectPath(slug)), false);
+		assert.match(readFileSync(join(dir, "archive", "projects", "Project.md"), "utf8"), /Build before/);
+	});
+
+	it("curates expired entries to archive and skips while locked", () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-curate-"));
+		const store = new MemoryStore(dir);
+		mkdirSync(join(dir, "projects"), { recursive: true });
+		writeFileSync(store.globalPath(), "- [2026-01-01] Expired.\n- [2026-07-03] Fresh.\n");
+		assert.equal(store.curate("Project", new Date("2026-07-03T00:00:00Z")), true);
+		assert.doesNotMatch(readFileSync(store.globalPath(), "utf8"), /Expired/);
+		assert.match(readFileSync(join(dir, "archive", "global.md"), "utf8"), /Expired/);
+		mkdirSync(join(dir, ".lock"));
+		assert.equal(store.curate("Project", new Date("2026-07-03T00:00:00Z")), false);
+	});
+
+	it("clears a scope by archiving it", () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-clear-"));
+		const store = new MemoryStore(dir);
+		store.applyDirectives("Project", [{ scope: "global", text: "Remember me." }], []);
+		assert.equal(store.clear("global", "Project"), true);
+		assert.equal(existsSync(store.globalPath()), false);
+		assert.match(readFileSync(join(dir, "archive", "global.md"), "utf8"), /Remember me/);
 	});
 });
 
