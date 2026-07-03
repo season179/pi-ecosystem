@@ -787,3 +787,30 @@ Recorded fields:
 Caveat: `costUsd` depends on pi-ai model pricing metadata. The default
 `zai/glm-5.2` reports real tokens but currently has zero pricing metadata, so
 `costUsd: 0` is expected.
+
+# Phase 6: Session-Scoped Buddy Enable/Disable Switch
+
+Status: IMPLEMENTED (2026-07-03).
+
+Buddy is enabled by default. `--buddy-disabled` seeds a single Pi process/session
+as disabled; `/buddy on`, `/buddy off`, and `/buddy status` control the in-memory
+state for the current interactive session only. The slash command does not
+persist a preference, by design, so a normal new session starts with Buddy on
+again unless `--buddy-disabled` is passed. In non-interactive/headless runs,
+`--buddy-disabled` is the supported control surface; slash-command confirmations
+are UI-only.
+
+When disabled:
+
+- automatic watchdog and run-end reviews are skipped;
+- in-flight background reviews are aborted and invalidated;
+- `consult_buddy` throws a disabled error before model calls;
+- `/buddy <question>` notifies the user to run `/buddy on` first;
+- `consult_buddy` is removed from active tools when possible and restored only if
+  it was active before disable;
+- `/buddy-memory` remains available because it is a local memory curation surface,
+  not a model consultation.
+
+`setActiveTools` is best-effort UX; the `consult_buddy.execute` guard is the
+load-bearing safety check because an already-planned tool call may still reach
+execution.

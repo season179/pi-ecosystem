@@ -62,6 +62,12 @@ import {
 	retryDelayMs,
 } from "../src/extensions/retry.js";
 import {
+	activeToolsWithBuddyState,
+	CONSULT_BUDDY_TOOL,
+	buddyDisabledFromFlag,
+	parseBuddyCommand,
+} from "../src/extensions/switch.js";
+import {
 	deriveSlug,
 	evictForBudget,
 	MemoryStore,
@@ -379,6 +385,53 @@ describe("usage telemetry helpers", () => {
 			finalRoundInputTokens: 150,
 			finalRoundTotalTokens: 185,
 		});
+	});
+});
+
+describe("buddy switch helpers", () => {
+	it("parses /buddy control subcommands before questions", () => {
+		assert.deepEqual(parseBuddyCommand(undefined), { kind: "empty" });
+		assert.deepEqual(parseBuddyCommand("   "), { kind: "empty" });
+		assert.deepEqual(parseBuddyCommand("off"), {
+			kind: "control",
+			action: "off",
+		});
+		assert.deepEqual(parseBuddyCommand("ON"), {
+			kind: "control",
+			action: "on",
+		});
+		assert.deepEqual(parseBuddyCommand("status"), {
+			kind: "control",
+			action: "status",
+		});
+		assert.deepEqual(parseBuddyCommand("off by one?"), {
+			kind: "ask",
+			question: "off by one?",
+		});
+	});
+
+	it("treats only a present boolean flag as disabled", () => {
+		assert.equal(buddyDisabledFromFlag(true), true);
+		assert.equal(buddyDisabledFromFlag(false), false);
+		assert.equal(buddyDisabledFromFlag(undefined), false);
+		assert.equal(buddyDisabledFromFlag("true"), false);
+	});
+
+	it("removes and restores consult_buddy in active tools", () => {
+		const active = ["read", CONSULT_BUDDY_TOOL, "bash"];
+		assert.deepEqual(activeToolsWithBuddyState(active, false, false), [
+			"read",
+			"bash",
+		]);
+		assert.deepEqual(activeToolsWithBuddyState(["read", "bash"], true, true), [
+			"read",
+			"bash",
+			CONSULT_BUDDY_TOOL,
+		]);
+	});
+
+	it("does not force-enable consult_buddy when it was not active before disable", () => {
+		assert.deepEqual(activeToolsWithBuddyState(["read"], true, false), ["read"]);
 	});
 });
 

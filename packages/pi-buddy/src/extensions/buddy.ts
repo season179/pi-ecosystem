@@ -54,6 +54,12 @@ import {
 	STANCES,
 } from "./stances.js";
 import {
+	activeToolsWithBuddyState,
+	buddyDisabledFromFlag,
+	CONSULT_BUDDY_TOOL,
+	parseBuddyCommand,
+} from "./switch.js";
+import {
 	type BuddyOutcome,
 	type BuddySource,
 	type BuddyTrigger,
@@ -62,6 +68,7 @@ import {
 import { closeBuddyBrowser, createWebTools, type ExecFn } from "./web-tools.js";
 
 const DEFAULT_BUDDY_MODEL = "zai/glm-5.2";
+const DISABLED_MESSAGE = "Buddy is disabled. Run `/buddy on` to re-enable.";
 const WATCHDOG_TURN_THRESHOLD = 3;
 const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
@@ -76,6 +83,8 @@ export default function setup(pi: ExtensionAPI): void {
 	);
 	let backgroundAbort: AbortController | undefined;
 	let browserUsed = false;
+	let buddyEnabled = true;
+	let consultToolWasActiveWhenDisabled: boolean | undefined;
 	const memoryStore = new MemoryStore();
 	let memoryCuratedThisSession = false;
 	const verdictRing: string[] = [];
@@ -119,11 +128,77 @@ export default function setup(pi: ExtensionAPI): void {
 	};
 	const webTools: BuddyTool[] = createWebTools(execFn);
 
+	pi.registerFlag("buddy-disabled", {
+		description:
+			"Disable pi-buddy for this session. Re-enable with /buddy on.",
+		type: "boolean",
+		default: false,
+	});
+
 	pi.registerFlag("buddy-model", {
 		description: `Buddy model as provider/id (default: ${DEFAULT_BUDDY_MODEL})`,
 		type: "string",
 		default: DEFAULT_BUDDY_MODEL,
 	});
+
+	function applyBuddyToolState(enabled: boolean): void {
+		try {
+			const activeTools = pi.getActiveTools();
+			if (!enabled && consultToolWasActiveWhenDisabled === undefined) {
+				consultToolWasActiveWhenDisabled = activeTools.includes(CONSULT_BUDDY_TOOL);
+			}
+			const nextTools = activeToolsWithBuddyState(
+				activeTools,
+				enabled,
+				consultToolWasActiveWhenDisabled ?? false,
+			);
+			const changed =
+				nextTools.length !== activeTools.length ||
+				nextTools.some((tool, i) => tool !== activeTools[i]);
+			if (changed) pi.setActiveTools(nextTools);
+		} catch {
+			// Best-effort UX only; the consult_buddy execute guard is load-bearing.
+		}
+		if (enabled) consultToolWasActiveWhenDisabled = undefined;
+	}
+
+	function abortBackgroundReview(): void {
+		tracker.invalidate();
+		backgroundAbort?.abort();
+		backgroundAbort = undefined;
+	}
+
+	function initializeBuddySwitch(): void {
+		const wasDisabled = !buddyEnabled;
+		const shouldRestoreTool = consultToolWasActiveWhenDisabled ?? false;
+		buddyEnabled = !buddyDisabledFromFlag(pi.getFlag("buddy-disabled"));
+		if (buddyEnabled) {
+			if (wasDisabled && shouldRestoreTool) {
+				applyBuddyToolState(true);
+			} else {
+				consultToolWasActiveWhenDisabled = undefined;
+			}
+			return;
+		}
+		consultToolWasActiveWhenDisabled = shouldRestoreTool ? true : undefined;
+		abortBackgroundReview();
+		applyBuddyToolState(false);
+	}
+
+	function notify(ctx: ExtensionContext | undefined, message: string): void {
+		if (ctx?.hasUI) ctx.ui.notify(message, "info");
+	}
+
+	function setBuddyEnabled(enabled: boolean, ctx?: ExtensionContext): void {
+		if (enabled === buddyEnabled) {
+			notify(ctx, `Buddy is already ${enabled ? "on" : "off"}.`);
+			return;
+		}
+		buddyEnabled = enabled;
+		if (!enabled) abortBackgroundReview();
+		applyBuddyToolState(enabled);
+		notify(ctx, `Buddy is now ${enabled ? "on" : "off"}.`);
+	}
 
 	function resolveBuddyModel(ctx: ExtensionContext): Model<Api> {
 		const spec = String(pi.getFlag("buddy-model") ?? DEFAULT_BUDDY_MODEL);
@@ -272,6 +347,7 @@ export default function setup(pi: ExtensionAPI): void {
 		trigger: BackgroundTrigger,
 		ctx: ExtensionContext,
 	): void {
+		if (!buddyEnabled) return;
 		const launch = tracker.launchBackground(trigger);
 		const controller = new AbortController();
 		backgroundAbort = controller;
@@ -355,7 +431,7 @@ export default function setup(pi: ExtensionAPI): void {
 	// --- The consult_buddy tool (agent-requested consult) ---
 
 	pi.registerTool({
-		name: "consult_buddy",
+		name: CONSULT_BUDDY_TOOL,
 		label: "Consult Buddy",
 		description:
 			"Consult your sparring partner (a separate model with read-only access " +
@@ -385,6 +461,9 @@ export default function setup(pi: ExtensionAPI): void {
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+			if (!buddyEnabled) {
+				throw new Error(DISABLED_MESSAGE);
+			}
 			tracker.onPull();
 			const stance = params.stance as Stance;
 			const activity: string[] = [];
@@ -468,9 +547,23 @@ export default function setup(pi: ExtensionAPI): void {
 	// --- /buddy command (user-requested consult) ---
 
 	pi.registerCommand("buddy", {
-		description: "Ask the buddy directly (usage: /buddy <question>)",
+		description:
+			"Ask Buddy or control it (usage: /buddy <question>|on|off|status)",
 		handler: async (args, ctx) => {
-			let question = args?.trim() ?? "";
+			const parsed = parseBuddyCommand(args);
+			if (parsed.kind === "control") {
+				if (parsed.action === "status") {
+					notify(ctx, `Buddy is ${buddyEnabled ? "on" : "off"}.`);
+					return;
+				}
+				setBuddyEnabled(parsed.action === "on", ctx);
+				return;
+			}
+			if (!buddyEnabled) {
+				if (ctx.hasUI) ctx.ui.notify(DISABLED_MESSAGE, "warning");
+				return;
+			}
+			let question = parsed.kind === "ask" ? parsed.question : "";
 			if (!question && ctx.hasUI) {
 				question =
 					(await ctx.ui.input("Ask the buddy:", "What do you think about...")) ??
@@ -565,6 +658,7 @@ export default function setup(pi: ExtensionAPI): void {
 	pi.on("session_start", async () => {
 		memoryCuratedThisSession = false;
 		verdictRing.length = 0;
+		initializeBuddySwitch();
 	});
 
 	pi.on("agent_start", async () => {
@@ -572,6 +666,7 @@ export default function setup(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
+		if (!buddyEnabled) return;
 		if (tracker.onTurnEnd()) {
 			launchBackgroundReview("turns", ctx);
 		}
@@ -579,6 +674,7 @@ export default function setup(pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (_event, ctx) => {
 		const shouldReview = tracker.onAgentEnd();
+		if (!buddyEnabled) return;
 		// In print/json mode the process exits right after the run, so a
 		// run-end review would always be aborted mid-flight — telemetry showed
 		// only instant 'discarded' records. hasUI is false exactly in those

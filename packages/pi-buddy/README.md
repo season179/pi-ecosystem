@@ -63,7 +63,21 @@ scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
 ## Configuration
 
 - Default buddy model: `zai/glm-5.2`. Override: `pi --buddy-model provider/id`.
+- Buddy is on by default when installed. Disable it for one Pi session with
+  `pi --buddy-disabled`; re-enable inside the session with `/buddy on`.
 - The buddy model must exist in your pi model registry with a valid API key.
+
+## Enable / disable
+
+Use `/buddy off`, `/buddy on`, or `/buddy status` to control Buddy during the
+current interactive session. This slash-command switch is session-scoped; it does
+not write a persistent preference. In non-interactive/headless runs, use the
+startup flag `--buddy-disabled`; slash-command confirmations are UI-only. When
+Buddy is off, automatic watchdog/run-end reviews are
+skipped and `consult_buddy` refuses model calls. The extension also removes the
+`consult_buddy` tool from the active tool list when possible, but the runtime
+execute guard is the load-bearing safety check. `/buddy-memory` remains available
+because it only shows or clears local memory files; it does not consult the model.
 
 ## Telemetry
 
