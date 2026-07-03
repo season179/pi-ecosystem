@@ -382,6 +382,9 @@ into the system prompt AFTER the persona, fenced and framed:
 > say so.
 
 Empty/missing files → no block, zero behavior change (clean first-run path).
+Memory notes are injected only into pull consultations (`consult_buddy` and
+`/buddy`). Watchdog/run-end prompts stay memory-free to preserve their
+PASS-or-concern contract; they may still receive the verdict digest (7.6).
 
 Note: the memory block rides the SYSTEM prompt, so it is not subject to
 consult.ts's transcript trim logic — the 2000-char-per-file cap is the only
@@ -547,7 +550,8 @@ contention the pass is skipped entirely (retried on next consultation).
 3. `stances.ts`: learning-policy addendum (7.5) + memory/digest framing.
 4. `consult.ts`: `memoryBlock` on ConsultRequest, injected after persona.
 5. `buddy.ts`: `session_start` handler + `memoryCuratedThisSession` flag;
-   read+inject memory and verdict digest; strip directives on ALL answers
+   read+inject memory on pull paths and inject the verdict digest everywhere;
+   strip directives on ALL answers
    (before the watchdog PASS check); harvest only on pull + `/buddy` paths;
    fix `/buddy`'s raw `result.answer` injection to use the stripped answer;
    UI notice; `/buddy-memory` command; verdict ring buffer.

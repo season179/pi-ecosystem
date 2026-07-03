@@ -48,9 +48,11 @@ small, inspectable memory block from `~/.pi/agent/buddy-memory/`:
 The buddy has **no write tool**. Instead, harvested consultations (`consult_buddy`
 and `/buddy`) may include structured lines such as `LESSON[project]: ...` or
 `RETRACT: ...`; the harness strips those lines before the agent sees the
-answer, applies bounded/deduped writes, and shows a small notice. Watchdog and
-run-end reviews are never harvested, but their last ~10 verdicts are injected
-as an in-session digest so the buddy can notice its own track record.
+answer, applies bounded/deduped writes, and shows a small notice. Memory notes
+are injected only into pull consultations. Watchdog and run-end reviews are
+never harvested and do not receive memory notes, but their last ~10 verdicts
+are injected as an in-session digest so the buddy can notice its own track
+record.
 
 Curate memory with `/buddy-memory` or edit/delete lines directly. To reset a
 scope: `/buddy-memory clear global` or `/buddy-memory clear project`.

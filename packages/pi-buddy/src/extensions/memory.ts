@@ -150,8 +150,9 @@ export function evictForBudget(
 }
 
 /**
- * True when a new lesson duplicates an existing entry (exact or
- * substring-near-duplicate, case-insensitive).
+ * True when a new lesson duplicates an existing entry (exact or bidirectional
+ * substring match, case-insensitive). Deliberately aggressive: memory is tiny,
+ * and dropping a redundant lesson is cheaper than hoarding near-duplicates.
  */
 export function isDuplicateLesson(
 	lines: readonly MemoryLine[],
@@ -334,9 +335,10 @@ export class MemoryStore {
 	clear(scope: MemoryScope, slug: string): boolean {
 		const file =
 			scope === "global" ? this.globalPath() : this.projectPath(slug);
-		if (!existsSync(file)) return false;
 		if (!this.acquireLock()) return false;
 		try {
+			if (!existsSync(file)) return false;
+			this.backup(file);
 			this.appendToArchive(file, this.readLines(file));
 			rmSync(file);
 			return true;

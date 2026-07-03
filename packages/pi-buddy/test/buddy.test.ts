@@ -4,7 +4,13 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -479,6 +485,25 @@ describe("memory store", () => {
 		assert.match(readFileSync(join(dir, "archive", "projects", "Project.md"), "utf8"), /Build before/);
 	});
 
+	it("retracts project entries before matching global entries", () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-retract-scope-"));
+		const store = new MemoryStore(dir);
+		store.applyDirectives(
+			"Project",
+			[
+				{ scope: "global", text: "Shared lesson should survive." },
+				{ scope: "project", text: "Shared lesson should go first." },
+			],
+			[],
+		);
+
+		const retracted = store.applyDirectives("Project", [], ["Shared lesson"]);
+		assert.equal(retracted.retractions, 1);
+		assert.match(readFileSync(store.globalPath(), "utf8"), /Shared lesson should survive/);
+		assert.equal(existsSync(store.projectPath("Project")), false);
+		assert.match(readFileSync(join(dir, "archive", "projects", "Project.md"), "utf8"), /Shared lesson should go first/);
+	});
+
 	it("curates expired entries to archive and skips while locked", () => {
 		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-curate-"));
 		const store = new MemoryStore(dir);
@@ -491,13 +516,16 @@ describe("memory store", () => {
 		assert.equal(store.curate("Project", new Date("2026-07-03T00:00:00Z")), false);
 	});
 
-	it("clears a scope by archiving it", () => {
+	it("clears a scope by backing up and archiving it", () => {
 		const dir = mkdtempSync(join(tmpdir(), "buddy-memory-clear-"));
 		const store = new MemoryStore(dir);
 		store.applyDirectives("Project", [{ scope: "global", text: "Remember me." }], []);
 		assert.equal(store.clear("global", "Project"), true);
 		assert.equal(existsSync(store.globalPath()), false);
 		assert.match(readFileSync(join(dir, "archive", "global.md"), "utf8"), /Remember me/);
+		const backups = readdirSync(dir).filter((name) => name.startsWith("global.md.bak."));
+		assert.equal(backups.length, 1);
+		assert.match(readFileSync(join(dir, backups[0]), "utf8"), /Remember me/);
 	});
 });
 

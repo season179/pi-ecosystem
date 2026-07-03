@@ -74,18 +74,31 @@ export default function setup(pi: ExtensionAPI): void {
 		if (verdictRing.length > VERDICT_RING_SIZE) verdictRing.shift();
 	}
 
-	function buildInjectionBlock(cwd: string): string | undefined {
+	function buildInjectionBlock(
+		cwd: string,
+		options: { includeMemory: boolean },
+	): { block?: string; memoryChars: number } {
 		const slug = deriveSlug(cwd);
-		if (!memoryCuratedThisSession && memoryStore.curate(slug)) {
-			memoryCuratedThisSession = true;
-		}
 		const sections: string[] = [];
-		const memory = memoryStore.readForInjection(slug);
-		if (memory) sections.push(buildMemoryBlock(memory));
+		let memoryChars = 0;
+		if (options.includeMemory) {
+			if (!memoryCuratedThisSession && memoryStore.curate(slug)) {
+				memoryCuratedThisSession = true;
+			}
+			const memory = memoryStore.readForInjection(slug);
+			if (memory) {
+				const memorySection = buildMemoryBlock(memory);
+				memoryChars = memorySection.length;
+				sections.push(memorySection);
+			}
+		}
 		if (verdictRing.length > 0) {
 			sections.push(buildVerdictDigest(verdictRing));
 		}
-		return sections.length > 0 ? sections.join("\n\n") : undefined;
+		return {
+			block: sections.length > 0 ? sections.join("\n\n") : undefined,
+			memoryChars,
+		};
 	}
 
 	const execFn: ExecFn = async (command, args, options) => {
@@ -140,12 +153,14 @@ export default function setup(pi: ExtensionAPI): void {
 		const statusKey = args.statusKey ?? STATUS_KEY;
 		const startedAt = Date.now();
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
-		const memoryBlock = buildInjectionBlock(args.ctx.cwd);
+		const injection = buildInjectionBlock(args.ctx.cwd, {
+			includeMemory: args.source !== "watchdog",
+		});
 		try {
 			const raw = await consultBuddy({
 				requestText: args.requestText,
 				systemPrompt: args.systemPrompt,
-				memoryBlock,
+				memoryBlock: injection.block,
 				entries: args.ctx.sessionManager.getBranch(),
 				cwd: args.ctx.cwd,
 				model,
@@ -187,7 +202,7 @@ export default function setup(pi: ExtensionAPI): void {
 				lessons: applied.lessons,
 				retractions: applied.retractions,
 				retractMisses: applied.retractMisses,
-				memoryChars: memoryBlock?.length ?? 0,
+				memoryChars: injection.memoryChars,
 			});
 			return result;
 		} catch (error) {
