@@ -1,0 +1,58 @@
+{
+  "name": "@season179/pi-delegate",
+  "version": "26.5.5",
+  "description": "Lets the main Pi agent delegate well-scoped coding tasks to a cheap worker model.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Season Saw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-delegate"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "delegate",
+    "orchestrator",
+    "subagent"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extensions/delegate.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  }
+}

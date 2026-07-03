@@ -14,7 +14,8 @@
     "pack:skills-status": "npm pack --workspace @season179/pi-skills-status",
     "pack:readbeam": "npm pack --workspace @season179/pi-readbeam",
     "pack:buddy": "npm pack --workspace @season179/pi-buddy",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run"
+    "pack:delegate": "npm pack --workspace @season179/pi-delegate",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-delegate --dry-run"
   },
   "engines": {
     "node": ">=22"
