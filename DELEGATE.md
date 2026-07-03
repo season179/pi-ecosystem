@@ -188,6 +188,12 @@ escalation ladder in v1; the orchestrator taking over IS the escalation.
    pi process, where `getPiInvocation`'s argv[1] heuristic is invalid.
 3. **Steering + telemetry**: promptSnippet/promptGuidelines, JSONL
    telemetry, config loading.
+   ✅ Done 2026-07-03: src/config.ts (optional `<agentDir>/delegate.json`,
+   loud ConfigError on invalid/unknown/bad-typed fields, tilde expansion) +
+   src/telemetry.ts (one JSONL record per call incl. aborted runs; append
+   never throws) + steering completed with the "code you have not understood
+   yet" clause and a §6 regression test. Smoke asserts the telemetry record
+   end-to-end. 40 tests green.
 4. **Dogfood**: use it for a week on real tasks; judge with telemetry
    (delegation success rate, orchestrator takeover rate, verify-failure
    rate). Decide then: keep, tune steering, or add a second worker tier.

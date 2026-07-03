@@ -2,22 +2,20 @@
  * pi-delegate extension: registers the `delegate` tool.
  *
  * Flow per call (DELEGATE.md §5): git checkpoint → spawn worker (cheap
- * model, headless pi, in-place edits) → harness-run verify → compact report.
- * The harness never retries; the orchestrator decides retry vs take-over.
+ * model, headless pi, in-place edits) → harness-run verify → compact report
+ * → JSONL telemetry. The harness never retries; the orchestrator decides
+ * retry vs take-over.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { buildWorkerPrompt, WORKER_SYSTEM_PROMPT, type DelegateBrief } from "../brief.js";
+import { loadConfig } from "../config.js";
 import { collectChanges, makeCheckpoint, type Checkpoint, type WorkChanges } from "../git.js";
 import { deriveStatus, formatReport, type DelegateStatus, type VerifyOutcome } from "../result.js";
-import { getFinalOutput, runWorker, type WorkerResult, type WorkerUsage } from "../worker.js";
-
-// Hardcoded until milestone 3 (config loading).
-export const WORKER_MODEL = "zai/glm-5.2";
-export const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
-export const VERIFY_TIMEOUT_MS = 5 * 60 * 1000;
+import { appendTelemetry, buildRecord } from "../telemetry.js";
+import { runWorker, type WorkerResult, type WorkerUsage } from "../worker.js";
 
 const DelegateParams = Type.Object({
 	task: Type.String({
@@ -52,13 +50,18 @@ interface DelegateDetails {
 }
 
 export default function setup(pi: ExtensionAPI): void {
+	// Loud failure by design: a present-but-invalid delegate.json must break
+	// extension load, not silently fall back to defaults.
+	const config = loadConfig(getAgentDir());
+	let callCount = 0;
+
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
 		description:
 			"Delegate a well-scoped coding task to a cheap worker model that edits the repo in place and reports back with a diffstat and a mechanically-verified result. " +
 			"Good for: implement-from-spec, boilerplate, applying a known pattern across files, writing tests for defined behavior, mechanical refactors. " +
-			"Bad for: debugging with unknown cause, subtle cross-cutting changes, anything where writing the brief requires already knowing the solution. " +
+			"Bad for: debugging with unknown cause, subtle cross-cutting changes, tasks touching code you have not understood yet, anything where writing the brief requires already knowing the solution. " +
 			"A git checkpoint is made first; reject the work with `git reset --hard <checkpoint>`.",
 		promptSnippet: "Delegate a well-scoped coding task to a cheap worker model",
 		promptGuidelines: [
@@ -74,6 +77,7 @@ export default function setup(pi: ExtensionAPI): void {
 			if (process.env.PI_DELEGATE_WORKER) {
 				throw new Error("delegate is not available inside a delegated worker (no recursive delegation)");
 			}
+			const call = ++callCount;
 
 			const brief: DelegateBrief = {
 				task: params.task,
@@ -99,11 +103,11 @@ export default function setup(pi: ExtensionAPI): void {
 			);
 
 			const worker = await runWorker({
-				model: WORKER_MODEL,
+				model: config.workerModel,
 				task: buildWorkerPrompt(brief),
 				cwd: ctx.cwd,
 				systemPrompt: WORKER_SYSTEM_PROMPT,
-				timeoutMs: WORKER_TIMEOUT_MS,
+				timeoutMs: config.workerTimeoutMs,
 				signal,
 				// Test seam: getPiInvocation is only valid inside a real pi
 				// process (argv[1] is pi's entry script). Harnesses that load
@@ -123,7 +127,14 @@ export default function setup(pi: ExtensionAPI): void {
 			details.model = worker.model;
 			details.durationMs = worker.durationMs;
 
+			const record = (status: DelegateStatus, changes: WorkChanges | null, verify: VerifyOutcome | null) =>
+				appendTelemetry(
+					config.telemetryPath,
+					buildRecord({ call, model: config.workerModel, status, brief, worker, checkpoint, changes, verify }),
+				);
+
 			if (worker.aborted) {
+				await record("worker_error", null, null);
 				return {
 					content: [
 						{
@@ -145,7 +156,7 @@ export default function setup(pi: ExtensionAPI): void {
 				emit(`verify: ${brief.verify}`);
 				const verifyResult = await pi.exec("bash", ["-c", brief.verify], {
 					cwd: ctx.cwd,
-					timeout: VERIFY_TIMEOUT_MS,
+					timeout: config.verifyTimeoutMs,
 					signal,
 				});
 				verify = {
@@ -158,6 +169,7 @@ export default function setup(pi: ExtensionAPI): void {
 
 			const status = deriveStatus(worker, verify);
 			details.status = status;
+			await record(status, changes, verify);
 
 			return {
 				content: [{ type: "text", text: formatReport({ status, checkpoint, worker, changes, verify }) }],
@@ -170,7 +182,7 @@ export default function setup(pi: ExtensionAPI): void {
 			const task = typeof args.task === "string" ? args.task : "…";
 			const preview = task.length > 80 ? `${task.slice(0, 80)}...` : task;
 			let content = theme.fg("toolTitle", theme.bold("delegate "));
-			content += theme.fg("accent", `[${WORKER_MODEL}] `);
+			content += theme.fg("accent", `[${config.workerModel}] `);
 			content += theme.fg("muted", preview);
 			if (typeof args.verify === "string") {
 				content += `\n  ${theme.fg("muted", "verify: ")}${theme.fg("dim", args.verify)}`;
@@ -204,7 +216,7 @@ export default function setup(pi: ExtensionAPI): void {
 				}
 				if (details.usage) {
 					const seconds = details.durationMs ? `${(details.durationMs / 1000).toFixed(1)}s` : "";
-					content += `\n  ${theme.fg("dim", `${details.model ?? WORKER_MODEL} — ${details.usage.turns} turns ${seconds}`)}`;
+					content += `\n  ${theme.fg("dim", `${details.model ?? config.workerModel} — ${details.usage.turns} turns ${seconds}`)}`;
 				}
 				if (expanded) {
 					const text = result.content[0];

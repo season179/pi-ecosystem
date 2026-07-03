@@ -7,7 +7,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +16,11 @@ import { promisify } from "node:util";
 // (see the seam note in delegate.ts); without this the spawn re-invokes this
 // script recursively.
 process.env.PI_DELEGATE_PI_COMMAND = "pi";
+
+// Isolate from the real ~/.pi/agent: config defaults apply and the telemetry
+// JSONL lands in this scratch agent dir so we can assert on it.
+const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-agentdir-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const { default: setup } = await import("../dist/extensions/delegate.js");
 
@@ -85,16 +90,28 @@ console.log("--- report ---");
 console.log(text);
 console.log("--------------");
 
+let telemetryOk = false;
+try {
+	const lines = readFileSync(join(agentDir, "delegate-telemetry.jsonl"), "utf-8").trim().split("\n");
+	const record = JSON.parse(lines[0]);
+	telemetryOk = lines.length === 1 && record.status === "success" && record.call === 1 && record.workerTurns > 0;
+	console.log(`telemetry: ${lines.length} record(s), status=${record.status}, turns=${record.workerTurns}`);
+} catch (error) {
+	console.log(`telemetry read failed: ${error}`);
+}
+
 const pass =
 	!result.isError &&
 	text.includes("status: success") &&
 	text.includes("util.mjs") &&
-	result.details?.checkpoint?.committed === true;
+	result.details?.checkpoint?.committed === true &&
+	telemetryOk;
 
 if (pass) {
-	console.log("SMOKE PASS: full delegate flow (dirty-tree checkpoint, worker, verify, report)");
+	console.log("SMOKE PASS: full delegate flow (dirty-tree checkpoint, worker, verify, report, telemetry)");
 	rmSync(repo, { recursive: true, force: true });
+	rmSync(agentDir, { recursive: true, force: true });
 } else {
-	console.log("SMOKE FAIL (scratch repo kept for inspection)");
+	console.log("SMOKE FAIL (scratch repo and agent dir kept for inspection)");
 	process.exitCode = 1;
 }
