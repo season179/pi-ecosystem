@@ -33,6 +33,12 @@ import { harvestDirectives, harvestNotice } from "./harvest.js";
 import { deriveSlug, MemoryStore } from "./memory.js";
 import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
 import {
+	delayWithAbort,
+	FOREGROUND_RETRY_ATTEMPTS,
+	isRetriableBuddyError,
+	retryDelayMs,
+} from "./retry.js";
+import {
 	buildMemoryBlock,
 	buildStanceSystemPrompt,
 	buildVerdictDigest,
@@ -153,25 +159,51 @@ export default function setup(pi: ExtensionAPI): void {
 		const statusKey = args.statusKey ?? STATUS_KEY;
 		const startedAt = Date.now();
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
+		const signal = args.signal ?? args.ctx.signal;
+		let attempts = 0;
+		const maxAttempts =
+			args.source === "watchdog" ? 1 : FOREGROUND_RETRY_ATTEMPTS;
 		const injection = buildInjectionBlock(args.ctx.cwd, {
 			includeMemory: args.source !== "watchdog",
 		});
 		try {
-			const raw = await consultBuddy({
-				requestText: args.requestText,
-				systemPrompt: args.systemPrompt,
-				memoryBlock: injection.block,
-				entries: args.ctx.sessionManager.getBranch(),
-				cwd: args.ctx.cwd,
-				model,
-				registry: args.ctx.modelRegistry,
-				signal: args.signal ?? args.ctx.signal,
-				extraTools: webTools,
-				onActivity: (line) => {
-					args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
-					args.onActivity?.(line);
-				},
-			});
+			let raw: ConsultResult;
+			for (;;) {
+				attempts += 1;
+				try {
+					raw = await consultBuddy({
+						requestText: args.requestText,
+						systemPrompt: args.systemPrompt,
+						memoryBlock: injection.block,
+						entries: args.ctx.sessionManager.getBranch(),
+						cwd: args.ctx.cwd,
+						model,
+						registry: args.ctx.modelRegistry,
+						signal,
+						extraTools: webTools,
+						onActivity: (line) => {
+							args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
+							args.onActivity?.(line);
+						},
+					});
+					break;
+				} catch (error) {
+					if (
+						signal?.aborted ||
+						attempts >= maxAttempts ||
+						!isRetriableBuddyError(error)
+					) {
+						throw error;
+					}
+					const delayMs = retryDelayMs();
+					args.ctx.ui.setStatus(
+						statusKey,
+						`buddy: provider busy; retrying in ${(delayMs / 1000).toFixed(1)}s...`,
+					);
+					await delayWithAbort(delayMs, signal);
+					args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
+				}
+			}
 			const harvested = harvestDirectives(raw.answer);
 			const result: ConsultResult = { ...raw, answer: harvested.stripped };
 			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
@@ -203,6 +235,8 @@ export default function setup(pi: ExtensionAPI): void {
 				retractions: applied.retractions,
 				retractMisses: applied.retractMisses,
 				memoryChars: injection.memoryChars,
+				attempts,
+				retried: attempts > 1,
 			});
 			return result;
 		} catch (error) {
@@ -210,10 +244,13 @@ export default function setup(pi: ExtensionAPI): void {
 				source: args.source,
 				stance: args.stance,
 				// Aborted background reviews (session shutdown/switch) are not failures.
-				outcome: args.signal?.aborted ? "discarded" : "error",
+				outcome:
+					args.source === "watchdog" && signal?.aborted ? "discarded" : "error",
 				model: modelSpec,
 				totalMs: Date.now() - startedAt,
 				trigger: args.trigger,
+				attempts,
+				retried: attempts > 1,
 				error: errorToString(error),
 			});
 			throw error;

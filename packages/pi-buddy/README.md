@@ -70,7 +70,8 @@ consultation): source (`tool`/`command`/`watchdog`), stance, outcome
 (`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
 watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
 count, transcript size, answer length, memory block size (`memoryChars`),
-harvest counts (`lessons`, `retractions`, `retractMisses`), and duration.
+retry metadata (`attempts`, `retried`), harvest counts (`lessons`,
+`retractions`, `retractMisses`), and duration.
 `discarded` means a background verdict was dropped because the session shut
 down or was replaced mid-investigation.
 

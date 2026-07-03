@@ -45,6 +45,13 @@ import {
 } from "../src/extensions/web-tools.js";
 import { harvestDirectives, harvestNotice } from "../src/extensions/harvest.js";
 import {
+	delayWithAbort,
+	isRetriableBuddyError,
+	RETRY_BASE_DELAY_MS,
+	RETRY_JITTER_MS,
+	retryDelayMs,
+} from "../src/extensions/retry.js";
+import {
 	deriveSlug,
 	evictForBudget,
 	MemoryStore,
@@ -402,6 +409,40 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.turnsElapsedSince(launch), 2);
 		t.invalidate();
 		assert.equal(t.isCurrent(launch), false);
+	});
+});
+
+describe("retry helpers", () => {
+	it("classifies transient provider errors as retriable", () => {
+		assert.equal(
+			isRetriableBuddyError(
+				new Error('429: {"code":"1305","message":"service temporarily overloaded"}'),
+			),
+			true,
+		);
+		assert.equal(isRetriableBuddyError(new Error("503 service unavailable")), true);
+		assert.equal(isRetriableBuddyError(new Error("request timed out")), true);
+	});
+
+	it("does not retry deterministic errors", () => {
+		assert.equal(isRetriableBuddyError(new Error("401 unauthorized")), false);
+		assert.equal(isRetriableBuddyError(new Error("Buddy authentication failed")), false);
+		assert.equal(isRetriableBuddyError(new Error("409 conflict")), false);
+		assert.equal(isRetriableBuddyError(new Error("Buddy produced no answer text")), false);
+	});
+
+	it("keeps retry delay within the configured jitter window", () => {
+		assert.equal(retryDelayMs(() => 0), RETRY_BASE_DELAY_MS);
+		assert.equal(
+			retryDelayMs(() => 0.999),
+			RETRY_BASE_DELAY_MS + RETRY_JITTER_MS - 1,
+		);
+	});
+
+	it("respects an already-aborted retry signal", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		await assert.rejects(delayWithAbort(100, controller.signal), /aborted/);
 	});
 });
 

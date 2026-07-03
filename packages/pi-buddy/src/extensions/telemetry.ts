@@ -4,7 +4,8 @@
  *
  * One line per consultation to ~/.pi/agent/buddy-telemetry.jsonl:
  * source (tool/command/watchdog), stance, outcome (ok/pass/concern/error),
- * rounds, tool activity count, transcript size, and wall-clock duration.
+ * rounds, tool activity count, transcript size, retry attempts, and
+ * wall-clock duration.
  *
  * This answers "is the buddy working well?":
  * - watchdog pass/concern ratio (too many concerns => noisy; all pass => useless)
@@ -54,6 +55,10 @@ export interface BuddyTelemetryRecord {
 	retractMisses?: number;
 	/** Size of the injected memory block in characters. */
 	memoryChars?: number;
+	/** Number of provider consultation attempts (foreground retries included). */
+	attempts?: number;
+	/** True when a transient provider error was retried. */
+	retried?: boolean;
 	error?: string;
 }
 
