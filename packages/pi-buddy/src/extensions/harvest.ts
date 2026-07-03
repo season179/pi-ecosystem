@@ -8,7 +8,7 @@
  *
  * Stripping is universal (every buddy answer, every source — defense against
  * the model emitting directives where it shouldn't); harvesting (actually
- * applying the directives) is gated to pull consultations and /buddy.
+ * applying the directives) is gated to requested consultations and /buddy.
  *
  * Pure functions — no fs, no state.
  */

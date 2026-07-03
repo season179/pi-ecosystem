@@ -1,9 +1,9 @@
 /**
  * pi-buddy: a sparring partner for pi.
  *
- * - `consult_buddy` tool: the main agent pulls the buddy in for discussion,
- *   debate, fact-checking, or review. The buddy sees the full session
- *   transcript, has read-only repo tools (read/grep/find/ls), and read-only
+ * - `consult_buddy` tool: the main agent requests a Buddy consultation for
+ *   discussion, debate, fact-checking, or review. The buddy sees the full
+ *   session transcript, has read-only repo tools (read/grep/find/ls), and read-only
  *   web tools (lookup_docs via deepwiki, read_webpage via agent-browser) to
  *   verify claims beyond both models' knowledge cutoffs.
  * - `/buddy <question>` command: the human summons the buddy directly.
@@ -30,6 +30,12 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import type { BuddyTool } from "./buddy-tools.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
 import { harvestDirectives, harvestNotice } from "./harvest.js";
+import {
+	buddyRendererLabel,
+	formatBuddyAdvisory,
+	formatBuddyConsult,
+	type BuddyReviewDetails,
+} from "./message-format.js";
 import { deriveSlug, MemoryStore } from "./memory.js";
 import { type BackgroundTrigger, BuddyRunTracker } from "./policy.js";
 import {
@@ -150,7 +156,7 @@ export default function setup(pi: ExtensionAPI): void {
 		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
 		/** Extra telemetry computed at record time (e.g. verdict staleness). */
 		extraTelemetry?: () => { turnsElapsed?: number };
-		/** Apply harvested directives to memory (pull + /buddy only). */
+		/** Apply harvested directives to memory (requested consults only). */
 		harvest?: boolean;
 		onActivity?: (line: string) => void;
 	}): Promise<ConsultResult> {
@@ -313,20 +319,10 @@ export default function setup(pi: ExtensionAPI): void {
 					`concern: ${result.answer.split("\n")[0].slice(0, 120)}`,
 				);
 				const staleness = tracker.turnsElapsedSince(launch);
-				const framing =
-					staleness > 0
-						? `Your buddy reviewed the work in the background and raised a ` +
-							`concern. It reflects the state as of ~${staleness} turn(s) ago — ` +
-							`if you have since addressed it, say so briefly and continue. ` +
-							`Otherwise address it (fix, rebut with evidence, or ` +
-							`consult_buddy to discuss):`
-						: `Your buddy reviewed the recent work and raised a concern. ` +
-							`Address it (fix, rebut with evidence, or consult_buddy to ` +
-							`discuss) before continuing:`;
 				pi.sendMessage(
 					{
 						customType: BUDDY_REVIEW_TYPE,
-						content: `${framing}\n\n${result.answer}`,
+						content: formatBuddyAdvisory(trigger, staleness, result.answer),
 						display: true,
 						details: {
 							activity: result.activity,
@@ -355,7 +351,7 @@ export default function setup(pi: ExtensionAPI): void {
 		})();
 	}
 
-	// --- The consult_buddy tool (pull) ---
+	// --- The consult_buddy tool (agent-requested consult) ---
 
 	pi.registerTool({
 		name: "consult_buddy",
@@ -467,7 +463,7 @@ export default function setup(pi: ExtensionAPI): void {
 		},
 	});
 
-	// --- /buddy command (human pull) ---
+	// --- /buddy command (user-requested consult) ---
 
 	pi.registerCommand("buddy", {
 		description: "Ask the buddy directly (usage: /buddy <question>)",
@@ -493,7 +489,7 @@ export default function setup(pi: ExtensionAPI): void {
 				pi.sendMessage(
 					{
 						customType: BUDDY_REVIEW_TYPE,
-						content: `Buddy (asked by the user): ${result.answer}`,
+						content: formatBuddyConsult(result.answer),
 						display: true,
 						details: { activity: result.activity, source: "command" },
 					},
@@ -617,8 +613,11 @@ export default function setup(pi: ExtensionAPI): void {
 						.filter((block) => block.type === "text")
 						.map((block) => (block as { text: string }).text)
 						.join("\n");
+		const label = buddyRendererLabel(
+			message.details as BuddyReviewDetails | undefined,
+		);
 		const lines: string[] = [
-			theme.fg("customMessageLabel", theme.bold("● buddy")),
+			theme.fg("customMessageLabel", theme.bold(label)),
 			...body.split("\n").map(
 				(line) =>
 					theme.fg("borderAccent", "▌ ") +

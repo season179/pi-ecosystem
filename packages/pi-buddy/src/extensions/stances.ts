@@ -73,8 +73,8 @@ solid, say so briefly — do not invent problems to seem useful.`,
 };
 
 /**
- * Learning-policy addendum — HARVESTED consultations only (pull stances and
- * /buddy). The watchdog/run-end prompts never get this: their "exactly PASS"
+ * Learning-policy addendum — HARVESTED consultations only (requested stances
+ * and /buddy). The watchdog/run-end prompts never get this: their "exactly PASS"
  * contract must stay clean, and they are excluded from harvesting.
  *
  * Tone is deliberately inverted from hermes: the default is NO lesson. A
@@ -157,6 +157,11 @@ feedback may arrive a few turns late. If — and only if — you find a real
 problem, describe it concisely and concretely so the agent can correct
 course, even if the agent has already moved on to other work — late steering
 in the right direction is still worth it.
+
+If you find a real problem, use this shape: lead with a one-line actionable
+headline, then include only the evidence the agent needs to decide whether to
+fix or rebut. No preamble, no exhaustive review prose, and no restating the
+whole transcript.
 
 If you find no real problem, reply with exactly:
 ${WATCHDOG_PASS_TOKEN}

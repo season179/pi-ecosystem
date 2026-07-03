@@ -599,3 +599,166 @@ contention the pass is skipped entirely (retried on next consultation).
   decision: memory is advisory context for an advisory-only reviewer, capped
   at 2000 chars, human-inspectable, and framed as non-command. No
   threat-pattern scanning in v1.
+
+# Phase 4: Agent-Facing Buddy Message Semantics
+
+Status: IMPLEMENTED (2026-07-03). This phase amends the older section 2.8
+"pull/push" wording for agent-facing surfaces. The primary reader of buddy
+output is the main coding agent, so labels must be unambiguous to an LLM rather
+than cute or direction-metaphor based.
+
+## 8.1 Decision: avoid PUSH/PULL in agent-facing text
+
+Do not use `push` / `pull` in Buddy message headers, envelopes, or prompt text.
+Those terms are overloaded in software (`push notification`, `pull request`) and
+can invert who initiated the interaction. Instead name the function and origin:
+
+- **BUDDY CONSULT**: a requested Buddy answer.
+  - `(agent-requested)` for `consult_buddy` tool results.
+  - `(user-requested)` for `/buddy` command answers.
+- **BUDDY ADVISORY**: an automatic Buddy concern injected by the extension.
+  - `(auto, watchdog)` for turn-threshold background review.
+  - `(auto, run-end)` for end-of-run review.
+
+This naming is for the main agent first. Human-facing docs may explain that
+older discussions called these "push/pull", but runtime messages should not.
+
+## 8.2 Visibility: agent-facing does not mean hidden
+
+Keep automatic advisories as `display: true`. If Buddy steers the main agent,
+Season must be able to see why. Hidden steering makes debugging and trust worse.
+PASS remains suppressed; only substantive advisories are injected/displayed.
+
+## 8.3 Advisory envelope
+
+Replace the current prose-heavy framing with a compact, structured envelope for
+the **main coding agent reading the live session**. This is distinct from the
+Buddy model reading a serialized transcript during a later consultation.
+
+Today `transcript.ts` serializes all custom messages generically as
+`## NOTE (<customType>)\n<content>`. Keep that generic wrapper; special-casing
+`buddy-review` in the transcript serializer would couple a shared transcript
+layer to one extension. A prior advisory replayed to Buddy will therefore have a
+double heading:
+
+```md
+## NOTE (buddy-review)
+## BUDDY ADVISORY (auto, watchdog)
+...
+```
+
+This is acceptable: the outer heading identifies the session entry type; the
+inner heading is the original agent-facing message content. Do not move the
+semantic envelope into `message.details` only, because details are not guaranteed
+to be visible in the LLM transcript and the main agent needs the label in
+context. No closing tag is needed because custom messages are already delimited
+in the transcript.
+
+Watchdog concern:
+
+```md
+## BUDDY ADVISORY (auto, watchdog)
+
+Reviewed ~{turnsElapsed} turn(s) ago. If already addressed, say so briefly and continue.
+Otherwise: fix, rebut with evidence, or consult_buddy.
+
+Concern:
+{buddy concern}
+```
+
+Fresh watchdog concern (`turnsElapsed === 0`) may use `Reviewed the recent work.`
+instead of the staleness sentence.
+
+Run-end concern:
+
+```md
+## BUDDY ADVISORY (auto, run-end)
+
+Review this before finalizing. If already addressed, say so briefly.
+Otherwise: fix, rebut with evidence, or consult_buddy.
+
+Concern:
+{buddy concern}
+```
+
+`/buddy` command answer:
+
+```md
+## BUDDY CONSULT (user-requested)
+
+{buddy answer}
+```
+
+`/buddy-memory` is not advice from Buddy; it is a user curation surface. Keep its
+content plain, but render it with the source-aware `● buddy · memory` label.
+
+`consult_buddy` tool answers already arrive as `## TOOL RESULT: consult_buddy`
+in the transcript, which is unambiguous to the main agent. Keep the current tool
+path and do not add extra `consult` wording to the tool result content.
+
+## 8.4 Compactness policy
+
+Compactness serves the agent, but signal quality wins. For v1 of this phase:
+
+- Keep the envelope short and direct.
+- Do **not** truncate Buddy concern bodies by default; truncation can hide the
+  evidence the main agent needs to decide whether to fix or rebut.
+- Instead, strengthen watchdog/run-end prompts to ask for concise concern shape:
+  lead with a one-line actionable headline, then only the evidence needed for
+  the main agent to decide whether to fix or rebut; no preamble, no exhaustive
+  review prose, no restating the whole transcript.
+- Keep using telemetry `answerChars` to watch for overlong advisories. If real
+  sessions show repeated multi-thousand-character concerns, add a follow-up
+  summarization/truncation design that preserves the key evidence in-context.
+
+## 8.5 TUI rendering
+
+Update the custom `buddy-review` renderer header from generic `● buddy` to a
+source-aware label derived from `message.details`:
+
+- `● buddy · advisory · auto · watchdog`
+- `● buddy · advisory · auto · run-end`
+- `● buddy · consult · user-requested`
+- `● buddy · memory` for `/buddy-memory`
+
+Keep the accent gutter/background so Buddy cannot be mistaken for ordinary agent
+prose. Expanded view continues to show read-only verification activity.
+
+## 8.6 Implementation plan
+
+1. Add small pure helpers in `buddy.ts` or a new `message-format.ts`:
+   - `formatBuddyAdvisory(trigger, turnsElapsed, answer)`
+   - `formatBuddyConsult(source, answer)` for `/buddy`
+   - `buddyRendererLabel(details)`
+   Keep transcript serialization generic; do not special-case `buddy-review` in
+   `transcript.ts` unless later evidence shows the double heading confuses Buddy.
+2. Replace `launchBackgroundReview`'s current framing string with
+   `formatBuddyAdvisory(...)`.
+3. Replace `/buddy`'s `Buddy (asked by the user): ...` content with the consult
+   envelope.
+4. Strengthen the watchdog/run-end system prompt with the concise concern shape
+   from 8.4.
+5. Leave the `consult_buddy` tool result content unchanged; it is already clearly
+   identified by the tool transcript wrapper.
+6. Update README to document **consult** vs **advisory** terminology and the fact
+   that advisories are visible because they steer the agent.
+7. Add tests for the pure formatting helpers: watchdog stale/fresh, run-end,
+   user-requested consult, memory renderer label, and advisory renderer labels.
+8. Run:
+
+```bash
+npm test --workspace @season179/pi-buddy
+npm run build --workspace @season179/pi-buddy
+```
+
+## 8.7 Acceptance criteria
+
+- The main agent can tell within the first line whether Buddy output is a
+  requested consult or an automatic advisory.
+- Automatic advisories state origin (`watchdog`/`run-end`) and staleness before
+  the concern body.
+- The instruction to the main agent is compact and action-oriented: already
+  addressed → say so briefly; otherwise fix, rebut with evidence, or consult.
+- Human visibility is preserved (`display: true`).
+- PASS remains suppressed.
+- No runtime agent-facing surface uses ambiguous PUSH/PULL terminology.

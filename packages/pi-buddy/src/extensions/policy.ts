@@ -1,5 +1,5 @@
 /**
- * Pure state machine for the buddy's automatic (push) behavior.
+ * Pure state machine for the buddy's automatic advisory behavior.
  *
  * Tracks turn counts within agent runs and decides when to launch background
  * reviews (watchdog after N unconsulted turns, end-of-run review), whether a

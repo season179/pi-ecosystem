@@ -10,7 +10,8 @@ models' knowledge cutoffs — but it can never write, click, or act.
 
 ## How it works
 
-**Pull** — the main agent calls the `consult_buddy` tool with a stance:
+**BUDDY CONSULT (agent-requested)** — the main agent calls the
+`consult_buddy` tool with a stance:
 
 | Stance | Behavior |
 |---|---|
@@ -19,19 +20,21 @@ models' knowledge cutoffs — but it can never write, click, or act.
 | `fact_check` | Verifies claims against real files; cites VERIFIED / CONTRADICTED / UNVERIFIABLE |
 | `review` | Quality review of recent work, ordered by severity |
 
-**Human pull** — `/buddy <question>` asks the buddy directly.
+**BUDDY CONSULT (user-requested)** — `/buddy <question>` asks the buddy
+directly and injects the answer into the next turn for the agent to read.
 
-**Push (detached watchdog)** — if the agent works 3 turns without consulting
-the buddy, the buddy investigates **in the background while the agent keeps
-working** — like a colleague who checks his suspicion before interrupting.
-`PASS` verdicts are suppressed (no noise). Real concerns are steered in when
-the verdict lands, with staleness framing ("this reflects ~N turns ago"); if
-the run already ended, the concern is queued for your next prompt — the agent
-is never auto-woken.
+**BUDDY ADVISORY (auto, watchdog)** — if the agent works 3 turns without
+consulting the buddy, the buddy investigates **in the background while the
+agent keeps working** — like a colleague who checks his suspicion before
+interrupting. `PASS` verdicts are suppressed (no noise). Real concerns are
+steered in when the verdict lands, with staleness framing (`Reviewed ~N
+turn(s) ago...`); if the run already ended, the concern is queued for your
+next prompt — the agent is never auto-woken.
 
-**End-of-run review** — runs of ≥ 2 turns that never consulted the buddy get
-a quiet background review at completion (same PASS-suppression). Together
-with the watchdog and the agent's own pulls, you should rarely need `/buddy`.
+**BUDDY ADVISORY (auto, run-end)** — runs of ≥ 2 turns that never consulted
+the buddy get a quiet background review at completion (same PASS-suppression).
+Together with the watchdog and requested consults, you should rarely need
+`/buddy`.
 
 **Web fact-checking** — the buddy prefers evidence in this order: repository
 first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage`
@@ -49,8 +52,8 @@ The buddy has **no write tool**. Instead, harvested consultations (`consult_budd
 and `/buddy`) may include structured lines such as `LESSON[project]: ...` or
 `RETRACT: ...`; the harness strips those lines before the agent sees the
 answer, applies bounded/deduped writes, and shows a small notice. Memory notes
-are injected only into pull consultations. Watchdog and run-end reviews are
-never harvested and do not receive memory notes, but their last ~10 verdicts
+are injected only into requested consultations. Watchdog and run-end advisories
+are never harvested and do not receive memory notes, but their last ~10 verdicts
 are injected as an in-session digest so the buddy can notice its own track
 record.
 
@@ -80,7 +83,7 @@ Health signals to watch:
 - **watchdog pass:concern ratio** — mostly `pass` with occasional `concern`
   is healthy; all `concern` means it is noisy, all `pass` forever means the
   threshold or prompt needs tuning.
-- **pull frequency** — no `tool` records across real sessions means the main
+- **consult frequency** — no `tool` records across real sessions means the main
   agent is not consulting; strengthen `promptGuidelines`.
 - **toolCalls** — frequent `fact_check`/`review` with `toolCalls: 0` means the
   buddy is armchair-guessing instead of verifying.

@@ -45,6 +45,11 @@ import {
 } from "../src/extensions/web-tools.js";
 import { harvestDirectives, harvestNotice } from "../src/extensions/harvest.js";
 import {
+	buddyRendererLabel,
+	formatBuddyAdvisory,
+	formatBuddyConsult,
+} from "../src/extensions/message-format.js";
+import {
 	delayWithAbort,
 	isRetriableBuddyError,
 	RETRY_BASE_DELAY_MS,
@@ -234,8 +239,58 @@ describe("stances", () => {
 		}
 	});
 
-	it("watchdog prompt demands the PASS token", () => {
-		assert.ok(buildWatchdogSystemPrompt().includes(WATCHDOG_PASS_TOKEN));
+	it("watchdog prompt demands the PASS token and concise concern shape", () => {
+		const prompt = buildWatchdogSystemPrompt();
+		assert.ok(prompt.includes(WATCHDOG_PASS_TOKEN));
+		assert.match(prompt, /one-line actionable/);
+		assert.match(prompt, /No preamble/);
+	});
+});
+
+describe("buddy message formatting", () => {
+	it("formats a fresh watchdog advisory for the main agent", () => {
+		const out = formatBuddyAdvisory("turns", 0, "Fix the test gap.");
+		assert.match(out, /^## BUDDY ADVISORY \(auto, watchdog\)/);
+		assert.match(out, /Reviewed the recent work\./);
+		assert.match(out, /Otherwise: fix, rebut with evidence, or consult_buddy\./);
+		assert.match(out, /Concern:\nFix the test gap\./);
+	});
+
+	it("formats a stale watchdog advisory with staleness", () => {
+		const out = formatBuddyAdvisory("turns", 3, "The claim is stale.");
+		assert.match(out, /Reviewed ~3 turn\(s\) ago\./);
+		assert.match(out, /continue\./);
+	});
+
+	it("formats a run-end advisory", () => {
+		const out = formatBuddyAdvisory("run_end", 2, "Finish the audit.");
+		assert.match(out, /^## BUDDY ADVISORY \(auto, run-end\)/);
+		assert.match(out, /Review this before finalizing\./);
+		assert.match(out, /Concern:\nFinish the audit\./);
+	});
+
+	it("formats a user-requested consult", () => {
+		assert.equal(
+			formatBuddyConsult("Here is the take."),
+			"## BUDDY CONSULT (user-requested)\n\nHere is the take.",
+		);
+	});
+
+	it("derives renderer labels from buddy-review details", () => {
+		assert.equal(
+			buddyRendererLabel({ source: "watchdog", trigger: "turns" }),
+			"● buddy · advisory · auto · watchdog",
+		);
+		assert.equal(
+			buddyRendererLabel({ source: "watchdog", trigger: "run_end" }),
+			"● buddy · advisory · auto · run-end",
+		);
+		assert.equal(
+			buddyRendererLabel({ source: "command" }),
+			"● buddy · consult · user-requested",
+		);
+		assert.equal(buddyRendererLabel({ source: "memory" }), "● buddy · memory");
+		assert.equal(buddyRendererLabel(undefined), "● buddy");
 	});
 });
 
@@ -319,7 +374,7 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.onTurnEnd(), true);
 	});
 
-	it("pull resets the counter", () => {
+	it("requested consult resets the counter", () => {
 		const t = mkTracker();
 		t.onAgentStart();
 		t.onTurnEnd();

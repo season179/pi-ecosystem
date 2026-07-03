@@ -9,7 +9,7 @@
  *
  * This answers "is the buddy working well?":
  * - watchdog pass/concern ratio (too many concerns => noisy; all pass => useless)
- * - pull frequency by stance (is the agent actually consulting?)
+ * - consult frequency by stance (is the agent actually consulting?)
  * - rounds/activity (is the buddy verifying with tools, or armchair-guessing?)
  * - durations (is the buddy slowing turns down?)
  * - errors (auth/model failures that PASS-suppression would otherwise hide)
