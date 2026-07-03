@@ -49,6 +49,7 @@ import {
 	truncateHead,
 } from "../src/extensions/web-tools.js";
 import { harvestDirectives, harvestNotice } from "../src/extensions/harvest.js";
+import { appendSkillsToBuddyPrompt } from "../src/extensions/skill-prompt.js";
 import {
 	buddyRendererLabel,
 	formatBuddyAdvisory,
@@ -256,6 +257,36 @@ describe("stances", () => {
 		assert.ok(prompt.includes(WATCHDOG_PASS_TOKEN));
 		assert.match(prompt, /one-line actionable/);
 		assert.match(prompt, /No preamble/);
+	});
+});
+
+describe("skill prompt integration", () => {
+	const skill = (overrides: Record<string, unknown> = {}) => ({
+		name: "design-patterns",
+		description:
+			"Use when choosing or reviewing software design patterns, including GoF patterns and idiomatic alternatives.",
+		filePath: "/Users/season/.agents/skills/design-patterns/SKILL.md",
+		baseDir: "/Users/season/.agents/skills/design-patterns",
+		sourceInfo: { source: "user" },
+		disableModelInvocation: false,
+		...overrides,
+	} as any);
+
+	it("reuses Pi's standard skills prompt for explicit Buddy consults", () => {
+		const out = appendSkillsToBuddyPrompt("BASE", [skill()]);
+		assert.match(out, /^BASE\n\nThe following skills provide/);
+		assert.match(out, /<available_skills>/);
+		assert.match(out, /<name>design-patterns<\/name>/);
+		assert.match(out, /Use the read tool to load a skill's file/);
+		assert.match(out, /\/Users\/season\/\.agents\/skills\/design-patterns\/SKILL\.md/);
+	});
+
+	it("keeps prompts unchanged when no model-visible skills are available", () => {
+		assert.equal(appendSkillsToBuddyPrompt("BASE", []), "BASE");
+		assert.equal(
+			appendSkillsToBuddyPrompt("BASE", [skill({ disableModelInvocation: true })]),
+			"BASE",
+		);
 	});
 });
 

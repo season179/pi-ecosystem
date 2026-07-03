@@ -22,8 +22,10 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
+	BuildSystemPromptOptions,
 	ExtensionAPI,
 	ExtensionContext,
+	Skill,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
@@ -53,6 +55,7 @@ import {
 	type Stance,
 	STANCES,
 } from "./stances.js";
+import { appendSkillsToBuddyPrompt } from "./skill-prompt.js";
 import {
 	activeToolsWithBuddyState,
 	CONSULT_BUDDY_TOOL,
@@ -88,6 +91,7 @@ export default function setup(pi: ExtensionAPI): void {
 	let consultToolWasActiveWhenDisabled: boolean | undefined;
 	const memoryStore = new MemoryStore();
 	let memoryCuratedThisSession = false;
+	let currentSkills: Skill[] = [];
 	const verdictRing: string[] = [];
 
 	function recordVerdict(trigger: BackgroundTrigger, verdict: string): void {
@@ -205,6 +209,13 @@ export default function setup(pi: ExtensionAPI): void {
 		if (!enabled) abortBackgroundReview();
 		applyBuddyToolState(enabled);
 		notify(ctx, `Buddy is now ${enabled ? "on" : "off"}.`);
+	}
+
+	function skillsFromCommandContext(ctx: ExtensionContext): Skill[] {
+		const commandCtx = ctx as ExtensionContext & {
+			getSystemPromptOptions?: () => BuildSystemPromptOptions;
+		};
+		return commandCtx.getSystemPromptOptions?.().skills ?? currentSkills;
 	}
 
 	function resolveBuddyModel(ctx: ExtensionContext): Model<Api> {
@@ -476,7 +487,10 @@ export default function setup(pi: ExtensionAPI): void {
 			const activity: string[] = [];
 			const result = await runConsultation({
 				ctx,
-				systemPrompt: buildStanceSystemPrompt(stance),
+				systemPrompt: appendSkillsToBuddyPrompt(
+					buildStanceSystemPrompt(stance),
+					currentSkills,
+				),
 				requestText: params.question,
 				source: "tool",
 				stance,
@@ -581,7 +595,10 @@ export default function setup(pi: ExtensionAPI): void {
 			try {
 				const result = await runConsultation({
 					ctx,
-					systemPrompt: buildStanceSystemPrompt("discuss"),
+					systemPrompt: appendSkillsToBuddyPrompt(
+						buildStanceSystemPrompt("discuss"),
+						skillsFromCommandContext(ctx),
+					),
 					requestText:
 						`The HUMAN USER is asking you directly (not the agent):\n\n${question}`,
 					source: "command",
@@ -664,8 +681,13 @@ export default function setup(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async () => {
 		memoryCuratedThisSession = false;
+		currentSkills = [];
 		verdictRing.length = 0;
 		initializeBuddySwitch();
+	});
+
+	pi.on("before_agent_start", async (event) => {
+		currentSkills = event.systemPromptOptions.skills ?? [];
 	});
 
 	pi.on("agent_start", async () => {
