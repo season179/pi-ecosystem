@@ -792,13 +792,14 @@ Caveat: `costUsd` depends on pi-ai model pricing metadata. The default
 
 Status: IMPLEMENTED (2026-07-03).
 
-Buddy is enabled by default. `--buddy-disabled` seeds a single Pi process/session
-as disabled; `/buddy on`, `/buddy off`, and `/buddy status` control the in-memory
-state for the current interactive session only. The slash command does not
-persist a preference, by design, so a normal new session starts with Buddy on
-again unless `--buddy-disabled` is passed. In non-interactive/headless runs,
-`--buddy-disabled` is the supported control surface; slash-command confirmations
-are UI-only.
+Buddy is enabled by default. `--buddy-disabled` seeds the initial in-memory state
+once at startup; after that, `/buddy on`, `/buddy off`, and `/buddy status`
+control the in-memory state for the rest of the current Pi process, including
+forks/session switches. The slash command does not persist a preference to disk,
+by design, so a new Pi process starts with Buddy on again unless
+`--buddy-disabled` is passed. In non-interactive/headless runs, `--buddy-disabled`
+is the supported startup control surface; slash-command confirmations are
+UI-only.
 
 When disabled:
 

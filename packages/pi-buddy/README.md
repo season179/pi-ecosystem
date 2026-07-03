@@ -70,10 +70,13 @@ scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
 ## Enable / disable
 
 Use `/buddy off`, `/buddy on`, or `/buddy status` to control Buddy during the
-current interactive session. This slash-command switch is session-scoped; it does
-not write a persistent preference. In non-interactive/headless runs, use the
-startup flag `--buddy-disabled`; slash-command confirmations are UI-only. When
-Buddy is off, automatic watchdog/run-end reviews are
+current Pi process. This slash-command switch is in-memory only; it is sticky
+across forks/session switches in that process but does not write a persistent
+preference. In non-interactive/headless runs, use the startup flag
+`--buddy-disabled`; it seeds the initial in-memory state once, and later
+`/buddy on|off` choices are authoritative for the rest of the process.
+Slash-command confirmations are UI-only. When Buddy is off, automatic
+watchdog/run-end reviews are
 skipped and `consult_buddy` refuses model calls. The extension also removes the
 `consult_buddy` tool from the active tool list when possible, but the runtime
 execute guard is the load-bearing safety check. `/buddy-memory` remains available
