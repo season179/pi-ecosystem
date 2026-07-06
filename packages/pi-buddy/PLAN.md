@@ -816,3 +816,137 @@ When disabled:
 `setActiveTools` is best-effort UX; the `consult_buddy.execute` guard is the
 load-bearing safety check because an already-planned tool call may still reach
 execution.
+
+# Phase 7: Agent Feedback Calibration
+
+Status: IMPLEMENTED (2026-07-06).
+
+Add an agent-facing feedback tool that lets the main agent tune Buddy's automatic
+advisory cadence without being able to silence Buddy's safety net. The product
+intent is calibration, not disablement: a powerful main model may legitimately
+find mid-run automatic advisories too frequent or too timid, but it must not be
+able to self-select out of all review.
+
+## 7.1 Tool shape
+
+Register a new tool, tentatively `give_buddy_feedback`, callable by the main
+agent:
+
+```ts
+give_buddy_feedback({
+  feedback: "more" | "same" | "less",
+  reason?: string,
+})
+```
+
+Semantics:
+
+- `more`: Buddy should be more active. Move calibration one step toward more
+  frequent watchdog advisories.
+- `same`: current behavior is acceptable. Record telemetry/UI only; do not
+  inject a Buddy-context note and do not change cadence.
+- `less`: Buddy should be less frequent and more selective. Move calibration one
+  step toward less frequent watchdog advisories.
+
+The tool result should report the previous level, new level, and effective
+watchdog threshold so the main agent can reason about the state it changed.
+
+## 7.2 Session-scoped calibration state
+
+Maintain an in-memory `advisoryLevel` for the current Pi process only:
+
+```text
++1 = more active
+ 0 = normal
+-1 = less frequent
+-2 = much less frequent
+-3 = maximum backoff
+```
+
+Rules:
+
+- New Pi session starts at `0`.
+- No disk persistence in v1.
+- `less` decrements by one step, capped at `-3`.
+- `more` increments by one step, capped at `+1`.
+- `same` is a no-op for state.
+- No automatic decay in v1. Explicit `more` feedback walks Buddy back toward the
+  normal state one step at a time.
+
+## 7.3 Watchdog threshold mapping
+
+The automatic watchdog turn threshold is derived from `advisoryLevel`:
+
+```text
++1 →  2 turns
+ 0 →  3 turns
+-1 →  6 turns
+-2 → 12 turns
+-3 → 24 turns
+```
+
+This is exponential backoff for `less`, capped at 24 turns. The cap is deliberate
+so telemetry can show whether long backoff is actually useful in practice.
+
+## 7.4 Safety invariant
+
+Agent feedback affects only automatic watchdog cadence and Buddy's tone for
+future automatic advisories.
+
+It must never disable or suppress:
+
+- user `/buddy` consultations;
+- agent `consult_buddy` consultations;
+- run-end reviews;
+- the human-controlled `/buddy on`, `/buddy off`, and `/buddy status` switch.
+
+Run-end review remains the non-suppressible safety net for agent-initiated
+feedback. `less` can make Buddy interrupt less often mid-run, but it cannot stop
+Buddy from reviewing the run before completion.
+
+## 7.5 Buddy-context calibration notes
+
+Only feedback that should affect Buddy's judgment is injected into future Buddy
+consultation context:
+
+- `less`: inject a compact note telling Buddy that the main agent requested less
+  frequent automatic advisories, and to raise only concrete, material concerns.
+- `more`: inject a compact note telling Buddy that the main agent requested more
+  active input, and to raise concrete concerns earlier.
+- `same`: inject nothing; avoid wasting context tokens.
+
+These notes are session-scoped and should be included with the existing
+injection block used for Buddy consultations/reviews. Keep the wording factual:
+Buddy should know what calibration happened, not treat the main agent's reason as
+a proven fact.
+
+## 7.6 Visibility and telemetry
+
+Every feedback call should be visible/auditable:
+
+- show a compact tool result to the main agent;
+- record telemetry containing at least `feedback`, `reason`, `previousLevel`,
+  `newLevel`, and `watchdogThreshold`;
+- if practical, surface a human-visible notice when feedback changes cadence,
+  especially for `less`.
+
+`same` is still useful as telemetry: it records that Buddy's current behavior was
+acceptable without consuming Buddy context.
+
+## 7.7 Known limitation
+
+The main agent can already reduce automatic watchdog interruptions indirectly by
+calling `consult_buddy`, because the watchdog counter resets after explicit
+consultations. This phase does not try to close that escape hatch. Instead, it
+makes cadence adjustment explicit, bounded, session-scoped, human-visible, and
+telemetry-friendly.
+
+## 7.8 Test plan
+
+Add focused tests for:
+
+- advisory level transitions and caps (`less` to `-3`, `more` to `+1`);
+- threshold mapping (`+1/0/-1/-2/-3` → `2/3/6/12/24`);
+- `same` preserving state and producing no Buddy-context note;
+- `less` and `more` producing the intended calibration notes;
+- run-end review policy remaining unaffected by `advisoryLevel`.

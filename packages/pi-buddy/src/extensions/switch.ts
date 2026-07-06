@@ -1,4 +1,5 @@
 export const CONSULT_BUDDY_TOOL = "consult_buddy";
+export const GIVE_BUDDY_FEEDBACK_TOOL = "give_buddy_feedback";
 
 export type BuddyCommandParseResult =
 	| { kind: "empty" }
@@ -34,12 +35,17 @@ export function activeToolsWithBuddyState(
 	shouldRestoreWhenEnabled: boolean,
 ): string[] {
 	const active = [...activeTools];
-	const hasBuddy = active.includes(CONSULT_BUDDY_TOOL);
+	const hasConsult = active.includes(CONSULT_BUDDY_TOOL);
+	const hasFeedback = active.includes(GIVE_BUDDY_FEEDBACK_TOOL);
 	if (!enabled) {
-		return active.filter((tool) => tool !== CONSULT_BUDDY_TOOL);
+		return active.filter(
+			(tool) =>
+				tool !== CONSULT_BUDDY_TOOL && tool !== GIVE_BUDDY_FEEDBACK_TOOL,
+		);
 	}
-	if (shouldRestoreWhenEnabled && !hasBuddy) {
-		return [...active, CONSULT_BUDDY_TOOL];
-	}
-	return active;
+	const shouldExposeFeedback = hasConsult || shouldRestoreWhenEnabled;
+	const next = [...active];
+	if (shouldRestoreWhenEnabled && !hasConsult) next.push(CONSULT_BUDDY_TOOL);
+	if (shouldExposeFeedback && !hasFeedback) next.push(GIVE_BUDDY_FEEDBACK_TOOL);
+	return next;
 }

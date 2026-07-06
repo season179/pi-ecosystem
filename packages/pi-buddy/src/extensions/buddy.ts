@@ -30,6 +30,16 @@ import type {
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import type { BuddyTool } from "./buddy-tools.js";
+import {
+	applyBuddyFeedback,
+	buildBuddyCalibrationBlock,
+	BUDDY_FEEDBACKS,
+	formatBuddyFeedbackResult,
+	watchdogThresholdForLevel,
+	type AdvisoryLevel,
+	type BuddyCalibrationNote,
+	type BuddyFeedback,
+} from "./calibration.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
 import { harvestDirectives, harvestNotice } from "./harvest.js";
 import {
@@ -64,6 +74,7 @@ import { appendSkillsToBuddyPrompt } from "./skill-prompt.js";
 import {
 	activeToolsWithBuddyState,
 	CONSULT_BUDDY_TOOL,
+	GIVE_BUDDY_FEEDBACK_TOOL,
 	parseBuddyCommand,
 	seedBuddyEnabledFromFlag,
 } from "./switch.js";
@@ -72,12 +83,13 @@ import {
 	type BuddySource,
 	type BuddyTrigger,
 	recordConsultation,
+	recordFeedback,
 } from "./telemetry.js";
 import { closeBuddyBrowser, createWebTools, type ExecFn } from "./web-tools.js";
 
 const DEFAULT_BUDDY_MODEL = "zai/glm-5.2";
 const DISABLED_MESSAGE = "Buddy is disabled. Run `/buddy on` to re-enable.";
-const WATCHDOG_TURN_THRESHOLD = 3;
+const DEFAULT_ADVISORY_LEVEL: AdvisoryLevel = 0;
 const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
 const STATUS_KEY = "buddy";
@@ -85,8 +97,10 @@ const BG_STATUS_KEY = "buddy-bg";
 const VERDICT_RING_SIZE = 10;
 
 export default function setup(pi: ExtensionAPI): void {
+	let advisoryLevel: AdvisoryLevel = DEFAULT_ADVISORY_LEVEL;
+	let calibrationNote: BuddyCalibrationNote | undefined;
 	const tracker = new BuddyRunTracker(
-		WATCHDOG_TURN_THRESHOLD,
+		() => watchdogThresholdForLevel(advisoryLevel),
 		RUN_END_REVIEW_MIN_TURNS,
 	);
 	let backgroundAbort: AbortController | undefined;
@@ -123,6 +137,8 @@ export default function setup(pi: ExtensionAPI): void {
 				sections.push(memorySection);
 			}
 		}
+		const calibration = buildBuddyCalibrationBlock(calibrationNote);
+		if (calibration) sections.push(calibration);
 		if (verdictRing.length > 0) {
 			sections.push(buildVerdictDigest(verdictRing));
 		}
@@ -189,11 +205,7 @@ export default function setup(pi: ExtensionAPI): void {
 		buddyEnabled = seeded.enabled;
 		buddySwitchSeeded = seeded.seeded;
 		if (buddyEnabled) {
-			if (wasDisabled && shouldRestoreTool) {
-				applyBuddyToolState(true);
-			} else {
-				consultToolWasActiveWhenDisabled = undefined;
-			}
+			applyBuddyToolState(true);
 			return;
 		}
 		consultToolWasActiveWhenDisabled = shouldRestoreTool ? true : undefined;
@@ -377,7 +389,7 @@ export default function setup(pi: ExtensionAPI): void {
 		const requestText =
 			trigger === "turns"
 				? `Automatic watchdog check-in: the agent has completed ` +
-					`${WATCHDOG_TURN_THRESHOLD} turns without consulting you. Review ` +
+					`${launch.watchdogThreshold} turns without consulting you. Review ` +
 					`the recent turns. Reply PASS if there is no real problem.`
 				: `Automatic end-of-run review: the agent has finished its run ` +
 					`without consulting you. Review the work of this run. Reply PASS ` +
@@ -571,6 +583,95 @@ export default function setup(pi: ExtensionAPI): void {
 		},
 	});
 
+	// --- The give_buddy_feedback tool (agent-requested calibration) ---
+
+	pi.registerTool({
+		name: GIVE_BUDDY_FEEDBACK_TOOL,
+		label: "Give Buddy Feedback",
+		description:
+			"Give session-scoped feedback that calibrates Buddy's automatic advisory " +
+			"cadence. Use 'less' when automatic watchdog advisories are too frequent " +
+			"or premature, 'more' when Buddy should be more active, and 'same' when " +
+			"the current level is useful. This never disables run-end review, explicit " +
+			"consult_buddy, or user /buddy consultations.",
+		promptSnippet:
+			"Calibrate Buddy's automatic advisory cadence with more, same, or less feedback",
+		promptGuidelines: [
+			"Use give_buddy_feedback when Buddy's automatic advisories are too frequent, too timid, or currently well-calibrated.",
+			"Use 'less' to exponentially back off watchdog cadence; use 'more' to step Buddy back toward normal or more active review.",
+			"Do not use this to avoid review: run-end review and explicit Buddy consultations remain available and are not suppressed.",
+		],
+		parameters: Type.Object({
+			feedback: StringEnum([...BUDDY_FEEDBACKS] as ["more", "same", "less"], {
+				description: "more | same | less — how Buddy should adjust automatic advisories",
+			}),
+			reason: Type.Optional(
+				Type.String({
+					description:
+						"Optional brief reason for auditability. Treated as context, not proof.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!buddyEnabled) {
+				throw new Error(DISABLED_MESSAGE);
+			}
+			const feedback = params.feedback as BuddyFeedback;
+			const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+			const result = applyBuddyFeedback(advisoryLevel, feedback);
+			advisoryLevel = result.newLevel;
+			if (feedback !== "same") {
+				calibrationNote = {
+					feedback,
+					reason: reason || undefined,
+					level: result.newLevel,
+					watchdogThreshold: result.watchdogThreshold,
+				};
+			}
+			await recordFeedback({
+				feedback,
+				reason: reason || undefined,
+				previousLevel: result.previousLevel,
+				newLevel: result.newLevel,
+				watchdogThreshold: result.watchdogThreshold,
+			});
+			if (ctx.hasUI && feedback !== "same") {
+				ctx.ui.notify(formatBuddyFeedbackResult(result), "info");
+			}
+			return {
+				content: [{ type: "text", text: formatBuddyFeedbackResult(result) }],
+				details: {
+					feedback,
+					reason: reason || undefined,
+					previousLevel: result.previousLevel,
+					newLevel: result.newLevel,
+					watchdogThreshold: result.watchdogThreshold,
+				},
+			};
+		},
+		renderCall(args, theme, context) {
+			const feedback = typeof args.feedback === "string" ? args.feedback : "…";
+			const reason = typeof args.reason === "string" ? args.reason : "";
+			let content = theme.fg("toolTitle", theme.bold("buddy feedback "));
+			content += theme.fg("accent", `[${feedback}] `);
+			content += theme.fg("muted", reason);
+			const text =
+				(context?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(content);
+			return text;
+		},
+		renderResult(result, _options, theme, context) {
+			const text =
+				(context?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			const answer = result.content
+				.filter((block) => block.type === "text")
+				.map((block) => (block as { text: string }).text)
+				.join("\n");
+			text.setText(theme.fg("muted", answer));
+			return text;
+		},
+	});
+
 	// --- /buddy command (user-requested consult) ---
 
 	pi.registerCommand("buddy", {
@@ -691,6 +792,8 @@ export default function setup(pi: ExtensionAPI): void {
 		memoryCuratedThisSession = false;
 		currentSkills = [];
 		verdictRing.length = 0;
+		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
+		calibrationNote = undefined;
 		initializeBuddySwitch();
 	});
 
@@ -727,6 +830,8 @@ export default function setup(pi: ExtensionAPI): void {
 		backgroundAbort = undefined;
 		memoryCuratedThisSession = false;
 		verdictRing.length = 0;
+		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
+		calibrationNote = undefined;
 		if (browserUsed) {
 			await closeBuddyBrowser((command, args, options) =>
 				pi.exec(command, args, options),

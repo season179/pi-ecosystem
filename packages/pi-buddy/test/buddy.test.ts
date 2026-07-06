@@ -17,6 +17,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 import {
+	applyBuddyFeedback,
+	buildBuddyCalibrationBlock,
+	formatBuddyFeedbackResult,
+	watchdogThresholdForLevel,
+	type AdvisoryLevel,
+} from "../src/extensions/calibration.js";
+import {
 	addUsage,
 	snapshotUsage,
 	usageTelemetry,
@@ -37,6 +44,7 @@ import {
 import {
 	__setTelemetryPathForTests,
 	recordConsultation,
+	recordFeedback,
 	telemetryPath,
 } from "../src/extensions/telemetry.js";
 import {
@@ -72,6 +80,7 @@ import {
 import {
 	activeToolsWithBuddyState,
 	CONSULT_BUDDY_TOOL,
+	GIVE_BUDDY_FEEDBACK_TOOL,
 	buddyDisabledFromFlag,
 	parseBuddyCommand,
 	seedBuddyEnabledFromFlag,
@@ -344,6 +353,70 @@ describe("buddy message formatting", () => {
 	});
 });
 
+describe("buddy feedback calibration", () => {
+	it("maps advisory levels to watchdog thresholds", () => {
+		const cases: Array<[AdvisoryLevel, number]> = [
+			[1, 2],
+			[0, 3],
+			[-1, 6],
+			[-2, 12],
+			[-3, 24],
+		];
+		for (const [level, threshold] of cases) {
+			assert.equal(watchdogThresholdForLevel(level), threshold);
+		}
+	});
+
+	it("applies less/more one step at a time with caps", () => {
+		let level: AdvisoryLevel = 0;
+		for (const expected of [-1, -2, -3, -3] as const) {
+			const result = applyBuddyFeedback(level, "less");
+			level = result.newLevel;
+			assert.equal(level, expected);
+		}
+		for (const expected of [-2, -1, 0, 1, 1] as const) {
+			const result = applyBuddyFeedback(level, "more");
+			level = result.newLevel;
+			assert.equal(level, expected);
+		}
+	});
+
+	it("keeps same as state no-op", () => {
+		const result = applyBuddyFeedback(-2, "same");
+		assert.equal(result.previousLevel, -2);
+		assert.equal(result.newLevel, -2);
+		assert.equal(result.watchdogThreshold, 12);
+		assert.equal(result.changed, false);
+	});
+
+	it("builds calibration notes for more and less, but not same", () => {
+		assert.equal(buildBuddyCalibrationBlock(undefined), undefined);
+		const less = buildBuddyCalibrationBlock({
+			feedback: "less",
+			reason: "mechanical refactor",
+			level: -2,
+			watchdogThreshold: 12,
+		});
+		assert.match(less ?? "", /less frequent automatic advisories/);
+		assert.match(less ?? "", /every 12 turns/);
+		assert.match(less ?? "", /context, not proof/);
+		const more = buildBuddyCalibrationBlock({
+			feedback: "more",
+			level: 1,
+			watchdogThreshold: 2,
+		});
+		assert.match(more ?? "", /more active Buddy input/);
+		assert.match(more ?? "", /every 2 turns/);
+	});
+
+	it("formats tool results with previous level, new level, and threshold", () => {
+		assert.equal(
+			formatBuddyFeedbackResult(applyBuddyFeedback(0, "less")),
+			"Buddy feedback recorded: less; level 0 → -1; watchdog threshold 6 turn(s).",
+		);
+	});
+});
+
 describe("usage telemetry helpers", () => {
 	it("snapshots provider-reported usage and preserves zero cost", () => {
 		assert.deepEqual(
@@ -471,8 +544,8 @@ describe("buddy switch helpers", () => {
 		});
 	});
 
-	it("removes and restores consult_buddy in active tools", () => {
-		const active = ["read", CONSULT_BUDDY_TOOL, "bash"];
+	it("removes and restores buddy tools in active tools", () => {
+		const active = ["read", CONSULT_BUDDY_TOOL, GIVE_BUDDY_FEEDBACK_TOOL, "bash"];
 		assert.deepEqual(activeToolsWithBuddyState(active, false, false), [
 			"read",
 			"bash",
@@ -481,10 +554,18 @@ describe("buddy switch helpers", () => {
 			"read",
 			"bash",
 			CONSULT_BUDDY_TOOL,
+			GIVE_BUDDY_FEEDBACK_TOOL,
 		]);
 	});
 
-	it("does not force-enable consult_buddy when it was not active before disable", () => {
+	it("exposes feedback whenever consult_buddy is active", () => {
+		assert.deepEqual(
+			activeToolsWithBuddyState(["read", CONSULT_BUDDY_TOOL], true, false),
+			["read", CONSULT_BUDDY_TOOL, GIVE_BUDDY_FEEDBACK_TOOL],
+		);
+	});
+
+	it("does not force-enable buddy tools when consult_buddy was not active before disable", () => {
 		assert.deepEqual(activeToolsWithBuddyState(["read"], true, false), ["read"]);
 	});
 });
@@ -550,6 +631,28 @@ describe("telemetry", () => {
 		});
 		assert.ok(telemetryPath().includes("impossible"));
 	});
+
+	it("records feedback calibration events", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-feedback-"));
+		const path = join(dir, "buddy-telemetry.jsonl");
+		__setTelemetryPathForTests(path);
+
+		await recordFeedback({
+			feedback: "same",
+			reason: "current cadence is fine",
+			previousLevel: -1,
+			newLevel: -1,
+			watchdogThreshold: 6,
+		});
+
+		const line = (await readFile(path, "utf8")).trim();
+		const record = JSON.parse(line);
+		assert.equal(record.type, "feedback");
+		assert.equal(record.feedback, "same");
+		assert.equal(record.previousLevel, -1);
+		assert.equal(record.newLevel, -1);
+		assert.equal(record.watchdogThreshold, 6);
+	});
 });
 
 describe("isWatchdogPass", () => {
@@ -588,6 +691,18 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.onTurnEnd(), false);
 		assert.equal(t.onTurnEnd(), false);
 		assert.equal(t.onTurnEnd(), true);
+	});
+
+	it("uses a dynamic watchdog threshold supplier", () => {
+		let threshold = 4;
+		const t = new BuddyRunTracker(() => threshold, 2);
+		t.onAgentStart();
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		threshold = 3;
+		assert.equal(t.onTurnEnd(), true);
+		const launch = t.launchBackground("turns");
+		assert.equal(launch.watchdogThreshold, 3);
 	});
 
 	it("does not count turns outside an agent run", () => {
@@ -634,6 +749,14 @@ describe("BuddyRunTracker", () => {
 		c.onPull();
 		c.onTurnEnd();
 		assert.equal(c.onAgentEnd(), false);
+	});
+
+	it("keeps end-of-run review independent of watchdog backoff", () => {
+		const t = new BuddyRunTracker(() => 24, 2);
+		t.onAgentStart();
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onTurnEnd(), false);
+		assert.equal(t.onAgentEnd(), true);
 	});
 
 	it("a fired watchdog counts as consultation for run-end purposes", () => {

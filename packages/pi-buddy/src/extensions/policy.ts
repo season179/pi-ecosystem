@@ -32,6 +32,7 @@ export interface BackgroundLaunch {
 	generation: number;
 	turnsAtLaunch: number;
 	trigger: BackgroundTrigger;
+	watchdogThreshold: number;
 }
 
 export class BuddyRunTracker {
@@ -45,9 +46,15 @@ export class BuddyRunTracker {
 	private generation = 0;
 
 	constructor(
-		private readonly watchdogThreshold: number,
+		private readonly watchdogThreshold: number | (() => number),
 		private readonly runEndMinTurns: number,
 	) {}
+
+	currentWatchdogThreshold(): number {
+		return typeof this.watchdogThreshold === "function"
+			? this.watchdogThreshold()
+			: this.watchdogThreshold;
+	}
 
 	onAgentStart(): void {
 		this.agentRunActive = true;
@@ -63,7 +70,7 @@ export class BuddyRunTracker {
 		this.turnsThisRun += 1;
 		if (this.backgroundInFlight) return false;
 		this.turnsSinceConsult += 1;
-		if (this.turnsSinceConsult < this.watchdogThreshold) return false;
+		if (this.turnsSinceConsult < this.currentWatchdogThreshold()) return false;
 		this.turnsSinceConsult = 0;
 		return true;
 	}
@@ -93,6 +100,7 @@ export class BuddyRunTracker {
 			generation: this.generation,
 			turnsAtLaunch: this.turnsTotal,
 			trigger,
+			watchdogThreshold: this.currentWatchdogThreshold(),
 		};
 	}
 

@@ -25,6 +25,7 @@ export type BuddySource = "tool" | "command" | "watchdog";
 export type BuddyOutcome = "ok" | "pass" | "concern" | "error" | "discarded";
 /** Which automatic path launched a watchdog consultation. */
 export type BuddyTrigger = "turns" | "run_end";
+export type BuddyFeedback = "more" | "same" | "less";
 
 export interface BuddyTelemetryRecord {
 	v: 1;
@@ -80,6 +81,17 @@ export interface BuddyTelemetryRecord {
 	error?: string;
 }
 
+export interface BuddyFeedbackTelemetryRecord {
+	v: 1;
+	ts: string;
+	type: "feedback";
+	feedback: BuddyFeedback;
+	reason?: string;
+	previousLevel: number;
+	newLevel: number;
+	watchdogThreshold: number;
+}
+
 const TELEMETRY_FILE = join(homedir(), ".pi", "agent", "buddy-telemetry.jsonl");
 
 let testTelemetryPath: string | undefined;
@@ -94,6 +106,19 @@ export function telemetryPath(): string {
 
 export async function recordConsultation(
 	record: Omit<BuddyTelemetryRecord, "v" | "ts">,
+): Promise<void> {
+	await appendTelemetry(record);
+}
+
+export async function recordFeedback(
+	record: Omit<BuddyFeedbackTelemetryRecord, "v" | "ts" | "type">,
+): Promise<void> {
+	await appendTelemetry({ type: "feedback", ...record });
+}
+
+async function appendTelemetry(
+	record: Omit<BuddyTelemetryRecord, "v" | "ts"> |
+		Omit<BuddyFeedbackTelemetryRecord, "v" | "ts">,
 ): Promise<void> {
 	try {
 		const path = telemetryPath();
