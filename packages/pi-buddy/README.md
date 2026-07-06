@@ -94,8 +94,9 @@ watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
 count, transcript size, provider-reported token usage, answer length, memory
 block size (`memoryChars`), retry metadata (`attempts`, `retried`), harvest
 counts (`lessons`, `retractions`, `retractMisses`), and duration.
-`discarded` means a background verdict was dropped because the session shut
-down or was replaced mid-investigation.
+Watchdog/background reviews retry once on transient provider failures before
+recording an error. `discarded` means a background verdict was dropped because
+the session shut down or was replaced mid-investigation.
 
 Token telemetry has two layers:
 

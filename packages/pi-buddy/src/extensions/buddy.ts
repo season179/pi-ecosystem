@@ -45,8 +45,9 @@ import {
 	commandConsultDelivery,
 } from "./policy.js";
 import {
+	buddyRetryAttemptsForSource,
 	delayWithAbort,
-	FOREGROUND_RETRY_ATTEMPTS,
+	formatRetriableBuddyFailure,
 	isRetriableBuddyError,
 	retryDelayMs,
 } from "./retry.js";
@@ -264,8 +265,7 @@ export default function setup(pi: ExtensionAPI): void {
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
 		const signal = args.signal ?? args.ctx.signal;
 		let attempts = 0;
-		const maxAttempts =
-			args.source === "watchdog" ? 1 : FOREGROUND_RETRY_ATTEMPTS;
+		const maxAttempts = buddyRetryAttemptsForSource(args.source);
 		const injection = buildInjectionBlock(args.ctx.cwd, {
 			includeMemory: args.source !== "watchdog",
 		});
@@ -439,7 +439,9 @@ export default function setup(pi: ExtensionAPI): void {
 				// telemetry already recorded it. Notify only if the session is live.
 				if (tracker.isCurrent(launch) && !controller.signal.aborted) {
 					ctx.ui.notify(
-						`Buddy background review failed: ${errorToString(error)}`,
+						isRetriableBuddyError(error)
+							? formatRetriableBuddyFailure()
+							: `Buddy background review failed: ${errorToString(error)}`,
 						"warning",
 					);
 				}

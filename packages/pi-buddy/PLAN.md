@@ -316,8 +316,9 @@ Makes /buddy unnecessary: coverage during runs (watchdog), at completion
   first, keep the client tiny and defensive.
 - glm-5.2 with many tools: watch whether tool-call quality degrades with a
   larger toolset; if so, trim schemas/descriptions.
-- Background consultations consume zai subscription quota invisibly —
-  telemetry totalMs/outcome is the visibility mechanism.
+- Background consultations consume zai subscription quota invisibly, including
+  their single retry on transient provider failures — telemetry attempts,
+  retried, totalMs, and outcome are the visibility mechanism.
 - If run-end reviews turn out noisy on short interactive sessions, raise the
   turn floor before adding config knobs.
 

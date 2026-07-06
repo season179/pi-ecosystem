@@ -59,11 +59,15 @@ import {
 	formatBuddyConsult,
 } from "../src/extensions/message-format.js";
 import {
+	buddyRetryAttemptsForSource,
 	delayWithAbort,
+	FOREGROUND_RETRY_ATTEMPTS,
+	formatRetriableBuddyFailure,
 	isRetriableBuddyError,
 	RETRY_BASE_DELAY_MS,
 	RETRY_JITTER_MS,
 	retryDelayMs,
+	WATCHDOG_RETRY_ATTEMPTS,
 } from "../src/extensions/retry.js";
 import {
 	activeToolsWithBuddyState,
@@ -692,12 +696,26 @@ describe("retry helpers", () => {
 		assert.equal(isRetriableBuddyError(new Error("Buddy produced no answer text")), false);
 	});
 
+	it("gives watchdog reviews one retry", () => {
+		assert.equal(WATCHDOG_RETRY_ATTEMPTS, 2);
+		assert.equal(buddyRetryAttemptsForSource("watchdog"), 2);
+		assert.equal(buddyRetryAttemptsForSource("tool"), FOREGROUND_RETRY_ATTEMPTS);
+	});
+
 	it("keeps retry delay within the configured jitter window", () => {
 		assert.equal(retryDelayMs(() => 0), RETRY_BASE_DELAY_MS);
 		assert.equal(
 			retryDelayMs(() => 0.999),
 			RETRY_BASE_DELAY_MS + RETRY_JITTER_MS - 1,
 		);
+	});
+
+	it("summarizes retriable failures without provider jargon", () => {
+		assert.equal(
+			formatRetriableBuddyFailure(),
+			"Buddy review skipped: model was busy after retry.",
+		);
+		assert.doesNotMatch(formatRetriableBuddyFailure(), /try again later/i);
 	});
 
 	it("respects an already-aborted retry signal", async () => {

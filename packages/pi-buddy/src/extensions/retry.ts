@@ -5,6 +5,7 @@ const RETRIABLE_TEXT =
 	/(?:rate\s*limit|too\s*many\s*requests|overload(?:ed)?|temporar(?:y|ily)|timeout|timed?\s*out|ECONNRESET|ETIMEDOUT|EAI_AGAIN)/i;
 
 export const FOREGROUND_RETRY_ATTEMPTS = 2;
+export const WATCHDOG_RETRY_ATTEMPTS = 2;
 export const RETRY_BASE_DELAY_MS = 1500;
 export const RETRY_JITTER_MS = 500;
 
@@ -15,6 +16,16 @@ export function isRetriableBuddyError(error: unknown): boolean {
 
 export function retryDelayMs(random = Math.random): number {
 	return RETRY_BASE_DELAY_MS + Math.floor(random() * RETRY_JITTER_MS);
+}
+
+export function buddyRetryAttemptsForSource(source: string): number {
+	return source === "watchdog"
+		? WATCHDOG_RETRY_ATTEMPTS
+		: FOREGROUND_RETRY_ATTEMPTS;
+}
+
+export function formatRetriableBuddyFailure(): string {
+	return "Buddy review skipped: model was busy after retry.";
 }
 
 export async function delayWithAbort(
