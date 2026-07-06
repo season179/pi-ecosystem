@@ -27,6 +27,15 @@ export type BuddyOutcome = "ok" | "pass" | "concern" | "error" | "discarded";
 export type BuddyTrigger = "turns" | "run_end";
 export type BuddyFeedback = "more" | "same" | "less";
 
+export interface BuddyModelFailureTelemetry {
+	model: string;
+	label?: string;
+	errorKind: string;
+	retried?: boolean;
+	attempts?: number;
+	error?: string;
+}
+
 export interface BuddyTelemetryRecord {
 	v: 1;
 	ts: string;
@@ -78,6 +87,12 @@ export interface BuddyTelemetryRecord {
 	attempts?: number;
 	/** True when a transient provider error was retried. */
 	retried?: boolean;
+	/** Ordered model candidates attempted during this consultation. */
+	modelsAttempted?: string[];
+	/** True when the successful response came from a non-primary candidate. */
+	failoverUsed?: boolean;
+	/** Compact failure summaries for failed/skipped model candidates. */
+	modelFailures?: BuddyModelFailureTelemetry[];
 	error?: string;
 }
 

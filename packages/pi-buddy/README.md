@@ -64,10 +64,30 @@ scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
 
 ## Configuration
 
-- Default buddy model: `zai/glm-5.2`. Override: `pi --buddy-model provider/id`.
+- Default buddy model: `zai/glm-5.2`. Override the single-model default with
+  `pi --buddy-model provider/id`.
+- For provider resilience, configure a priority failover chain in
+  `~/.pi/agent/buddy.json`:
+
+```json
+{
+  "models": [
+    { "id": "zai/glm-5.2", "label": "primary", "priority": 1 },
+    { "id": "anthropic/claude-sonnet-4-5", "label": "fallback", "priority": 2 }
+  ],
+  "retry": { "perModelRetries": 1 }
+}
+```
+
+  Buddy reads this file at the start of every consultation, so edits take effect
+  on the next Buddy call without `/reload` or restart. Priority is ascending;
+  Buddy retries the current model for transient failures before falling back to
+  the next configured model. `perModelRetries: 0` means immediate failover with
+  no same-model retry. No provider is used unless explicitly listed.
 - Buddy is on by default when installed. Disable it for one Pi session with
   `pi --buddy-disabled`; re-enable inside the session with `/buddy on`.
-- The buddy model must exist in your pi model registry with a valid API key.
+- Every configured buddy model must exist in your pi model registry with a valid
+  API key.
 
 ## Enable / disable
 
@@ -92,10 +112,11 @@ consultation): source (`tool`/`command`/`watchdog`), stance, outcome
 (`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
 watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
 count, transcript size, provider-reported token usage, answer length, memory
-block size (`memoryChars`), retry metadata (`attempts`, `retried`), harvest
-counts (`lessons`, `retractions`, `retractMisses`), and duration.
-Watchdog/background reviews retry once on transient provider failures before
-recording an error. `discarded` means a background verdict was dropped because
+block size (`memoryChars`), retry/failover metadata (`attempts`, `retried`,
+`modelsAttempted`, `failoverUsed`, `modelFailures`), harvest counts (`lessons`,
+`retractions`, `retractMisses`), and duration. Watchdog/background reviews retry
+once on transient provider failures before falling back or recording an error.
+`discarded` means a background verdict was dropped because
 the session shut down or was replaced mid-investigation.
 
 Token telemetry has two layers:
@@ -128,6 +149,8 @@ Health signals to watch:
 - **costUsd** — only meaningful for models with nonzero pricing metadata; it is
   expected to be `0` for the default `zai/glm-5.2` model.
 - **totalMs** — how much latency the buddy adds per consultation.
+- **failoverUsed / modelsAttempted** — how often the configured primary model
+  failed and which fallback succeeded.
 - **outcome: error** — surfaces failures that would otherwise be invisible
   (especially silent watchdog failures).
 - **lessons per consultation** — should stay low; if it climbs, the learning

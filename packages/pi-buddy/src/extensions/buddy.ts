@@ -40,6 +40,11 @@ import {
 	type BuddyCalibrationNote,
 	type BuddyFeedback,
 } from "./calibration.js";
+import {
+	loadBuddyConfig,
+	splitModelSpec,
+	type BuddyModelCandidate,
+} from "./buddy-config.js";
 import { consultBuddy, type ConsultResult } from "./consult.js";
 import { harvestDirectives, harvestNotice } from "./harvest.js";
 import {
@@ -56,6 +61,7 @@ import {
 } from "./policy.js";
 import {
 	buddyRetryAttemptsForSource,
+	classifyBuddyError,
 	delayWithAbort,
 	formatRetriableBuddyFailure,
 	isRetriableBuddyError,
@@ -112,6 +118,7 @@ export default function setup(pi: ExtensionAPI): void {
 	let memoryCuratedThisSession = false;
 	let currentSkills: Skill[] = [];
 	const verdictRing: string[] = [];
+	const configWarningsShown = new Set<string>();
 
 	function recordVerdict(trigger: BackgroundTrigger, verdict: string): void {
 		const time = new Date().toISOString().slice(11, 16);
@@ -235,21 +242,102 @@ export default function setup(pi: ExtensionAPI): void {
 		return commandCtx.getSystemPromptOptions?.().skills ?? currentSkills;
 	}
 
-	function resolveBuddyModel(ctx: ExtensionContext): Model<Api> {
-		const spec = String(pi.getFlag("buddy-model") ?? DEFAULT_BUDDY_MODEL);
-		const slash = spec.indexOf("/");
-		if (slash <= 0) {
-			throw new Error(
-				`Invalid buddy model "${spec}" — expected provider/id, e.g. ${DEFAULT_BUDDY_MODEL}`,
-			);
+	interface ResolvedBuddyModelCandidate {
+		spec: string;
+		label?: string;
+		model: Model<Api>;
+	}
+
+	interface BuddyModelPlan {
+		candidates: ResolvedBuddyModelCandidate[];
+		maxAttemptsPerModel: number;
+	}
+
+	type RunConsultationResult = ConsultResult & {
+		model: string;
+		modelsAttempted: string[];
+		failoverUsed: boolean;
+	};
+
+	function formatFailoverLine(result: RunConsultationResult): string | undefined {
+		if (!result.failoverUsed) return undefined;
+		return (
+			`Buddy fallback used: ${result.modelsAttempted.join(" → ")}; ` +
+			`answered by ${result.model}.`
+		);
+	}
+
+	function formatFailoverNotice(result: RunConsultationResult): string {
+		const line = formatFailoverLine(result);
+		return line ? `${line}\n\n${result.answer}` : result.answer;
+	}
+
+	function notifyConfigWarnings(ctx: ExtensionContext, warnings: readonly string[]): void {
+		if (!ctx.hasUI) return;
+		for (const warning of warnings) {
+			if (configWarningsShown.has(warning)) continue;
+			configWarningsShown.add(warning);
+			ctx.ui.notify(`Buddy config: ${warning}`, "warning");
 		}
-		const provider = spec.slice(0, slash);
-		const id = spec.slice(slash + 1);
+	}
+
+	function resolveModelSpec(ctx: ExtensionContext, spec: string): Model<Api> {
+		const { provider, id } = splitModelSpec(spec);
 		const model = ctx.modelRegistry.find(provider, id);
 		if (!model) {
 			throw new Error(`Buddy model ${spec} not found in the model registry`);
 		}
 		return model as Model<Api>;
+	}
+
+	function defaultModelSpec(): string {
+		return String(pi.getFlag("buddy-model") ?? DEFAULT_BUDDY_MODEL);
+	}
+
+	async function resolveBuddyModelPlan(
+		ctx: ExtensionContext,
+		source: BuddySource,
+	): Promise<BuddyModelPlan> {
+		// Read per consultation so edits to ~/.pi/agent/buddy.json take effect
+		// immediately; no /reload or restart is required for model-chain changes.
+		const config = await loadBuddyConfig();
+		const warnings = [...config.warnings];
+		const configured = config.models.length > 0;
+		const candidateConfigs = configured
+			? config.models
+			: [{ id: defaultModelSpec(), priority: 1 } satisfies BuddyModelCandidate];
+		const candidates: ResolvedBuddyModelCandidate[] = [];
+		for (const candidate of candidateConfigs) {
+			try {
+				candidates.push({
+					spec: candidate.id,
+					label: candidate.label,
+					model: resolveModelSpec(ctx, candidate.id),
+				});
+			} catch (error) {
+				warnings.push(`${candidate.id}: ${errorToString(error)}`);
+			}
+		}
+		if (configured && candidates.length === 0) {
+			warnings.push(
+				"No usable models in buddy.json; falling back to --buddy-model/default.",
+			);
+			candidates.push({
+				spec: defaultModelSpec(),
+				model: resolveModelSpec(ctx, defaultModelSpec()),
+			});
+		}
+		notifyConfigWarnings(ctx, warnings);
+		if (candidates.length === 0) {
+			throw new Error("No usable Buddy model candidates configured");
+		}
+		return {
+			candidates,
+			maxAttemptsPerModel:
+				config.perModelRetries === undefined
+					? buddyRetryAttemptsForSource(source)
+					: config.perModelRetries + 1,
+		};
 	}
 
 	async function runConsultation(args: {
@@ -269,58 +357,101 @@ export default function setup(pi: ExtensionAPI): void {
 		/** Apply harvested directives to memory (requested consults only). */
 		harvest?: boolean;
 		onActivity?: (line: string) => void;
-	}): Promise<ConsultResult> {
-		const model = resolveBuddyModel(args.ctx);
-		const modelSpec = `${model.provider}/${model.id}`;
+	}): Promise<RunConsultationResult> {
 		const statusKey = args.statusKey ?? STATUS_KEY;
 		const startedAt = Date.now();
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
 		const signal = args.signal ?? args.ctx.signal;
 		let attempts = 0;
-		const maxAttempts = buddyRetryAttemptsForSource(args.source);
-		const injection = buildInjectionBlock(args.ctx.cwd, {
-			includeMemory: args.source !== "watchdog",
-		});
+		const modelsAttempted: string[] = [];
+		const modelFailures: Array<{
+			model: string;
+			label?: string;
+			errorKind: string;
+			retried?: boolean;
+			attempts?: number;
+			error?: string;
+		}> = [];
+		let lastError: unknown;
+		let successfulCandidate: ResolvedBuddyModelCandidate | undefined;
+		let primaryModel = defaultModelSpec();
 		try {
-			let raw: ConsultResult;
-			for (;;) {
-				attempts += 1;
-				try {
-					raw = await consultBuddy({
-						requestText: args.requestText,
-						systemPrompt: args.systemPrompt,
-						memoryBlock: injection.block,
-						entries: args.ctx.sessionManager.getBranch(),
-						cwd: args.ctx.cwd,
-						model,
-						registry: args.ctx.modelRegistry,
-						signal,
-						extraTools: webTools,
-						onActivity: (line) => {
-							args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
-							args.onActivity?.(line);
-						},
-					});
-					break;
-				} catch (error) {
-					if (
-						signal?.aborted ||
-						attempts >= maxAttempts ||
-						!isRetriableBuddyError(error)
-					) {
-						throw error;
+			const plan = await resolveBuddyModelPlan(args.ctx, args.source);
+			primaryModel = plan.candidates[0]?.spec ?? primaryModel;
+			const injection = buildInjectionBlock(args.ctx.cwd, {
+				includeMemory: args.source !== "watchdog",
+			});
+			let raw: ConsultResult | undefined;
+			modelLoop: for (const candidate of plan.candidates) {
+				let attemptsForModel = 0;
+				if (!modelsAttempted.includes(candidate.spec)) {
+					modelsAttempted.push(candidate.spec);
+				}
+				for (;;) {
+					attempts += 1;
+					attemptsForModel += 1;
+					try {
+						args.ctx.ui.setStatus(
+							statusKey,
+							`buddy: consulting ${candidate.spec}...`,
+						);
+						raw = await consultBuddy({
+							requestText: args.requestText,
+							systemPrompt: args.systemPrompt,
+							memoryBlock: injection.block,
+							entries: args.ctx.sessionManager.getBranch(),
+							cwd: args.ctx.cwd,
+							model: candidate.model,
+							registry: args.ctx.modelRegistry,
+							signal,
+							extraTools: webTools,
+							onActivity: (line) => {
+								args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
+								args.onActivity?.(line);
+							},
+						});
+						successfulCandidate = candidate;
+						break modelLoop;
+					} catch (error) {
+						lastError = error;
+						const retriable = isRetriableBuddyError(error);
+						if (
+							!signal?.aborted &&
+							retriable &&
+							attemptsForModel < plan.maxAttemptsPerModel
+						) {
+							const delayMs = retryDelayMs();
+							args.ctx.ui.setStatus(
+								statusKey,
+								`buddy: ${candidate.spec} busy; retrying in ${(delayMs / 1000).toFixed(1)}s...`,
+							);
+							await delayWithAbort(delayMs, signal);
+							continue;
+						}
+						modelFailures.push({
+							model: candidate.spec,
+							label: candidate.label,
+							errorKind: classifyBuddyError(error),
+							retried: attemptsForModel > 1,
+							attempts: attemptsForModel,
+							error: errorToString(error).slice(0, 500),
+						});
+						if (signal?.aborted) throw error;
+						break;
 					}
-					const delayMs = retryDelayMs();
-					args.ctx.ui.setStatus(
-						statusKey,
-						`buddy: provider busy; retrying in ${(delayMs / 1000).toFixed(1)}s...`,
-					);
-					await delayWithAbort(delayMs, signal);
-					args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
 				}
 			}
+			if (!raw || !successfulCandidate) {
+				throw lastError ?? new Error("All Buddy model candidates failed");
+			}
 			const harvested = harvestDirectives(raw.answer);
-			const result: ConsultResult = { ...raw, answer: harvested.stripped };
+			const result: RunConsultationResult = {
+				...raw,
+				answer: harvested.stripped,
+				model: successfulCandidate.spec,
+				modelsAttempted,
+				failoverUsed: successfulCandidate.spec !== primaryModel,
+			};
 			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
 			if (
 				args.harvest &&
@@ -338,7 +469,7 @@ export default function setup(pi: ExtensionAPI): void {
 				source: args.source,
 				stance: args.stance,
 				outcome: args.outcomeOf?.(result) ?? "ok",
-				model: modelSpec,
+				model: result.model,
 				totalMs: Date.now() - startedAt,
 				trigger: args.trigger,
 				...args.extraTelemetry?.(),
@@ -352,7 +483,12 @@ export default function setup(pi: ExtensionAPI): void {
 				retractMisses: applied.retractMisses,
 				memoryChars: injection.memoryChars,
 				attempts,
-				retried: attempts > 1,
+				// More total attempts than distinct models means at least one model had
+				// a same-model retry before success/failover.
+				retried: attempts > modelsAttempted.length,
+				modelsAttempted,
+				failoverUsed: result.failoverUsed,
+				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
 			});
 			return result;
 		} catch (error) {
@@ -362,11 +498,16 @@ export default function setup(pi: ExtensionAPI): void {
 				// Aborted background reviews (session shutdown/switch) are not failures.
 				outcome:
 					args.source === "watchdog" && signal?.aborted ? "discarded" : "error",
-				model: modelSpec,
+				model: modelsAttempted.at(-1) ?? primaryModel,
 				totalMs: Date.now() - startedAt,
 				trigger: args.trigger,
 				attempts,
-				retried: attempts > 1,
+				// More total attempts than distinct models means at least one model had
+				// a same-model retry before all candidates failed.
+				retried: attempts > modelsAttempted.length,
+				modelsAttempted,
+				failoverUsed: modelsAttempted.length > 1,
+				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
 				error: errorToString(error),
 			});
 			throw error;
@@ -522,7 +663,7 @@ export default function setup(pi: ExtensionAPI): void {
 				},
 			});
 			return {
-				content: [{ type: "text", text: result.answer }],
+				content: [{ type: "text", text: formatFailoverNotice(result) }],
 				details: {
 					stance,
 					question: params.question,
@@ -530,6 +671,9 @@ export default function setup(pi: ExtensionAPI): void {
 					rounds: result.rounds,
 					transcriptTokens: result.transcriptTokens,
 					usage: result.usage,
+					model: result.model,
+					modelsAttempted: result.modelsAttempted,
+					failoverUsed: result.failoverUsed,
 				},
 			};
 		},
@@ -712,11 +856,20 @@ export default function setup(pi: ExtensionAPI): void {
 					stance: "discuss",
 					harvest: true,
 				});
+				const fallbackLine = formatFailoverLine(result);
 				const message = {
 					customType: BUDDY_REVIEW_TYPE,
-					content: formatBuddyConsult(result.answer),
+					content: fallbackLine
+						? `${fallbackLine}\n\n${formatBuddyConsult(result.answer)}`
+						: formatBuddyConsult(result.answer),
 					display: true,
-					details: { activity: result.activity, source: "command" },
+					details: {
+						activity: result.activity,
+						source: "command",
+						model: result.model,
+						modelsAttempted: result.modelsAttempted,
+						failoverUsed: result.failoverUsed,
+					},
 				};
 				if (commandConsultDelivery(tracker.deliveryMode()) === "immediate") {
 					pi.sendMessage(message);
@@ -792,6 +945,7 @@ export default function setup(pi: ExtensionAPI): void {
 		memoryCuratedThisSession = false;
 		currentSkills = [];
 		verdictRing.length = 0;
+		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;
 		initializeBuddySwitch();
@@ -830,6 +984,7 @@ export default function setup(pi: ExtensionAPI): void {
 		backgroundAbort = undefined;
 		memoryCuratedThisSession = false;
 		verdictRing.length = 0;
+		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;
 		if (browserUsed) {

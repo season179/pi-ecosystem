@@ -950,3 +950,219 @@ Add focused tests for:
 - `same` preserving state and producing no Buddy-context note;
 - `less` and `more` producing the intended calibration notes;
 - run-end review policy remaining unaffected by `advisoryLevel`.
+
+# Phase 8: JSON-Configured Buddy Model Failover
+
+Status: IMPLEMENTED (2026-07-06).
+
+Buddy currently targets one configured model and retries that same model once on
+transient failures. That helps with occasional request blips, but it does not
+cover provider outages, quota hiccups, or model-specific instability. Phase 8
+adds an explicit, user-configured priority chain of Buddy models so a failed
+primary can fall back to another model/provider.
+
+The intended shape is not a DB-style load-balancing pool. It is a
+**priority-ordered failover chain**: every consultation starts with the highest
+priority configured model, retries it according to the existing retry policy,
+and then moves to the next configured model only if needed.
+
+## 8.1 Goals
+
+- Make automatic and explicit Buddy consultations resilient to flaky providers.
+- Let Season configure multiple fallback models in JSON, not CLI flags.
+- Keep Buddy predictable: priority order wins; no round-robin, random choice, or
+  parallel voting in v1.
+- Preserve privacy/cost control: Buddy never falls back to a provider unless the
+  user explicitly listed that model in config.
+- Record enough telemetry to answer whether fallback is actually helping.
+
+## 8.2 Configuration file
+
+Use a Buddy-owned JSON file for v1 rather than a CLI flag:
+
+```text
+~/.pi/agent/buddy.json
+```
+
+Initial schema:
+
+```json
+{
+  "models": [
+    {
+      "id": "zai/glm-5.2",
+      "label": "primary",
+      "priority": 1
+    },
+    {
+      "id": "anthropic/claude-sonnet-4-5",
+      "label": "reliable fallback",
+      "priority": 2
+    },
+    {
+      "id": "openai/gpt-5-mini",
+      "label": "cheap fallback",
+      "priority": 3
+    }
+  ],
+  "retry": {
+    "perModelRetries": 1
+  }
+}
+```
+
+Rules:
+
+- The file is read fresh at the start of every Buddy consultation. Edits to
+  `~/.pi/agent/buddy.json` take effect on the next consultation without
+  `/reload` or restart; the tiny disk read is intentional to avoid stale config.
+- `models` is optional. If absent or empty, Buddy keeps current behavior:
+  existing `--buddy-model` value, then the built-in default.
+- `id` uses the same `provider/model` spec as the existing `buddy-model` flag.
+- `priority` sorts ascending; lower number means earlier attempt.
+- `label` is optional and telemetry/UI only.
+- `retry.perModelRetries` defaults to the existing Buddy retry count. It should
+  not change global Pi retry settings. `0` is allowed and means immediate
+  failover with no same-model retry.
+- Invalid config should fail safe: warn visibly when possible, ignore the bad
+  entry, and continue with remaining valid entries. A completely unusable file
+  falls back to current single-model behavior.
+
+A future phase can add project-local `.pi/buddy.json` overrides if needed. Do not
+manually merge arbitrary Pi `settings.json` keys in v1; Pi's extension API does
+not currently expose a clearly documented merged-settings accessor. Keeping a
+Buddy-owned file avoids depending on undocumented internals.
+
+## 8.3 Model selection and fallback behavior
+
+For each Buddy consultation:
+
+1. Load and validate `buddy.json`.
+2. Build the ordered model candidate list.
+3. For each candidate:
+   - resolve the model from `ctx.modelRegistry`;
+   - resolve auth/API headers for that model;
+   - build a model-specific Buddy request;
+   - call the existing single-model `consultBuddy` path.
+4. If the model succeeds, stop and return that result.
+5. If it fails with a retriable error, retry the same model first, then fall
+   back to the next candidate.
+6. If it fails with a non-retriable config/auth/model error, skip same-model
+   retry and try the next candidate.
+7. If all candidates fail, preserve current failure behavior: foreground
+   consultations surface the failure; background watchdog/run-end reviews fail
+   quietly except for telemetry/logging.
+
+Every consultation starts fresh from priority 1. Do not add a circuit breaker or
+cooldown in v1; stale in-memory health state could make Buddy surprisingly route
+a whole session through a fallback after one transient failure.
+
+## 8.4 Implementation boundary
+
+Keep `consultBuddy` as a **single-model** nested agent loop. Put failover in the
+orchestration layer that currently resolves the Buddy model and calls
+`consultBuddy`.
+
+Reason: the transcript budget is model-dependent. A fallback model may have a
+smaller context window, so Buddy must re-resolve the model and re-render/re-trim
+the transcript for that model rather than replaying an identical request.
+
+Suggested module split:
+
+- `config.ts` or `buddy-config.ts`: read and validate `~/.pi/agent/buddy.json`.
+- `model-pool.ts` or `model-failover.ts`: pure helpers for parsing/sorting model
+  candidates and classifying attempt results.
+- `buddy.ts`: orchestration loop over candidates.
+- `consult.ts`: remains focused on one model consultation.
+
+## 8.5 Error classification
+
+Reuse the existing retry classification instead of inventing a second taxonomy.
+
+Retriable examples:
+
+- timeout / overload;
+- HTTP 408 / 425 / 429;
+- HTTP 5xx;
+- transient network reset.
+
+Non-retriable examples:
+
+- missing API key;
+- invalid API key / auth failure;
+- unknown model;
+- invalid Buddy config entry.
+
+Non-retriable failures should move to the next configured candidate immediately.
+
+## 8.6 Telemetry and auditability
+
+Extend consultation telemetry without breaking existing fields:
+
+- keep `model` as the successful model for backwards compatibility;
+- add `modelsAttempted: string[]` in attempt order;
+- add `failoverUsed: boolean`;
+- add failure summaries when practical, e.g.
+  `{ model, label?, errorKind, retried }`;
+- preserve token/cost usage for the successful consultation and, if practical,
+  aggregate usage from failed model attempts separately.
+
+Telemetry should make these questions answerable:
+
+- How often did Buddy need fallback?
+- Which primary providers/models are flaky?
+- Which fallback actually succeeded?
+- Did fallback materially increase cost or latency?
+
+## 8.7 UX and documentation
+
+- Document `~/.pi/agent/buddy.json` in the pi-buddy README.
+- Show a compact warning if config is malformed or all configured models are
+  unusable.
+- For visible `/buddy` consultations, mention when a fallback model was used.
+- For automatic watchdog/run-end reviews, avoid noisy UI unless all models fail
+  or a substantive advisory is produced; telemetry is enough for routine
+  fallback success.
+
+## 8.8 Explicitly out of scope for v1
+
+- Round-robin or random model selection.
+- Parallel Buddy agents.
+- Voting/consensus across models.
+- Hedged requests.
+- Cross-session provider health persistence.
+- Session-scoped circuit breaker/cooldown.
+- Implicit hardcoded fallback providers.
+- Project-local override files, unless a concrete need appears before
+  implementation.
+
+## 8.9 Test plan
+
+Add focused tests for:
+
+- loading a missing `buddy.json` falls back to existing single-model behavior;
+- valid JSON config sorts candidates by priority;
+- invalid entries are skipped while valid entries remain usable;
+- malformed JSON fails safe and reports a warning path;
+- retriable primary failure retries primary once, then falls back;
+- non-retriable auth/model failure skips retry and falls back immediately;
+- all configured models fail and existing failure semantics are preserved;
+- fallback re-renders/re-trims transcript per candidate model;
+- telemetry records `modelsAttempted`, `failoverUsed`, and the successful model.
+
+## 8.10 Acceptance criteria
+
+- Season can configure Buddy's model chain in `~/.pi/agent/buddy.json` without
+  passing CLI flags.
+- A flaky primary provider no longer prevents Buddy from reviewing when a
+  configured fallback succeeds.
+- Default behavior is unchanged when no Buddy config file exists.
+- No transcript is sent to an unlisted provider/model.
+- `consultBuddy` remains a single-model nested loop; failover is isolated in the
+  caller/orchestration layer.
+- Tests and build pass:
+
+```bash
+npm test --workspace @season179/pi-buddy
+npm run build --workspace @season179/pi-buddy
+```

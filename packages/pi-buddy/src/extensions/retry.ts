@@ -9,9 +9,43 @@ export const WATCHDOG_RETRY_ATTEMPTS = 2;
 export const RETRY_BASE_DELAY_MS = 1500;
 export const RETRY_JITTER_MS = 500;
 
+export type BuddyErrorKind =
+	| "auth"
+	| "model"
+	| "rate_limit"
+	| "timeout"
+	| "server"
+	| "network"
+	| "retriable"
+	| "other";
+
 export function isRetriableBuddyError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return RETRIABLE_STATUS.test(message) || RETRIABLE_TEXT.test(message);
+}
+
+export function classifyBuddyError(error: unknown): BuddyErrorKind {
+	const message = error instanceof Error ? error.message : String(error);
+	if (/(?:auth(?:entication)? failed|unauthorized|invalid api key|\b401\b|\b403\b)/i.test(message)) {
+		return "auth";
+	}
+	if (/(?:model .*not found|unknown model|invalid buddy model|expected provider\/id|model registry)/i.test(message)) {
+		return "model";
+	}
+	if (/(?:rate\s*limit|too\s*many\s*requests|\b429\b)/i.test(message)) {
+		return "rate_limit";
+	}
+	if (/(?:timeout|timed?\s*out|ETIMEDOUT|\b408\b|\b425\b)/i.test(message)) {
+		return "timeout";
+	}
+	if (/(?:ECONNRESET|EAI_AGAIN)/i.test(message)) {
+		return "network";
+	}
+	if (/\b(?:500|502|503|504)\b/.test(message)) {
+		return "server";
+	}
+	if (isRetriableBuddyError(error)) return "retriable";
+	return "other";
 }
 
 export function retryDelayMs(random = Math.random): number {

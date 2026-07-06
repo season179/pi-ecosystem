@@ -24,6 +24,11 @@ import {
 	type AdvisoryLevel,
 } from "../src/extensions/calibration.js";
 import {
+	parseBuddyConfig,
+	loadBuddyConfig,
+	splitModelSpec,
+} from "../src/extensions/buddy-config.js";
+import {
 	addUsage,
 	snapshotUsage,
 	usageTelemetry,
@@ -68,6 +73,7 @@ import {
 } from "../src/extensions/message-format.js";
 import {
 	buddyRetryAttemptsForSource,
+	classifyBuddyError,
 	delayWithAbort,
 	FOREGROUND_RETRY_ATTEMPTS,
 	formatRetriableBuddyFailure,
@@ -653,6 +659,42 @@ describe("telemetry", () => {
 		assert.equal(record.newLevel, -1);
 		assert.equal(record.watchdogThreshold, 6);
 	});
+
+	it("records model failover telemetry", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "buddy-failover-"));
+		const path = join(dir, "buddy-telemetry.jsonl");
+		__setTelemetryPathForTests(path);
+
+		await recordConsultation({
+			source: "tool",
+			stance: "review",
+			outcome: "ok",
+			model: "anthropic/claude-sonnet-4-5",
+			totalMs: 2500,
+			attempts: 3,
+			retried: true,
+			modelsAttempted: ["zai/glm-5.2", "anthropic/claude-sonnet-4-5"],
+			failoverUsed: true,
+			modelFailures: [
+				{
+					model: "zai/glm-5.2",
+					label: "primary",
+					errorKind: "rate_limit",
+					retried: true,
+					attempts: 2,
+				},
+			],
+		});
+
+		const record = JSON.parse((await readFile(path, "utf8")).trim());
+		assert.equal(record.model, "anthropic/claude-sonnet-4-5");
+		assert.equal(record.failoverUsed, true);
+		assert.deepEqual(record.modelsAttempted, [
+			"zai/glm-5.2",
+			"anthropic/claude-sonnet-4-5",
+		]);
+		assert.equal(record.modelFailures[0].errorKind, "rate_limit");
+	});
 });
 
 describe("isWatchdogPass", () => {
@@ -800,6 +842,67 @@ describe("BuddyRunTracker", () => {
 	});
 });
 
+describe("buddy config", () => {
+	it("treats a missing buddy.json as default single-model behavior", async () => {
+		const result = await loadBuddyConfig("/tmp/missing-buddy.json", async () => {
+			const error = new Error("missing") as NodeJS.ErrnoException;
+			error.code = "ENOENT";
+			throw error;
+		});
+		assert.equal(result.found, false);
+		assert.deepEqual(result.models, []);
+		assert.deepEqual(result.warnings, []);
+	});
+
+	it("sorts valid model candidates by priority", () => {
+		const result = parseBuddyConfig({
+			models: [
+				{ id: "openai/gpt-5-mini", priority: 3, label: "cheap" },
+				{ id: "zai/glm-5.2", priority: 1, label: "primary" },
+				{ id: "anthropic/claude-sonnet-4-5", priority: 2 },
+			],
+			retry: { perModelRetries: 0 },
+		});
+		assert.deepEqual(
+			result.models.map((model) => model.id),
+			["zai/glm-5.2", "anthropic/claude-sonnet-4-5", "openai/gpt-5-mini"],
+		);
+		assert.equal(result.models[0].label, "primary");
+		assert.equal(result.perModelRetries, 0);
+	});
+
+	it("skips invalid model entries while preserving valid entries", () => {
+		const result = parseBuddyConfig({
+			models: [
+				{ id: "bad-model", priority: 1 },
+				{ id: "zai/glm-5.2", priority: 2 },
+				{ id: "anthropic/claude-sonnet-4-5", priority: "later" },
+			],
+			retry: { perModelRetries: -1 },
+		});
+		assert.deepEqual(result.models.map((model) => model.id), ["zai/glm-5.2"]);
+		assert.equal(result.perModelRetries, undefined);
+		assert.ok(result.warnings.some((warning) => warning.includes("provider/model")));
+		assert.ok(result.warnings.some((warning) => warning.includes("priority")));
+		assert.ok(result.warnings.some((warning) => warning.includes("perModelRetries")));
+	});
+
+	it("reports malformed JSON as a safe empty config", async () => {
+		const result = await loadBuddyConfig("/tmp/buddy.json", async () => "{");
+		assert.equal(result.found, true);
+		assert.deepEqual(result.models, []);
+		assert.ok(result.warnings[0].includes("Could not parse"));
+	});
+
+	it("splits provider/model specs", () => {
+		assert.deepEqual(splitModelSpec("zai/glm-5.2"), {
+			provider: "zai",
+			id: "glm-5.2",
+		});
+		assert.throws(() => splitModelSpec("glm-5.2"), /expected provider\/id/);
+	});
+});
+
 describe("retry helpers", () => {
 	it("classifies transient provider errors as retriable", () => {
 		assert.equal(
@@ -817,6 +920,19 @@ describe("retry helpers", () => {
 		assert.equal(isRetriableBuddyError(new Error("Buddy authentication failed")), false);
 		assert.equal(isRetriableBuddyError(new Error("409 conflict")), false);
 		assert.equal(isRetriableBuddyError(new Error("Buddy produced no answer text")), false);
+	});
+
+	it("classifies buddy errors for failover telemetry", () => {
+		assert.equal(classifyBuddyError(new Error("401 unauthorized")), "auth");
+		assert.equal(
+			classifyBuddyError(new Error("Buddy model zai/missing not found")),
+			"model",
+		);
+		assert.equal(classifyBuddyError(new Error("429 rate limit")), "rate_limit");
+		assert.equal(classifyBuddyError(new Error("425 too early")), "timeout");
+		assert.equal(classifyBuddyError(new Error("503 service unavailable")), "server");
+		assert.equal(classifyBuddyError(new Error("ECONNRESET")), "network");
+		assert.equal(classifyBuddyError(new Error("weird failure")), "other");
 	});
 
 	it("gives watchdog reviews one retry", () => {
