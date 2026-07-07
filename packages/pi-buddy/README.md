@@ -28,10 +28,13 @@ for the next user prompt so Buddy does not steer the active run.
 **BUDDY ADVISORY (auto, watchdog)** — if the agent works 3 turns without
 consulting the buddy, the buddy investigates **in the background while the
 agent keeps working** — like a colleague who checks his suspicion before
-interrupting. `PASS` verdicts are suppressed (no noise). Real concerns are
-steered in when the verdict lands, with staleness framing (`Reviewed ~N
-turn(s) ago...`); if the run already ended, the concern is queued for your
-next prompt — the agent is never auto-woken.
+interrupting. `PASS` verdicts are suppressed (no noise), including pass-ish
+answers where Buddy emits a standalone `PASS` plus benign verification text.
+Real concerns are steered in when the verdict lands, with staleness framing
+(`Reviewed ~N turn(s) ago...`). Non-blocking concerns that land more than three
+turns late are suppressed and recorded as `stale_suppressed`; blocker/security/
+regression-style concerns still deliver. If the run already ended, the concern
+is queued for your next prompt — the agent is never auto-woken.
 
 **BUDDY ADVISORY (auto, run-end)** — runs of ≥ 2 turns that never consulted
 the buddy get a quiet background review at completion (same PASS-suppression).
@@ -109,20 +112,24 @@ because it only shows or clears local memory files; it does not consult the mode
 Each consultation appends one JSONL record to
 `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort, never breaks a
 consultation): source (`tool`/`command`/`watchdog`), stance, outcome
-(`ok`/`pass`/`concern`/`error`/`discarded`), trigger (`turns`/`run_end` for
-watchdog records), `turnsElapsed` (verdict staleness), rounds, tool-call
-count, transcript size, provider-reported token usage, answer length, memory
-block size (`memoryChars`), retry/failover metadata (`attempts`, `retried`,
+(`ok`/`pass`/`concern`/`stale_suppressed`/`error`/`discarded`), trigger
+(`turns`/`run_end` for watchdog records), `turnsElapsed` (verdict staleness),
+rounds, tool-call count, transcript size, provider-reported token usage,
+answer length, memory block size (`memoryChars`), retry/failover metadata
+(`attempts`, `retried`,
 `modelsAttempted`, `failoverUsed`, `modelFailures`), harvest counts (`lessons`,
 `retractions`, `retractMisses`), and duration. Watchdog/background reviews retry
 once on transient provider failures before falling back or recording an error.
-`discarded` means a background verdict was dropped because
-the session shut down or was replaced mid-investigation.
+`stale_suppressed` means an automatic concern landed too late to steer and did
+not contain blocker markers. `discarded` means a background verdict was dropped
+because the session shut down or was replaced mid-investigation.
 
 Token telemetry has two layers:
 
 - `transcriptTokens` is a chars/4 heuristic for the rendered transcript only;
   it is useful as a context-pressure estimate before provider formatting.
+  Automatic watchdog/run-end reviews use a smaller recent-context transcript
+  budget than requested consultations.
 - `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
   `reasoningTokens`, `totalTokens`, and `costUsd` come from pi-ai's
   provider-reported `AssistantMessage.usage`, summed across all Buddy model
@@ -153,6 +160,8 @@ Health signals to watch:
   failed and which fallback succeeded.
 - **outcome: error** — surfaces failures that would otherwise be invisible
   (especially silent watchdog failures).
+- **outcome: stale_suppressed** — automatic concern suppressed for staleness;
+  if this climbs, the watchdog is finding issues too late.
 - **lessons per consultation** — should stay low; if it climbs, the learning
   prompt is too eager. Tune the prompt before raising caps.
 - **retractMisses** — the buddy is hallucinating or misremembering a lesson;

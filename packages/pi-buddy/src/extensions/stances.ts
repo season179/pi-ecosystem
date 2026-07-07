@@ -7,6 +7,11 @@
  * consult_buddy calls and answers are part of it).
  */
 
+import {
+	hasAutomaticConcernMarker,
+	isStandalonePassLine,
+} from "./automatic-review.js";
+
 export const STANCES = ["discuss", "debate", "fact_check", "review"] as const;
 export type Stance = (typeof STANCES)[number];
 
@@ -158,16 +163,19 @@ problem, describe it concisely and concretely so the agent can correct
 course, even if the agent has already moved on to other work — late steering
 in the right direction is still worth it.
 
-If you find a real problem, use this shape: lead with a one-line actionable
-headline, then include only the evidence the agent needs to decide whether to
-fix or rebut. No preamble, no exhaustive review prose, and no restating the
-whole transcript.
+If you find a real unresolved problem, use this shape: lead with a one-line
+actionable headline, then include only the evidence the agent needs to decide
+whether to fix or rebut. No preamble, no exhaustive review prose, and no
+restating the whole transcript. This concern shape applies ONLY to unresolved,
+actionable problems.
 
-If you find no real problem, reply with exactly:
+If you find no real unresolved problem, reply with exactly:
 ${WATCHDOG_PASS_TOKEN}
 
-Nothing else. No praise, no summary, no minor nitpicks. Interrupting the agent
-has a cost; only bark when it matters.`;
+Nothing else. No praise, no summary, no minor nitpicks, no explanation after
+PASS. If your answer would mainly say "already fixed", "the work is correct",
+"keep this in mind", "minor note", or "no real problem", output exactly PASS.
+Interrupting the agent has a cost; only bark when it matters.`;
 }
 
 /** True when a watchdog reply should be suppressed (no interjection). */
@@ -175,5 +183,9 @@ export function isWatchdogPass(text: string): boolean {
 	const trimmed = text.trim();
 	if (trimmed === WATCHDOG_PASS_TOKEN) return true;
 	// Tolerate minor decoration like "PASS." or "**PASS**".
-	return /^[*_`"'\s]*PASS[*_`"'.!\s]*$/.test(trimmed);
+	if (isStandalonePassLine(trimmed)) return true;
+
+	const lines = trimmed.split(/\r?\n/);
+	if (!lines.some((line) => isStandalonePassLine(line))) return false;
+	return !hasAutomaticConcernMarker(trimmed);
 }

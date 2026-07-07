@@ -1,3 +1,5 @@
+import { hasAutomaticConcernMarker } from "./automatic-review.js";
+
 /**
  * Pure state machine for the buddy's automatic advisory behavior.
  *
@@ -11,6 +13,27 @@
 export type BackgroundTrigger = "turns" | "run_end";
 export type DeliveryMode = "steer" | "nextTurn";
 export type CommandConsultDelivery = "immediate" | "nextTurn";
+
+/**
+ * Deliver concerns reviewed up to 3 turns ago; suppress only turnsElapsed > 3.
+ * This matches the initial telemetry cut (`gt3: 39/148` concerns) and is
+ * intentionally conservative pending Phase 9 post-implementation measurement.
+ */
+export const STALE_CONCERN_MAX_TURNS = 3;
+
+export interface AutomaticConcernDeliveryDecision {
+	deliver: boolean;
+	reason?: "stale_concern";
+}
+
+export function shouldDeliverAutomaticConcern(args: {
+	answer: string;
+	turnsElapsed: number;
+}): AutomaticConcernDeliveryDecision {
+	if (args.turnsElapsed <= STALE_CONCERN_MAX_TURNS) return { deliver: true };
+	if (hasAutomaticConcernMarker(args.answer)) return { deliver: true };
+	return { deliver: false, reason: "stale_concern" };
+}
 
 /**
  * User-requested `/buddy` answers should render immediately when the agent is

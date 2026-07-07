@@ -22,7 +22,13 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export type BuddySource = "tool" | "command" | "watchdog";
-export type BuddyOutcome = "ok" | "pass" | "concern" | "error" | "discarded";
+export type BuddyOutcome =
+	| "ok"
+	| "pass"
+	| "concern"
+	| "stale_suppressed"
+	| "error"
+	| "discarded";
 /** Which automatic path launched a watchdog consultation. */
 export type BuddyTrigger = "turns" | "run_end";
 export type BuddyFeedback = "more" | "same" | "less";

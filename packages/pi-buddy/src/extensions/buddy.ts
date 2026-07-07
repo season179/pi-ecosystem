@@ -45,7 +45,11 @@ import {
 	splitModelSpec,
 	type BuddyModelCandidate,
 } from "./buddy-config.js";
-import { consultBuddy, type ConsultResult } from "./consult.js";
+import {
+	automaticTranscriptBudget,
+	consultBuddy,
+	type ConsultResult,
+} from "./consult.js";
 import { harvestDirectives, harvestNotice } from "./harvest.js";
 import {
 	buddyRendererLabel,
@@ -58,6 +62,7 @@ import {
 	type BackgroundTrigger,
 	BuddyRunTracker,
 	commandConsultDelivery,
+	shouldDeliverAutomaticConcern,
 } from "./policy.js";
 import {
 	buddyRetryAttemptsForSource,
@@ -449,6 +454,10 @@ export default function setup(pi: ExtensionAPI): void {
 							model: candidate.model,
 							registry: args.ctx.modelRegistry,
 							signal,
+							transcriptBudget:
+								args.source === "watchdog"
+									? automaticTranscriptBudget(candidate.model.contextWindow)
+									: undefined,
 							extraTools: webTools,
 							onActivity: (line) => {
 								args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
@@ -584,6 +593,22 @@ export default function setup(pi: ExtensionAPI): void {
 					`without consulting you. Review the work of this run. Reply PASS ` +
 					`if there is no real problem.`;
 
+		// Set once by runConsultation's telemetry outcome hook; re-derived below if absent.
+		let recordedOutcome: BuddyOutcome | undefined;
+		const automaticOutcome = (answer: string): BuddyOutcome => {
+			if (!tracker.isCurrent(launch)) return "discarded";
+			if (isWatchdogPass(answer)) return "pass";
+			const staleness = tracker.turnsElapsedSince(launch);
+			return shouldDeliverAutomaticConcern({ answer, turnsElapsed: staleness })
+				.deliver
+				? "concern"
+				: "stale_suppressed";
+		};
+		const recordAutomaticOutcome = (answer: string): BuddyOutcome => {
+			recordedOutcome = automaticOutcome(answer);
+			return recordedOutcome;
+		};
+
 		// Fire-and-forget: the agent keeps working while the buddy investigates.
 		void (async () => {
 			try {
@@ -596,29 +621,32 @@ export default function setup(pi: ExtensionAPI): void {
 					signal: controller.signal,
 					statusKey: BG_STATUS_KEY,
 					trigger,
-					outcomeOf: (r) =>
-						!tracker.isCurrent(launch)
-							? "discarded"
-							: isWatchdogPass(r.answer)
-								? "pass"
-								: "concern",
+					outcomeOf: (r) => recordAutomaticOutcome(r.answer),
 					extraTelemetry: () => ({
 						turnsElapsed: tracker.turnsElapsedSince(launch),
 					}),
 				});
 				// Session was replaced/forked while we investigated: drop the verdict.
 				if (!tracker.isCurrent(launch)) return;
+				const outcome = recordedOutcome ?? automaticOutcome(result.answer);
 				// runConsultation already stripped directives, so PASS detection cannot
 				// be spoofed by `PASS\n\nLESSON[...]`.
-				if (isWatchdogPass(result.answer)) {
+				if (outcome === "pass") {
 					recordVerdict(trigger, "PASS");
+					return;
+				}
+				const staleness = tracker.turnsElapsedSince(launch);
+				if (outcome === "stale_suppressed") {
+					recordVerdict(
+						trigger,
+						`stale-suppressed concern: ${result.answer.split("\n")[0].slice(0, 100)}`,
+					);
 					return;
 				}
 				recordVerdict(
 					trigger,
 					`concern: ${result.answer.split("\n")[0].slice(0, 120)}`,
 				);
-				const staleness = tracker.turnsElapsedSince(launch);
 				pi.sendMessage(
 					{
 						customType: BUDDY_REVIEW_TYPE,

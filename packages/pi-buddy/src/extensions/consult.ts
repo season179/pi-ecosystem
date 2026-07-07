@@ -39,6 +39,11 @@ const MAX_TOOL_ROUNDS = 10;
 const KEEP_HEAD_BLOCKS = 6;
 const KEEP_TAIL_BLOCKS = 30;
 
+/** Smaller recent-context budget for automatic watchdog/run-end reviews. */
+const AUTO_KEEP_HEAD_BLOCKS = 4;
+const AUTO_KEEP_TAIL_BLOCKS = 16;
+const AUTO_MAX_TRANSCRIPT_TOKENS = 48_000;
+
 /**
  * Fraction of the buddy model's context window budgeted for the transcript.
  * The remainder is headroom for the system prompt, the buddy's own tool-loop
@@ -64,6 +69,8 @@ export interface ConsultRequest {
 	signal?: AbortSignal;
 	/** Additional read-only tools (e.g. web tools) beyond read/grep/find/ls. */
 	extraTools?: readonly BuddyTool[];
+	/** Optional source-specific transcript budget; foreground consults omit this. */
+	transcriptBudget?: TranscriptBudget;
 	onActivity?: (line: string) => void;
 }
 
@@ -98,6 +105,23 @@ export interface UsageSnapshot {
 	costUsd: number;
 }
 
+export function defaultTranscriptBudget(contextWindow: number): TranscriptBudget {
+	return {
+		maxTokens: Math.floor(contextWindow * TRANSCRIPT_WINDOW_FRACTION),
+		keepHeadBlocks: KEEP_HEAD_BLOCKS,
+		keepTailBlocks: KEEP_TAIL_BLOCKS,
+	};
+}
+
+export function automaticTranscriptBudget(contextWindow: number): TranscriptBudget {
+	const defaultBudget = defaultTranscriptBudget(contextWindow);
+	return {
+		maxTokens: Math.min(defaultBudget.maxTokens, AUTO_MAX_TRANSCRIPT_TOKENS),
+		keepHeadBlocks: AUTO_KEEP_HEAD_BLOCKS,
+		keepTailBlocks: AUTO_KEEP_TAIL_BLOCKS,
+	};
+}
+
 export interface ConsultResult {
 	answer: string;
 	/** One line per buddy tool call, e.g. "read src/foo.ts". */
@@ -118,13 +142,8 @@ export async function consultBuddy(
 		);
 	}
 
-	const budget: TranscriptBudget = {
-		maxTokens: Math.floor(
-			request.model.contextWindow * TRANSCRIPT_WINDOW_FRACTION,
-		),
-		keepHeadBlocks: KEEP_HEAD_BLOCKS,
-		keepTailBlocks: KEEP_TAIL_BLOCKS,
-	};
+	const budget =
+		request.transcriptBudget ?? defaultTranscriptBudget(request.model.contextWindow);
 	const transcript = renderTranscript(
 		branchToBlocks(request.entries),
 		budget,

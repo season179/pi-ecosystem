@@ -1166,3 +1166,320 @@ Add focused tests for:
 npm test --workspace @season179/pi-buddy
 npm run build --workspace @season179/pi-buddy
 ```
+
+# Phase 9: Automatic Buddy Noise Reduction
+
+Phase 9 tunes the **automatic** Buddy paths (`source: "watchdog"`, triggers
+`turns` and `run_end`) using the telemetry now available in
+`~/.pi/agent/buddy-telemetry.jsonl`. This phase is intentionally limited to
+auto advisories; it must not change user `/buddy` consultations or agent
+`consult_buddy` behavior except through shared helper tests.
+
+## 9.1 Telemetry baseline
+
+Snapshot reviewed before this phase:
+
+- 343 total Buddy telemetry records.
+- 283 automatic watchdog records:
+  - 260 turn-threshold reviews;
+  - 23 run-end reviews.
+- Automatic outcomes:
+  - 148 `concern`;
+  - 119 `pass`;
+  - 12 `error`;
+  - 4 `discarded`.
+- Successful automatic reviews showed a high visible-advisory rate:
+  - turn-threshold concern rate: ~54%;
+  - run-end concern rate: ~76%.
+- Session-log inspection found many visible advisories whose substance was
+  actually pass-ish (`PASS`, `No real problem`, `Nothing to flag`, or equivalent)
+  but which were surfaced because `isWatchdogPass` only accepts an answer that is
+  entirely `PASS` plus minor decoration.
+- Concern verdicts were materially staler than pass verdicts:
+  - pass average `turnsElapsed`: ~1.0;
+  - concern average `turnsElapsed`: ~2.47;
+  - 39 concerns landed more than 3 turns late;
+  - maximum observed concern staleness: 14 turns.
+- Provider token telemetry on newer records showed automatic reviews often send
+  very large context:
+  - median provider `totalTokens`: ~105k;
+  - p90 provider `totalTokens`: ~223k;
+  - p95 provider `totalTokens`: ~443k;
+  - p90 heuristic `transcriptTokens`: ~178k.
+
+Interpretation caveats:
+
+- A high concern rate is not automatically bad; true-positive concerns are the
+  point of Buddy. The actionable problem is visible pass-ish / stale / low-value
+  advisories.
+- Run-end reviews have selection bias: they only fire on runs that did not
+  explicitly consult Buddy, so their concern rate may naturally be higher.
+- Dollar cost is under-reported while `zai/glm-5.2` has zero pricing metadata;
+  provider token counts are the more reliable cost-pressure signal.
+
+## 9.2 Goals
+
+- Reduce visible automatic advisories that do not contain an unresolved,
+  actionable problem.
+- Keep high-signal automatic concerns visible and agent-steering.
+- Reduce automatic review token volume without weakening foreground
+  `consult_buddy` or `/buddy` consultations.
+- Prefer small, telemetry-measurable changes over a large structured-output
+  protocol until the cheap fixes are proven insufficient.
+- Preserve the zero-write-tool Buddy invariant.
+
+## 9.3 Non-goals
+
+- Do not replace automatic Buddy with a multi-agent/voting system.
+- Do not add hidden advisories; automatic steering remains visible when it is
+  delivered.
+- Do not change manual `/buddy` or agent `consult_buddy` cadence.
+- Do not globally switch Buddy models as part of this phase. Model routing should
+  be reconsidered only after noise and context-budget fixes are measured.
+- Do not persist cross-session false-positive/true-positive judgments.
+
+## 9.4 Change 1: stale-concern gate
+
+The tracker already records launch state and computes `turnsElapsedSince(launch)`.
+Currently this value is used for telemetry and advisory text only. Phase 9 should
+make it load-bearing for automatic concerns.
+
+Proposed v1 behavior:
+
+- If an automatic result is `PASS`, keep current suppression behavior.
+- If an automatic result is a concern and `turnsElapsed <= 3`, deliver normally.
+- If an automatic result is a concern and `turnsElapsed > 3`, suppress it unless
+  it clearly claims an unresolved blocking issue.
+
+Initial implementation should be conservative and simple:
+
+- Add a pure helper such as `shouldDeliverAutomaticConcern({ answer,
+  turnsElapsed })`.
+- Use `turnsElapsedSince(launch)`, which is based on monotonic `turnsTotal`, not
+  `turnsSinceConsult`; a mid-flight explicit `consult_buddy` / `/buddy` call
+  should not rescue an already-stale automatic concern.
+- v1 may use only the staleness threshold (`<= 3`) plus an allowlist for explicit
+  severe markers if needed later. Avoid complex semantic parsing in the first
+  cut.
+- Record suppressed stale concerns in telemetry as a distinct outcome or field
+  (for example `outcome: "discarded"` with `discardReason: "stale_concern"`, or
+  a new backwards-compatible optional field). The telemetry must distinguish
+  stale suppression from aborted/session-invalidated discarded reviews.
+- Add the suppressed stale concern to the in-session verdict digest as a compact
+  note so future Buddy calls can calibrate, but do not inject it into the main
+  transcript as advice.
+
+Why this comes first: it is the cheapest high-signal fix and directly targets
+late advisories that often arrive after the agent has already corrected course.
+
+## 9.5 Change 2: pass-ish suppression heuristic
+
+Current pass detection only accepts whole-answer `PASS`:
+
+```ts
+PASS
+```
+
+Telemetry/session logs show Buddy sometimes emits pass-ish content in concern
+shape, such as:
+
+```text
+PASS
+
+The work is complete and verified...
+```
+
+or:
+
+```text
+No real problem.
+
+PASS
+```
+
+Phase 9 should expand `isWatchdogPass` before introducing a structured verdict
+protocol.
+
+Proposed v1 detection:
+
+- Keep exact/decoration-only `PASS` support.
+- Treat a standalone `PASS` line as pass when the rest of the answer contains no
+  strong concern markers.
+- Treat `Concern:\nPASS` as pass when the remaining text is explanatory / praise
+  / verification and not an actionable defect.
+- Recognize a small set of pass-ish phrases only when paired with a standalone
+  `PASS`, e.g. `no real problem`, `nothing to flag`, `no correctness defects`.
+- Do **not** suppress answers that contain `PASS` while also naming a concrete
+  blocking defect, failed test, missed requirement, security issue, or required
+  fix.
+- Treat defect-marker vocabulary as concern-forcing when present near a
+  standalone `PASS`: `failed`, `failing`, `broken`, `missing`, `missed`,
+  `wrong`, `incorrect`, `security`, `vulnerability`, `data loss`,
+  `regression`, `bug`, `error`, `blocked`, `blocking`, `must fix`,
+  `required fix`, `does not`,
+  `doesn't`, `not working`, `wrong direction`, `won't scale`, or `will not
+  scale`. Use the same concern-forcing vocabulary for stale-concern blocker
+  detection so the two suppression gates do not diverge. Exclude benign negated
+  phrases such as `no real problem`, `nothing to flag`, `no correctness
+  defects`, `no issues`, and `no blockers`.
+
+This should be implemented as a pure helper with fixtures from observed session
+messages. Seed the fixture corpus with literal examples from the telemetry
+forensics, including:
+
+```text
+PASS
+
+The work is complete and verified. Both branches pushed, typechecks/tests pass.
+```
+
+```text
+The agent's answer is correct and well-supported. No factual or technical errors
+spotted in the cited claims.
+
+PASS
+```
+
+If the heuristic becomes complicated or produces unsafe ambiguity, escalate to a
+structured verdict protocol in a later phase.
+
+## 9.6 Change 3: fix the watchdog prompt contradiction
+
+The prompt tells Buddy to reply exactly `PASS` when there is no problem, but also
+teaches a concern shape. Some outputs half-apply the concern shape even when the
+verdict is pass.
+
+Tighten `buildWatchdogSystemPrompt()`:
+
+- State that the concern shape applies **only** when there is an unresolved,
+  actionable problem.
+- State that if the answer would mainly say “already fixed”, “work is correct”,
+  “keep this in mind”, “minor note”, or “no real problem”, Buddy must output
+  exactly `PASS`.
+- Explicitly forbid `PASS` plus explanation on automatic paths.
+- Keep the concise actionable-headline requirement for real concerns.
+
+This is prompt-only but should be tested by asserting the prompt contains the new
+rules.
+
+## 9.7 Change 4: auto-specific transcript budget
+
+`consultBuddy` currently uses one transcript budget for all sources:
+
+- `TRANSCRIPT_WINDOW_FRACTION = 0.6`;
+- `KEEP_HEAD_BLOCKS = 6`;
+- `KEEP_TAIL_BLOCKS = 30`.
+
+That sends very large transcripts to automatic reviews even though the watchdog
+prompt asks Buddy to focus on recent turns.
+
+Phase 9 should add an optional transcript-budget override to `ConsultRequest` and
+use a smaller budget for `source: "watchdog"`:
+
+Suggested first cut:
+
+- keep head blocks: 2–4;
+- keep tail blocks: 12–16;
+- transcript max: min(existing computed max, 48k estimated tokens).
+
+Manual `consult_buddy` and `/buddy` should continue using the existing budget.
+
+Telemetry after this change should confirm lower automatic `transcriptTokens`,
+`inputTokens`, `totalTokens`, latency, and cost pressure.
+
+## 9.8 Deferred: structured automatic verdict protocol
+
+A structured verdict protocol may still be useful, but defer it until after the
+small fixes are measured. Phase 9 intentionally keeps the pass-ish heuristic
+anchored on a standalone `PASS` line; pass-ish prose with no `PASS` token remains
+visible in v1 as a safe default rather than risking over-suppression.
+
+Do not implement in Phase 9 unless the pass-ish heuristic is demonstrably unsafe.
+A future structured version would need to decide:
+
+- free-text JSON parsing vs a second structured call;
+- how tool-loop answers include both verdict metadata and evidence;
+- failure semantics when verdict parsing fails;
+- backwards compatibility with existing telemetry and PASS suppression.
+
+## 9.9 Error and fallback considerations
+
+Telemetry showed automatic `zai/glm-5.2` failures were mostly transient 429s.
+This phase should not add watchdog retries by default, because automatic reviews
+are best-effort and retries can increase background load. However, document and
+preserve enough telemetry to revisit this after Phase 8 failover is established.
+
+If Phase 8 model failover is already implemented when Phase 9 lands, stale gates
+and pass-ish suppression apply after the successful model answer, independent of
+which model produced it.
+
+## 9.10 Implementation order
+
+1. Add pure tests for observed pass-ish and real-concern watchdog answers using
+   the literal fixtures in §9.5.
+2. Extend `isWatchdogPass` / helper logic to suppress pass-ish automatic answers.
+3. Add pure tests for stale concern delivery decisions.
+4. Gate delivery of stale automatic concerns before `pi.sendMessage` in
+   `launchBackgroundReview`.
+5. Add telemetry for stale-suppressed automatic concerns.
+6. Tighten `buildWatchdogSystemPrompt()` and test key wording.
+7. Add optional transcript budget override to `ConsultRequest`.
+8. Pass the smaller budget only from automatic watchdog/run-end calls.
+9. Update README telemetry/behavior docs.
+10. Run tests/build and inspect fresh telemetry manually after real use.
+
+## 9.11 Test plan
+
+Add focused tests for:
+
+- `isWatchdogPass("PASS")` still passes;
+- decorated `PASS.` / `**PASS**` still passes;
+- standalone `PASS` plus benign verification text passes;
+- `Concern:\nPASS\n\nNo real problem...` passes;
+- `PASS` embedded inside a real defect report does **not** pass, with at least
+  three defect-marker fixtures (for example failing tests, missing requirement,
+  and security/regression wording);
+- a real concern with no `PASS` does not pass;
+- stale concern with `turnsElapsed <= 3` delivers;
+- stale concern with `turnsElapsed > 3` suppresses / records stale telemetry;
+- run-end and turn-trigger paths both use the same delivery gate;
+- manual `consult_buddy` and `/buddy` are unaffected;
+- automatic calls use the smaller transcript budget while foreground calls keep
+  the existing budget;
+- prompt wording forbids `PASS` plus explanation.
+
+## 9.12 Post-implementation measurement
+
+After this phase has been used for a few sessions, rerun the telemetry analysis
+with the same cuts:
+
+- automatic launch count by trigger;
+- pass / concern / error / discarded / stale-suppressed counts;
+- visible pass-ish advisory count from session logs;
+- concern staleness distribution;
+- automatic `transcriptTokens`, `inputTokens`, `totalTokens`, `totalMs`, and
+  `costUsd` by model;
+- run-end concern rate, interpreted with the no-explicit-consult selection bias.
+
+Target outcomes:
+
+- visible pass-ish automatic advisories: near zero;
+- stale visible concerns over 3 turns old: sharply reduced;
+- automatic p90 transcript/token volume materially lower;
+- no evidence of missed high-severity concerns from over-suppression.
+
+## 9.13 Acceptance criteria
+
+- Automatic Buddy no longer surfaces answers whose substantive verdict is pass.
+- Automatic concerns that land stale are suppressed or explicitly justified by a
+  conservative delivery gate.
+- Automatic reviews use a smaller transcript budget than foreground consults.
+- Telemetry can distinguish normal PASS, delivered concern, provider error,
+  aborted/session-discarded review, and stale-suppressed concern.
+- Existing manual Buddy consultations remain behaviorally unchanged.
+- Tests and build pass:
+
+```bash
+npm test --workspace @season179/pi-buddy
+npm run build --workspace @season179/pi-buddy
+```

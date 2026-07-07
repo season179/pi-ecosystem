@@ -30,6 +30,8 @@ import {
 } from "../src/extensions/buddy-config.js";
 import {
 	addUsage,
+	automaticTranscriptBudget,
+	defaultTranscriptBudget,
 	snapshotUsage,
 	usageTelemetry,
 } from "../src/extensions/consult.js";
@@ -55,6 +57,8 @@ import {
 import {
 	BuddyRunTracker,
 	commandConsultDelivery,
+	STALE_CONCERN_MAX_TURNS,
+	shouldDeliverAutomaticConcern,
 } from "../src/extensions/policy.js";
 import {
 	BUDDY_BROWSER_SESSION,
@@ -274,11 +278,67 @@ describe("stances", () => {
 		}
 	});
 
-	it("watchdog prompt demands the PASS token and concise concern shape", () => {
+	it("watchdog prompt demands bare PASS and concise concern shape only for real concerns", () => {
 		const prompt = buildWatchdogSystemPrompt();
 		assert.ok(prompt.includes(WATCHDOG_PASS_TOKEN));
-		assert.match(prompt, /one-line actionable/);
+		assert.match(prompt, /one-line\nactionable/);
 		assert.match(prompt, /No preamble/);
+		assert.match(prompt, /ONLY to unresolved,\nactionable problems/);
+		assert.match(prompt, /no explanation after\nPASS/);
+		assert.match(prompt, /already fixed/);
+		assert.match(prompt, /the work is correct/);
+	});
+
+	it("suppresses observed pass-ish watchdog answers", () => {
+		assert.equal(isWatchdogPass("PASS"), true);
+		assert.equal(isWatchdogPass("PASS."), true);
+		assert.equal(isWatchdogPass("**PASS**"), true);
+		assert.equal(
+			isWatchdogPass(
+				"PASS\n\nThe work is complete and verified. Both branches pushed, typechecks/tests pass.",
+			),
+			true,
+		);
+		assert.equal(
+			isWatchdogPass(
+				"The agent's answer is correct and well-supported. No factual or technical errors spotted in the cited claims.\n\nPASS",
+			),
+			true,
+		);
+		assert.equal(
+			isWatchdogPass("Concern:\nPASS\n\nNo real problem. Nothing to flag."),
+			true,
+		);
+	});
+
+	it("does not suppress pass-ish answers without a standalone PASS in v1", () => {
+		assert.equal(
+			isWatchdogPass("The implementation is coherent. No real problem. Nothing to flag."),
+			false,
+		);
+	});
+
+	it("keeps real concerns even when they contain a stray PASS line", () => {
+		assert.equal(
+			isWatchdogPass("PASS\n\nThe tests are failing and this must fix the regression before shipping."),
+			false,
+		);
+		assert.equal(
+			isWatchdogPass("PASS\n\nThe implementation is missing a required user requirement."),
+			false,
+		);
+		assert.equal(
+			isWatchdogPass("PASS\n\nSecurity regression: the token is now logged in plaintext."),
+			false,
+		);
+		assert.equal(
+			isWatchdogPass("PASS\n\nThis migration risks data loss for existing users."),
+			false,
+		);
+		assert.equal(
+			isWatchdogPass("PASS\n\nThe agent is heading in the wrong direction; this approach won't scale."),
+			false,
+		);
 	});
 });
 
@@ -356,6 +416,72 @@ describe("buddy message formatting", () => {
 		);
 		assert.equal(buddyRendererLabel({ source: "memory" }), "● buddy · memory");
 		assert.equal(buddyRendererLabel(undefined), "● buddy");
+	});
+});
+
+describe("automatic advisory policy", () => {
+	it("delivers fresh and borderline-stale concerns", () => {
+		assert.equal(STALE_CONCERN_MAX_TURNS, 3);
+		assert.deepEqual(
+			shouldDeliverAutomaticConcern({
+				answer: "The implementation misses a required test.",
+				turnsElapsed: 0,
+			}),
+			{ deliver: true },
+		);
+		assert.deepEqual(
+			shouldDeliverAutomaticConcern({
+				answer: "The implementation misses a required test.",
+				turnsElapsed: 3,
+			}),
+			{ deliver: true },
+		);
+	});
+
+	it("suppresses non-blocking concerns that land more than three turns late", () => {
+		assert.deepEqual(
+			shouldDeliverAutomaticConcern({
+				answer: "Consider tightening this wording before finalizing.",
+				turnsElapsed: 4,
+			}),
+			{ deliver: false, reason: "stale_concern" },
+		);
+	});
+
+	it("still delivers stale concerns with blocker markers", () => {
+		const stale = 8;
+		for (const answer of [
+			"Security regression: the token is now logged in plaintext.",
+			"The tests are failing and this is blocking release.",
+			"The implementation is missing a required user requirement.",
+			"This migration risks data loss for existing users.",
+			"The agent is heading in the wrong direction; this approach won't scale.",
+		]) {
+			assert.deepEqual(
+				shouldDeliverAutomaticConcern({ answer, turnsElapsed: stale }),
+				{ deliver: true },
+			);
+		}
+	});
+});
+
+describe("transcript budgets", () => {
+	it("uses a smaller automatic budget while preserving foreground defaults", () => {
+		const contextWindow = 200_000;
+		assert.deepEqual(defaultTranscriptBudget(contextWindow), {
+			maxTokens: 120_000,
+			keepHeadBlocks: 6,
+			keepTailBlocks: 30,
+		});
+		assert.deepEqual(automaticTranscriptBudget(contextWindow), {
+			maxTokens: 48_000,
+			keepHeadBlocks: 4,
+			keepTailBlocks: 16,
+		});
+	});
+
+	it("does not expand small-model automatic budgets", () => {
+		assert.equal(automaticTranscriptBudget(40_000).maxTokens, 24_000);
 	});
 });
 
@@ -609,9 +735,18 @@ describe("telemetry", () => {
 			totalMs: 42,
 			error: "boom",
 		});
+		await recordConsultation({
+			source: "watchdog",
+			stance: "watchdog",
+			outcome: "stale_suppressed",
+			model: "zai/glm-5.2",
+			totalMs: 55,
+			trigger: "turns",
+			turnsElapsed: 4,
+		});
 
 		const lines = (await readFile(path, "utf8")).trim().split("\n");
-		assert.equal(lines.length, 2);
+		assert.equal(lines.length, 3);
 		const first = JSON.parse(lines[0]);
 		assert.equal(first.v, 1);
 		assert.equal(first.outcome, "pass");
@@ -624,6 +759,9 @@ describe("telemetry", () => {
 		const second = JSON.parse(lines[1]);
 		assert.equal(second.outcome, "error");
 		assert.equal(second.error, "boom");
+		const third = JSON.parse(lines[2]);
+		assert.equal(third.outcome, "stale_suppressed");
+		assert.equal(third.turnsElapsed, 4);
 	});
 
 	it("never throws when the path is unwritable", async () => {
