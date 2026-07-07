@@ -100,6 +100,7 @@ const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
 const STATUS_KEY = "buddy";
 const BG_STATUS_KEY = "buddy-bg";
+const MODEL_STATUS_KEY = "buddy-model";
 const VERDICT_RING_SIZE = 10;
 
 export default function setup(pi: ExtensionAPI): void {
@@ -201,8 +202,7 @@ export default function setup(pi: ExtensionAPI): void {
 		backgroundAbort = undefined;
 	}
 
-	function initializeBuddySwitch(): void {
-		const wasDisabled = !buddyEnabled;
+	async function initializeBuddySwitch(ctx?: ExtensionContext): Promise<void> {
 		const shouldRestoreTool = consultToolWasActiveWhenDisabled ?? false;
 		const seeded = seedBuddyEnabledFromFlag(
 			buddyEnabled,
@@ -213,15 +213,51 @@ export default function setup(pi: ExtensionAPI): void {
 		buddySwitchSeeded = seeded.seeded;
 		if (buddyEnabled) {
 			applyBuddyToolState(true);
+			await refreshBuddyModelStatus(ctx);
 			return;
 		}
 		consultToolWasActiveWhenDisabled = shouldRestoreTool ? true : undefined;
 		abortBackgroundReview();
 		applyBuddyToolState(false);
+		setBuddyModelStatus(ctx, undefined);
 	}
 
 	function notify(ctx: ExtensionContext | undefined, message: string): void {
 		if (ctx?.hasUI) ctx.ui.notify(message, "info");
+	}
+
+	function setBuddyModelStatus(
+		ctx: ExtensionContext | undefined,
+		modelSpec: string | undefined,
+		options: { failover?: boolean } = {},
+	): void {
+		if (!ctx?.hasUI) return;
+		if (!buddyEnabled) {
+			ctx.ui.setStatus(MODEL_STATUS_KEY, "buddy: off");
+			return;
+		}
+		if (!modelSpec) {
+			ctx.ui.setStatus(MODEL_STATUS_KEY, undefined);
+			return;
+		}
+		ctx.ui.setStatus(
+			MODEL_STATUS_KEY,
+			`buddy: ${modelSpec}${options.failover ? " (fallback)" : ""}`,
+		);
+	}
+
+	async function refreshBuddyModelStatus(ctx: ExtensionContext | undefined): Promise<void> {
+		if (!ctx?.hasUI) return;
+		if (!buddyEnabled) {
+			setBuddyModelStatus(ctx, undefined);
+			return;
+		}
+		try {
+			const plan = await resolveBuddyModelPlan(ctx, "tool");
+			setBuddyModelStatus(ctx, plan.candidates[0]?.spec);
+		} catch {
+			ctx.ui.setStatus(MODEL_STATUS_KEY, "buddy: unavailable");
+		}
 	}
 
 	function setBuddyEnabled(enabled: boolean, ctx?: ExtensionContext): void {
@@ -232,6 +268,11 @@ export default function setup(pi: ExtensionAPI): void {
 		buddyEnabled = enabled;
 		if (!enabled) abortBackgroundReview();
 		applyBuddyToolState(enabled);
+		if (enabled) {
+			void refreshBuddyModelStatus(ctx);
+		} else {
+			setBuddyModelStatus(ctx, undefined);
+		}
 		notify(ctx, `Buddy is now ${enabled ? "on" : "off"}.`);
 	}
 
@@ -378,6 +419,7 @@ export default function setup(pi: ExtensionAPI): void {
 		try {
 			const plan = await resolveBuddyModelPlan(args.ctx, args.source);
 			primaryModel = plan.candidates[0]?.spec ?? primaryModel;
+			setBuddyModelStatus(args.ctx, primaryModel);
 			const injection = buildInjectionBlock(args.ctx.cwd, {
 				includeMemory: args.source !== "watchdog",
 			});
@@ -387,6 +429,9 @@ export default function setup(pi: ExtensionAPI): void {
 				if (!modelsAttempted.includes(candidate.spec)) {
 					modelsAttempted.push(candidate.spec);
 				}
+				setBuddyModelStatus(args.ctx, candidate.spec, {
+					failover: candidate.spec !== primaryModel,
+				});
 				for (;;) {
 					attempts += 1;
 					attemptsForModel += 1;
@@ -452,6 +497,9 @@ export default function setup(pi: ExtensionAPI): void {
 				modelsAttempted,
 				failoverUsed: successfulCandidate.spec !== primaryModel,
 			};
+			setBuddyModelStatus(args.ctx, result.model, {
+				failover: result.failoverUsed,
+			});
 			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
 			if (
 				args.harvest &&
@@ -941,14 +989,14 @@ export default function setup(pi: ExtensionAPI): void {
 
 	// --- Automatic triggers ---
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		memoryCuratedThisSession = false;
 		currentSkills = [];
 		verdictRing.length = 0;
 		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;
-		initializeBuddySwitch();
+		await initializeBuddySwitch(ctx);
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -978,7 +1026,7 @@ export default function setup(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		tracker.invalidate();
 		backgroundAbort?.abort();
 		backgroundAbort = undefined;
@@ -987,6 +1035,11 @@ export default function setup(pi: ExtensionAPI): void {
 		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;
+		if (ctx.hasUI) {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+			ctx.ui.setStatus(BG_STATUS_KEY, undefined);
+			ctx.ui.setStatus(MODEL_STATUS_KEY, undefined);
+		}
 		if (browserUsed) {
 			await closeBuddyBrowser((command, args, options) =>
 				pi.exec(command, args, options),
