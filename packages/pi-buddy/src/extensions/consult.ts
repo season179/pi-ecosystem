@@ -71,6 +71,13 @@ export interface ConsultRequest {
 	extraTools?: readonly BuddyTool[];
 	/** Optional source-specific transcript budget; foreground consults omit this. */
 	transcriptBudget?: TranscriptBudget;
+	/** Optional output-length control (hard cap + soft brevity request). */
+	outputControl?: {
+		/** Hard cap on the buddy's visible output per model call (pi-ai maxTokens). */
+		maxTokens?: number;
+		/** Soft brevity request appended after the consultation request text. */
+		softTargetLine?: string;
+	};
 	onActivity?: (line: string) => void;
 }
 
@@ -130,6 +137,51 @@ export interface ConsultResult {
 	transcriptTokens: number;
 	/** Best-effort provider-reported usage. Missing/malformed usage is ignored. */
 	usage?: BuddyUsageTelemetry;
+	/**
+	 * True when the final model call hit the output-token cap (`stopReason` was
+	 * "length"). A truncated answer is treated as never-PASS by automatic
+	 * reviews and carries a truncation note for the reader.
+	 */
+	truncated?: boolean;
+}
+
+/**
+ * Appends a soft brevity request as its own paragraph after the consultation
+ * request text. Pure so the wiring can be unit-tested without a live stream.
+ */
+export function appendSoftTarget(
+	requestText: string,
+	softTargetLine?: string,
+): string {
+	const target = softTargetLine?.trim();
+	if (!target) return requestText;
+	return `${requestText}\n\n${target}`;
+}
+
+/**
+ * Coerces a caller/config-supplied token count to a positive integer, or
+ * `undefined` when it is not a usable positive finite number. Shared by every
+ * place that turns a cap into a pi-ai `maxTokens` (consultBuddy options, the
+ * truncation note, and output-control's resolveMaxTokens) so the
+ * "positive finite -> floor, else drop" rule lives in one spot.
+ */
+export function coercePositiveTokens(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? Math.floor(value)
+		: undefined;
+}
+
+/**
+ * Appends a truncation note to a length-capped answer. Kept as its own
+ * paragraph so directive harvesting (which strips only LESSON/RETRACT lines)
+ * leaves it intact. Pure and exported for unit tests.
+ */
+export function applyTruncationNote(answer: string, maxTokens?: number): string {
+	const cap = coercePositiveTokens(maxTokens);
+	const note = cap
+		? `[Buddy answer truncated at ${cap} output tokens.]`
+		: `[Buddy answer truncated at the output-token cap.]`;
+	return `${answer}\n\n${note}`;
 }
 
 export async function consultBuddy(
@@ -149,6 +201,10 @@ export async function consultBuddy(
 		budget,
 	);
 
+	const requestBody = appendSoftTarget(
+		request.requestText,
+		request.outputControl?.softTargetLine,
+	);
 	const initialUserMessage: Message = {
 		role: "user",
 		content: [
@@ -156,7 +212,7 @@ export async function consultBuddy(
 				type: "text",
 				text:
 					`# Session transcript\n\n${transcript}\n\n` +
-					`# Consultation request\n\n${request.requestText}`,
+					`# Consultation request\n\n${requestBody}`,
 			},
 		],
 		timestamp: Date.now(),
@@ -171,6 +227,10 @@ export async function consultBuddy(
 		headers: auth.headers,
 		signal: request.signal,
 	};
+	const maxTokens = coercePositiveTokens(request.outputControl?.maxTokens);
+	if (maxTokens !== undefined) {
+		options.maxTokens = maxTokens;
+	}
 
 	const activity: string[] = [];
 	let messages: Message[] = [initialUserMessage];
@@ -209,7 +269,12 @@ export async function consultBuddy(
 		messages = [...messages, message];
 
 		const toolCalls = extractToolCalls(message);
-		if (!finalRound && message.stopReason === "toolUse" && toolCalls.length > 0) {
+		// Execute tool calls whenever a round produced them, regardless of the
+		// stop reason. A "length"-capped round that still emitted a tool call must
+		// not be dropped, or the buddy's investigation silently ends on a partial
+		// answer. Truncated tool-arg JSON degrades to a tool-error result inside
+		// executeBuddyToolCall, not a lost round.
+		if (!finalRound && toolCalls.length > 0) {
 			const results = await executeToolCalls(
 				tools,
 				toolCalls,
@@ -225,14 +290,27 @@ export async function consultBuddy(
 
 		const answer = extractText(message);
 		if (answer.length === 0) {
+			// Known, accepted edge: a round stopped with no answer text and no tool
+			// calls (or the final tool-budget round produced nothing) falls through
+			// here. We do not retry or raise the cap — the watchdog is best-effort and
+			// runConsultation records outcome "error". The buddy never requests
+			// extended thinking (consultBuddy sets no `reasoning` option), so on any
+			// opt-in-reasoning model — including the default zai/glm-5.2, which then
+			// maps to thinking:{type:"disabled"} — the cap bounds the visible answer
+			// directly rather than sharing budget with reasoning. An empty result is
+			// rare: the
+			// cap (2048+) far exceeds a normal verdict, and tool-bearing rounds now
+			// continue rather than terminate here.
 			throw new Error("Buddy produced no answer text");
 		}
+		const truncated = message.stopReason === "length";
 		return {
-			answer,
+			answer: truncated ? applyTruncationNote(answer, options.maxTokens) : answer,
 			activity,
 			rounds,
 			transcriptTokens: estimateTokens(transcript),
 			usage: usageTelemetry(cumulativeUsage, finalRoundUsage),
+			truncated,
 		};
 	}
 }

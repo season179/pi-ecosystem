@@ -81,6 +81,8 @@ export interface BuddyTelemetryRecord {
 	finalRoundTotalTokens?: number;
 	/** Length of the buddy's answer in characters. */
 	answerChars?: number;
+	/** True when the answer hit the output-token cap (stopReason "length"). */
+	truncated?: boolean;
 	/** Lessons harvested into memory (phase 3). */
 	lessons?: number;
 	/** Retractions applied to memory (phase 3). */

@@ -3,6 +3,7 @@
 Date: 2026-07-02 (phase 3 planned 2026-07-03)
 Status: Phase 1 SHIPPED (commits 01d9f11, 80a2a87). Phase 2 SHIPPED (commit a6bf8ce).
 Phase 3 planned below (section 7): buddy memory + verdict feedback loop.
+Phase 10 planned below: output length control + guidance sharpening (2026-07-07).
 Confidence: High — design decisions settled through discussion; key pi seams (custom tools, nested LLM calls via `streamSimple`, steering injection, turn events) are proven by pi docs and the pi-moa package in this repo.
 
 ## 1. Goal
@@ -1483,3 +1484,242 @@ Target outcomes:
 npm test --workspace @season179/pi-buddy
 npm run build --workspace @season179/pi-buddy
 ```
+
+# Phase 10: Output Length Control + Guidance Sharpening
+
+Date: 2026-07-07
+Status: SHIPPED (2026-07-07). Output caps in output-control.ts, truncated-never-
+PASS in policy.ts (`classifyAutomaticVerdict`), config in buddy-config.ts,
+telemetry `truncated` field, sharpened promptGuidelines. Revisit 2048/4096
+defaults against `truncated` telemetry after ~1 week (see §10.12).
+
+Origin: Anthropic's advisor-tool doc
+(https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool)
+describes the executor/advisor pattern pi-buddy implements, with empirical
+findings. This phase ports the *patterns* that survived review (two design
+rounds with Buddy itself). **Do not import the doc's magnitudes** (7× output
+reduction, +7pp nudge lift, etc.) — those were measured on Claude executors
+with toolless single-stream advisors. pi-buddy is a separate process,
+reasoning-model default (zai/glm-5.2), multi-round tool loop,
+fresh-conversation-per-consult. We ship the measurement, not the numbers.
+
+## 10.1 Verified facts this phase relies on (checked 2026-07-07)
+
+- pi-ai `StreamOptions` supports `maxTokens?: number`
+  (node_modules/@earendil-works/pi-ai/dist/types.d.ts:46).
+  `SimpleStreamOptions extends StreamOptions`, so `consultBuddy`'s options can
+  carry it.
+- Truncation surfaces as `stopReason: "length"`
+  (`StopReason = "stop" | "length" | "toolUse" | "error" | "aborted"`,
+  types.d.ts:270).
+- CORRECTION (verified 2026-07-07 against pi-ai dist): the **buddy** never
+  requests extended thinking — `consultBuddy` sets no `options.reasoning` —
+  so it runs with **thinking disabled** on every model where reasoning is
+  opt-in (glm-5.2, Claude, …), and the cap bounds the answer directly. This is
+  a buddy-level invariant, not a per-model fact. For the default zai/glm-5.2
+  the mechanism is: `reasoningEffort` is `undefined`, so pi-ai emits
+  `thinking: {type: "disabled"}` on the openai-completions path
+  (dist/apis/openai-completions.js:388-389,471). `adjustMaxTokensForThinking`
+  (the `maxTokens = baseMaxTokens + thinkingBudget` add-on this bullet
+  originally cited) lives only in the anthropic-messages API and does **not**
+  apply here. Net effect is the same intent — the cap limits visible answer
+  length — with no separate thinking budget on top of `maxTokens`. (A
+  reasoning-*always-on* model like o1/o3 would still reason; those cannot be
+  forced off, so "request no reasoning" is already the maximal mechanism.)
+  Telemetry still captures `reasoningTokens` separately (`snapshotUsage`,
+  src/extensions/consult.ts); it is ~0 for opt-in-reasoning models.
+- `harvestDirectives` (buddy.ts) strips only `LESSON[`/`RETRACT` lines; a
+  truncation note appended in consult.ts is inert to harvesting.
+- `hasAutomaticConcernMarker` (src/extensions/automatic-review.ts) matches
+  whole words like `failed|failing`. A concern truncated mid-word (e.g.
+  "...tests are fail") can LOSE its concern marker — hence the
+  truncated-never-PASS guard below.
+- Prompt caching is **not applicable**: each consult builds a fresh
+  single-turn conversation (consult.ts `messages = [initialUserMessage]`), and
+  pi-ai's `cacheRetention` does nothing for the zai provider. Deliberately out
+  of scope — do not add it.
+
+## 10.2 Change 1: output-control plumbing (consult.ts)
+
+Add to `ConsultRequest`:
+
+```ts
+outputControl?: {
+  /** Hard cap on the buddy's visible output per model call (pi-ai maxTokens). */
+  maxTokens?: number;
+  /** Soft brevity request appended after the consultation request text. */
+  softTargetLine?: string;
+};
+```
+
+- Pass `maxTokens` into the `SimpleStreamOptions` used for every tool-loop
+  round (`options` object built near the top of `consultBuddy`).
+- Append `softTargetLine` (when present) to the initial user message, after
+  the `# Consultation request` section, as its own paragraph.
+- Add `truncated?: boolean` to `ConsultResult`.
+
+## 10.3 Change 2: truncation detection + visible note (consult.ts)
+
+- If the **final answer round** ends with `stopReason: "length"`:
+  - Append to the answer text:
+    `\n\n[Buddy answer truncated at <maxTokens> output tokens.]`
+  - Set `truncated: true` on the result.
+- Mid-tool-call truncation: a `length` stop on a round that still emitted a
+  tool call now **continues the loop and executes the tool** (the tool-loop
+  guard keys off `toolCalls.length > 0`, not the stop reason), so an
+  investigation is no longer dropped on a length-capped tool round. Only a
+  round with zero text *and* zero tool calls falls through to the existing
+  error path ("Buddy produced no answer text"). Add a code comment noting this
+  is a known, accepted edge — rare at 2048+ because the buddy runs with
+  thinking disabled (see §10.1), so the cap bounds the answer directly and the
+  cap far exceeds a normal verdict. Do not add retry/raise-cap logic (deliberate
+  decision; the
+  watchdog is best-effort and `runConsultation` already records
+  `outcome: "error"`).
+- PASS-safety notes (already reasoned through, encode as tests):
+  - A genuine PASS is ~1 token and can never truncate.
+  - The truncation note text must not match `CONCERN_FORCE_PATTERN` and must
+    not read as a benign-pass phrase. `truncated` matches neither — keep it
+    that way if you reword.
+
+## 10.4 Change 3: per-source defaults + wiring (buddy.ts)
+
+Defaults (rationale: the advisor doc used 2048 for gate-check-style advice
+with ~0% truncation; consults legitimately need more room; both are guesses
+to be revisited after ~1 week of telemetry — see 10.9):
+
+| Source              | maxTokens | softTargetLine |
+| ------------------- | --------- | -------------- |
+| watchdog / run_end  | 2048      | `(Keep your verdict tight: a one-line headline plus only the evidence needed to act — aim under ~200 words. PASS is a single word.)` |
+| tool (consult_buddy), command (/buddy) | 4096 | stance-dependent, see below |
+
+Stance soft targets for tool/command consults:
+
+- `discuss`, `debate`: `(Buddy: aim for under ~350 words — focused guidance,
+  not a comprehensive essay.)`
+- `review`: `(Buddy: aim for under ~300 words — findings ordered by severity,
+  not review prose.)`
+- `fact_check`: **no soft target line** (per-claim length is inherently
+  variable).
+
+Wire `outputControl` through `runConsultation` → `consultBuddy` for all four
+sources (watchdog, run_end, tool, command).
+
+## 10.5 Change 4: truncated-never-PASS guard (buddy.ts)
+
+In `launchBackgroundReview`'s `automaticOutcome`: a result with
+`truncated === true` must never classify as `"pass"`. The outcome hook already
+receives the `ConsultResult` (`outcomeOf: (r) => ...`); change the PASS branch
+to `if (!r.truncated && isWatchdogPass(r.answer))`. Rationale: mid-word
+truncation can strip the concern-marker words the stale-suppression regex
+depends on; a truncated verdict is by definition not a clean PASS.
+
+Post-review refinement (2026-07-08): the same reasoning extends past "never
+PASS" to "never silently suppress". Because the stale-suppression gate
+(`shouldDeliverAutomaticConcern`) also keys off concern markers that truncation
+may have severed, a truncated automatic verdict is now **always delivered as a
+`"concern"`** rather than risking a `stale_suppressed` drop —
+`classifyAutomaticVerdict` returns `"concern"` immediately when `truncated`,
+before the PASS and staleness checks. Trigger is narrow (a truncated automatic
+review that would otherwise be stale-suppressed); the safe default for a
+known-incomplete verdict is to surface it for the agent to judge.
+
+## 10.6 Change 5: overridable knob (buddy-config.ts)
+
+Add optional `outputMaxTokens` to `buddy.json`, following the existing
+`retry.perModelRetries` precedent (parse + warn on invalid, never throw):
+
+```json
+{
+  "outputMaxTokens": { "watchdog": 2048, "consult": 4096 }
+}
+```
+
+- Both fields optional integers ≥ 1024 (mirror the advisor doc's floor; warn
+  and ignore values below).
+- `watchdog` applies to watchdog + run_end; `consult` applies to tool +
+  command.
+- Explicit `null` on either field disables the hard cap for that source class
+  (soft target lines still apply).
+- Extend `BuddyConfigLoadResult` and thread through `buddy.ts` where the
+  config is loaded.
+
+## 10.7 Change 6: telemetry field
+
+Add `truncated?: boolean` to the `recordConsultation` payload
+(src/extensions/telemetry.ts record shape). `outputTokens`,
+`reasoningTokens`, and `answerChars` already exist — together these give the
+before/after measurement. No other schema changes.
+
+## 10.8 Change 7: sharpen agent-facing promptGuidelines (buddy.ts)
+
+In `pi.registerTool` for `consult_buddy`, update `promptGuidelines`:
+
+1. REPLACE
+   `"Use consult_buddy (stance 'debate' or 'discuss') before committing to a significant design or architectural decision."`
+   WITH
+   `"Use consult_buddy (stance 'debate' or 'discuss') after initial orientation (reading files, searching) but before committing to a significant design or architectural decision — orientation is not substantive work; writing is."`
+2. Keep the fact_check guideline unchanged.
+3. REPLACE
+   `"Use consult_buddy (stance 'review') after completing a substantial piece of work and before declaring it done."`
+   WITH
+   `"Use consult_buddy (stance 'review') after completing a substantial piece of work and before declaring it done — make the deliverable durable first (files written, changes committed), then ask for the review."`
+
+Explicitly EXCLUDED (decided, do not add): a "reconcile-call" guideline about
+how the agent should weigh buddy advice against its own evidence. The advisor
+doc measured that class of process instruction as net-negative on strong
+executor models.
+
+## 10.9 Non-goals (decided — do not implement)
+
+- **Calibration 'less' × nudge suppression**: the agent-facing nudge surface
+  (`promptGuidelines`) is static in pi-core; trimming the post-hoc advisory
+  footer would be cosmetic. If ever wanted, it is a pi-core change.
+- **Prompt caching**: not applicable to the fresh-conversation-per-consult
+  architecture and unsupported by the default provider. See 10.1.
+- Changing `MAX_TOOL_ROUNDS`, transcript budgets, or stance prompt content
+  beyond the soft-target lines above.
+
+## 10.10 Test plan (test/buddy.test.ts, existing vitest suite)
+
+All pure-logic — follow the file's existing pattern of testing exported
+functions without pi runtime:
+
+1. Truncation note appended when final round stops with `"length"`; absent on
+   `"stop"`. (May require exporting a small helper from consult.ts, e.g.
+   `applyTruncationNote(answer, maxTokens)` — prefer extracting pure helpers
+   over mocking the stream.)
+2. Truncated-never-PASS: a concern truncated mid-word (craft text whose
+   concern words are cut, e.g. ending "...tests are fail") with
+   `truncated: true` must not classify as pass; and `truncated: true` with
+   answer exactly `PASS` must also not classify as pass.
+3. The truncation note text does not trip `hasAutomaticConcernMarker` and is
+   not a standalone-pass line.
+4. Soft-target composition: request text ends with the expected line per
+   source/stance; fact_check has none.
+5. buddy-config: `outputMaxTokens` parsing — valid values, sub-1024 warning +
+   ignore, `null` disables, non-object warning, absent field.
+
+## 10.11 Acceptance criteria
+
+- Hard caps and soft target lines applied per source as specified in 10.4,
+  overridable via `buddy.json` per 10.6.
+- Truncated buddy answers carry a visible truncation note and can never be
+  classified as watchdog PASS.
+- Telemetry records `truncated` so the 2048/4096 defaults can be revisited
+  against real data.
+- Manual consultations remain behaviorally unchanged apart from the appended
+  soft-target line.
+- Tests and build pass:
+
+```bash
+npm test --workspace @season179/pi-buddy
+npm run build --workspace @season179/pi-buddy
+```
+
+## 10.12 Post-implementation measurement
+
+After ~1 week of real usage, review telemetry (`truncated` rate,
+`outputTokens`, `reasoningTokens` per source) and tighten or loosen the
+2048/4096 defaults. If watchdog truncation rate is >~10%, raise the default;
+if mean output is far below cap, consider lowering the consult cap.

@@ -87,6 +87,27 @@ scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
   Buddy retries the current model for transient failures before falling back to
   the next configured model. `perModelRetries: 0` means immediate failover with
   no same-model retry. No provider is used unless explicitly listed.
+- Buddy caps its **visible** output per call so verdicts stay tight and consults
+  stay focused. Buddy never requests extended thinking, so on any
+  opt-in-reasoning model (including the default `zai/glm-5.2`) it runs with
+  reasoning disabled and this cap simply bounds the answer length. Defaults:
+  `2048` for automatic watchdog/run-end
+  reviews, `4096` for requested `consult_buddy`/`/buddy` consults, plus a
+  source-appropriate brevity request appended to the prompt. Override the hard
+  caps in `~/.pi/agent/buddy.json`:
+
+```json
+{
+  "outputMaxTokens": { "watchdog": 2048, "consult": 4096 }
+}
+```
+
+  Each field is optional. `watchdog` covers watchdog + run-end reviews; `consult`
+  covers tool + command consults. Values must be integers ≥ 1024 (lower values
+  are ignored with a warning). Set a field to `null` to disable the hard cap for
+  that source class (the brevity request still applies). Truncated answers carry
+  a visible `[Buddy answer truncated ...]` note and can never be recorded as a
+  watchdog `PASS`.
 - Buddy is on by default when installed. Disable it for one Pi session with
   `pi --buddy-disabled`; re-enable inside the session with `/buddy on`.
 - Every configured buddy model must exist in your pi model registry with a valid
@@ -115,7 +136,8 @@ consultation): source (`tool`/`command`/`watchdog`), stance, outcome
 (`ok`/`pass`/`concern`/`stale_suppressed`/`error`/`discarded`), trigger
 (`turns`/`run_end` for watchdog records), `turnsElapsed` (verdict staleness),
 rounds, tool-call count, transcript size, provider-reported token usage,
-answer length, memory block size (`memoryChars`), retry/failover metadata
+answer length, `truncated` (whether the answer hit the output-token cap),
+memory block size (`memoryChars`), retry/failover metadata
 (`attempts`, `retried`,
 `modelsAttempted`, `failoverUsed`, `modelFailures`), harvest counts (`lessons`,
 `retractions`, `retractMisses`), and duration. Watchdog/background reviews retry
@@ -153,6 +175,9 @@ Health signals to watch:
   buddy is armchair-guessing instead of verifying.
 - **totalTokens / finalRoundTotalTokens** — provider-reported Buddy token use;
   use this to spot expensive multi-round consults and large final contexts.
+- **truncated rate** — how often answers hit the output cap. If watchdog
+  truncation climbs above ~10%, raise `outputMaxTokens.watchdog`; if mean
+  `outputTokens` sits far below the cap, consider lowering it.
 - **costUsd** — only meaningful for models with nonzero pricing metadata; it is
   expected to be `0` for the default `zai/glm-5.2` model.
 - **totalMs** — how much latency the buddy adds per consultation.

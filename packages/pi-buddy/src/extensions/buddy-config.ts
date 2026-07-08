@@ -1,8 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { OutputMaxTokensConfig } from "./output-control.js";
 
 export const BUDDY_CONFIG_FILENAME = "buddy.json";
+
+/** Floor for buddy.json output caps; mirrors the advisor doc's minimum. */
+export const OUTPUT_MAX_TOKENS_FLOOR = 1024;
 
 export interface BuddyModelCandidate {
 	id: string;
@@ -15,6 +19,8 @@ export interface BuddyConfigLoadResult {
 	found: boolean;
 	models: BuddyModelCandidate[];
 	perModelRetries?: number;
+	/** Per-source-class hard output caps; absent means use built-in defaults. */
+	outputMaxTokens?: OutputMaxTokensConfig;
 	warnings: string[];
 }
 
@@ -74,7 +80,12 @@ export function parseBuddyConfig(
 
 	const models = parseModels(value.models, path, warnings);
 	const perModelRetries = parsePerModelRetries(value.retry, path, warnings);
-	return { path, found: true, models, perModelRetries, warnings };
+	const outputMaxTokens = parseOutputMaxTokens(
+		value.outputMaxTokens,
+		path,
+		warnings,
+	);
+	return { path, found: true, models, perModelRetries, outputMaxTokens, warnings };
 }
 
 function parseModels(
@@ -149,6 +160,44 @@ function parsePerModelRetries(
 		return undefined;
 	}
 	return retries;
+}
+
+function parseOutputMaxTokens(
+	value: unknown,
+	path: string,
+	warnings: string[],
+): OutputMaxTokensConfig | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) {
+		warnings.push(`${path}: "outputMaxTokens" must be an object.`);
+		return undefined;
+	}
+	const result: OutputMaxTokensConfig = {};
+	let hasField = false;
+	for (const key of ["watchdog", "consult"] as const) {
+		const field = value[key];
+		if (field === undefined) continue;
+		// Explicit null disables the hard cap for this source class.
+		if (field === null) {
+			result[key] = null;
+			hasField = true;
+			continue;
+		}
+		if (
+			typeof field !== "number" ||
+			!Number.isFinite(field) ||
+			!Number.isInteger(field) ||
+			field < OUTPUT_MAX_TOKENS_FLOOR
+		) {
+			warnings.push(
+				`${path}: outputMaxTokens.${key} must be an integer >= ${OUTPUT_MAX_TOKENS_FLOOR}, or null to disable.`,
+			);
+			continue;
+		}
+		result[key] = field;
+		hasField = true;
+	}
+	return hasField ? result : undefined;
 }
 
 export function isValidModelSpec(spec: string): boolean {

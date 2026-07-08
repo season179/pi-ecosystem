@@ -30,11 +30,22 @@ import {
 } from "../src/extensions/buddy-config.js";
 import {
 	addUsage,
+	applyTruncationNote,
+	appendSoftTarget,
 	automaticTranscriptBudget,
 	defaultTranscriptBudget,
 	snapshotUsage,
 	usageTelemetry,
 } from "../src/extensions/consult.js";
+import {
+	buddyOutputControl,
+	CONSULT_DEFAULT_MAX_TOKENS,
+	WATCHDOG_DEFAULT_MAX_TOKENS,
+} from "../src/extensions/output-control.js";
+import {
+	hasAutomaticConcernMarker,
+	isStandalonePassLine,
+} from "../src/extensions/automatic-review.js";
 import {
 	branchToBlocks,
 	entryToBlock,
@@ -56,6 +67,7 @@ import {
 } from "../src/extensions/telemetry.js";
 import {
 	BuddyRunTracker,
+	classifyAutomaticVerdict,
 	commandConsultDelivery,
 	STALE_CONCERN_MAX_TURNS,
 	shouldDeliverAutomaticConcern,
@@ -462,6 +474,174 @@ describe("automatic advisory policy", () => {
 				{ deliver: true },
 			);
 		}
+	});
+});
+
+describe("output length control", () => {
+	it("appends a truncation note as its own paragraph with the cap", () => {
+		const noted = applyTruncationNote("Partial verdict about the code", 2048);
+		assert.ok(noted.startsWith("Partial verdict about the code"));
+		assert.ok(noted.endsWith("[Buddy answer truncated at 2048 output tokens.]"));
+		assert.ok(noted.includes("\n\n[Buddy answer truncated at 2048 output tokens.]"));
+	});
+
+	it("falls back to a generic note when the cap is unknown", () => {
+		const noted = applyTruncationNote("Partial", undefined);
+		assert.ok(noted.endsWith("[Buddy answer truncated at the output-token cap.]"));
+	});
+
+	it("truncation note text is inert to PASS-suppression heuristics", () => {
+		for (const note of [
+			"[Buddy answer truncated at 2048 output tokens.]",
+			"[Buddy answer truncated at the output-token cap.]",
+		]) {
+			assert.equal(hasAutomaticConcernMarker(note), false);
+			assert.equal(isStandalonePassLine(note), false);
+		}
+	});
+
+	it("appends a soft target as its own paragraph, or leaves text unchanged", () => {
+		assert.equal(
+			appendSoftTarget("What do you think?", "(Buddy: keep it tight.)"),
+			"What do you think?\n\n(Buddy: keep it tight.)",
+		);
+		assert.equal(appendSoftTarget("Unchanged request", undefined), "Unchanged request");
+		assert.equal(appendSoftTarget("Unchanged request", "   "), "Unchanged request");
+	});
+
+	it("caps and soft-targets watchdog reviews tightly", () => {
+		const control = buddyOutputControl({ source: "watchdog", stance: "watchdog" });
+		assert.equal(control.maxTokens, WATCHDOG_DEFAULT_MAX_TOKENS);
+		assert.equal(control.maxTokens, 2048);
+		assert.ok(control.softTargetLine?.includes("Keep your verdict tight"));
+		assert.ok(control.softTargetLine?.includes("PASS is a single word"));
+	});
+
+	it("gives requested consults more room with stance-specific soft targets", () => {
+		for (const source of ["tool", "command"] as const) {
+			const discuss = buddyOutputControl({ source, stance: "discuss" });
+			assert.equal(discuss.maxTokens, CONSULT_DEFAULT_MAX_TOKENS);
+			assert.equal(discuss.maxTokens, 4096);
+			assert.ok(discuss.softTargetLine?.includes("~350 words"));
+			assert.ok(
+				buddyOutputControl({ source, stance: "debate" }).softTargetLine?.includes(
+					"~350 words",
+				),
+			);
+			assert.ok(
+				buddyOutputControl({ source, stance: "review" }).softTargetLine?.includes(
+					"~300 words",
+				),
+			);
+		}
+	});
+
+	it("omits the soft target for fact_check but keeps the cap", () => {
+		const control = buddyOutputControl({ source: "tool", stance: "fact_check" });
+		assert.equal(control.maxTokens, 4096);
+		assert.equal(control.softTargetLine, undefined);
+	});
+
+	it("honors buddy.json overrides and null disables the cap", () => {
+		const raised = buddyOutputControl({
+			source: "watchdog",
+			stance: "watchdog",
+			config: { watchdog: 3000 },
+		});
+		assert.equal(raised.maxTokens, 3000);
+		const disabled = buddyOutputControl({
+			source: "watchdog",
+			stance: "watchdog",
+			config: { watchdog: null },
+		});
+		assert.equal(disabled.maxTokens, undefined);
+		// Soft target survives even when the hard cap is disabled.
+		assert.ok(disabled.softTargetLine?.includes("Keep your verdict tight"));
+		const consultOverride = buddyOutputControl({
+			source: "tool",
+			stance: "discuss",
+			config: { consult: 8192 },
+		});
+		assert.equal(consultOverride.maxTokens, 8192);
+	});
+});
+
+describe("truncated-never-PASS classification", () => {
+	it("classifies a clean PASS as pass only when not truncated", () => {
+		assert.equal(
+			classifyAutomaticVerdict({ answer: "PASS", truncated: false, turnsElapsed: 0 }),
+			"pass",
+		);
+		assert.equal(
+			classifyAutomaticVerdict({ answer: "PASS", turnsElapsed: 0 }),
+			"pass",
+		);
+	});
+
+	it("never classifies a truncated answer as pass", () => {
+		// Exactly "PASS" but truncated: the length cap means the verdict is incomplete.
+		assert.notEqual(
+			classifyAutomaticVerdict({ answer: "PASS", truncated: true, turnsElapsed: 0 }),
+			"pass",
+		);
+		// A concern cut mid-word ("...tests are fail") loses its concern marker, but
+		// truncated=true still forbids pass; fresh (turnsElapsed 0) so it delivers.
+		assert.equal(
+			classifyAutomaticVerdict({
+				answer: "The tests are fail",
+				truncated: true,
+				turnsElapsed: 0,
+			}),
+			"concern",
+		);
+	});
+
+	it("delivers a stale truncated verdict as concern instead of suppressing it", () => {
+		// No surviving concern marker AND stale (turnsElapsed > STALE_CONCERN_MAX_TURNS):
+		// a non-truncated answer here would be stale_suppressed...
+		const answer = "Looks okay so far, though I would want to double-check the";
+		assert.equal(
+			classifyAutomaticVerdict({ answer, truncated: false, turnsElapsed: 10 }),
+			"stale_suppressed",
+		);
+		// ...but truncation makes the verdict known-incomplete, so it is delivered.
+		assert.equal(
+			classifyAutomaticVerdict({ answer, truncated: true, turnsElapsed: 10 }),
+			"concern",
+		);
+	});
+});
+
+describe("buddy config outputMaxTokens", () => {
+	it("parses valid per-source caps", () => {
+		const result = parseBuddyConfig({
+			outputMaxTokens: { watchdog: 2048, consult: 4096 },
+		});
+		assert.deepEqual(result.outputMaxTokens, { watchdog: 2048, consult: 4096 });
+		assert.deepEqual(result.warnings, []);
+	});
+
+	it("warns on and ignores sub-floor caps", () => {
+		const result = parseBuddyConfig({ outputMaxTokens: { watchdog: 512 } });
+		assert.equal(result.outputMaxTokens, undefined);
+		assert.ok(result.warnings.some((warning) => warning.includes("1024")));
+	});
+
+	it("treats explicit null as a disable directive", () => {
+		const result = parseBuddyConfig({ outputMaxTokens: { consult: null } });
+		assert.deepEqual(result.outputMaxTokens, { consult: null });
+		assert.deepEqual(result.warnings, []);
+	});
+
+	it("warns when outputMaxTokens is not an object", () => {
+		const result = parseBuddyConfig({ outputMaxTokens: 4096 });
+		assert.equal(result.outputMaxTokens, undefined);
+		assert.ok(result.warnings.some((warning) => warning.includes("must be an object")));
+	});
+
+	it("leaves outputMaxTokens absent when the field is omitted", () => {
+		const result = parseBuddyConfig({ models: [] });
+		assert.equal(result.outputMaxTokens, undefined);
 	});
 });
 

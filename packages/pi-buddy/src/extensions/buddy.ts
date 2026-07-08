@@ -61,9 +61,13 @@ import { deriveSlug, MemoryStore } from "./memory.js";
 import {
 	type BackgroundTrigger,
 	BuddyRunTracker,
+	classifyAutomaticVerdict,
 	commandConsultDelivery,
-	shouldDeliverAutomaticConcern,
 } from "./policy.js";
+import {
+	buddyOutputControl,
+	type OutputMaxTokensConfig,
+} from "./output-control.js";
 import {
 	buddyRetryAttemptsForSource,
 	classifyBuddyError,
@@ -77,7 +81,6 @@ import {
 	buildStanceSystemPrompt,
 	buildVerdictDigest,
 	buildWatchdogSystemPrompt,
-	isWatchdogPass,
 	type Stance,
 	STANCES,
 } from "./stances.js";
@@ -297,6 +300,8 @@ export default function setup(pi: ExtensionAPI): void {
 	interface BuddyModelPlan {
 		candidates: ResolvedBuddyModelCandidate[];
 		maxAttemptsPerModel: number;
+		/** Per-source-class output caps from buddy.json (undefined => defaults). */
+		outputMaxTokens?: OutputMaxTokensConfig;
 	}
 
 	type RunConsultationResult = ConsultResult & {
@@ -383,6 +388,7 @@ export default function setup(pi: ExtensionAPI): void {
 				config.perModelRetries === undefined
 					? buddyRetryAttemptsForSource(source)
 					: config.perModelRetries + 1,
+			outputMaxTokens: config.outputMaxTokens,
 		};
 	}
 
@@ -428,6 +434,11 @@ export default function setup(pi: ExtensionAPI): void {
 			const injection = buildInjectionBlock(args.ctx.cwd, {
 				includeMemory: args.source !== "watchdog",
 			});
+			const outputControl = buddyOutputControl({
+				source: args.source,
+				stance: args.stance,
+				config: plan.outputMaxTokens,
+			});
 			let raw: ConsultResult | undefined;
 			modelLoop: for (const candidate of plan.candidates) {
 				let attemptsForModel = 0;
@@ -458,6 +469,7 @@ export default function setup(pi: ExtensionAPI): void {
 								args.source === "watchdog"
 									? automaticTranscriptBudget(candidate.model.contextWindow)
 									: undefined,
+							outputControl,
 							extraTools: webTools,
 							onActivity: (line) => {
 								args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
@@ -510,8 +522,13 @@ export default function setup(pi: ExtensionAPI): void {
 				failover: result.failoverUsed,
 			});
 			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
+			// Never persist directives harvested from a truncated answer: a
+			// LESSON/RETRACT line cut mid-token would write a corrupted lesson or
+			// (via RETRACT's substring match) delete the wrong one. We still strip
+			// the partial lines above so the agent never sees them.
 			if (
 				args.harvest &&
+				!raw.truncated &&
 				(harvested.lessons.length > 0 || harvested.retractions.length > 0)
 			) {
 				applied = memoryStore.applyDirectives(
@@ -535,6 +552,7 @@ export default function setup(pi: ExtensionAPI): void {
 				transcriptTokens: result.transcriptTokens,
 				...result.usage,
 				answerChars: result.answer.length,
+				truncated: result.truncated,
 				lessons: applied.lessons,
 				retractions: applied.retractions,
 				retractMisses: applied.retractMisses,
@@ -595,17 +613,22 @@ export default function setup(pi: ExtensionAPI): void {
 
 		// Set once by runConsultation's telemetry outcome hook; re-derived below if absent.
 		let recordedOutcome: BuddyOutcome | undefined;
-		const automaticOutcome = (answer: string): BuddyOutcome => {
+		const automaticOutcome = (
+			result: Pick<ConsultResult, "answer" | "truncated">,
+		): BuddyOutcome => {
+			// Session generation guard is impure; the verdict itself is delegated
+			// to the pure, unit-tested classifier (truncated => never PASS).
 			if (!tracker.isCurrent(launch)) return "discarded";
-			if (isWatchdogPass(answer)) return "pass";
-			const staleness = tracker.turnsElapsedSince(launch);
-			return shouldDeliverAutomaticConcern({ answer, turnsElapsed: staleness })
-				.deliver
-				? "concern"
-				: "stale_suppressed";
+			return classifyAutomaticVerdict({
+				answer: result.answer,
+				truncated: result.truncated,
+				turnsElapsed: tracker.turnsElapsedSince(launch),
+			});
 		};
-		const recordAutomaticOutcome = (answer: string): BuddyOutcome => {
-			recordedOutcome = automaticOutcome(answer);
+		const recordAutomaticOutcome = (
+			result: Pick<ConsultResult, "answer" | "truncated">,
+		): BuddyOutcome => {
+			recordedOutcome = automaticOutcome(result);
 			return recordedOutcome;
 		};
 
@@ -621,14 +644,14 @@ export default function setup(pi: ExtensionAPI): void {
 					signal: controller.signal,
 					statusKey: BG_STATUS_KEY,
 					trigger,
-					outcomeOf: (r) => recordAutomaticOutcome(r.answer),
+					outcomeOf: (r) => recordAutomaticOutcome(r),
 					extraTelemetry: () => ({
 						turnsElapsed: tracker.turnsElapsedSince(launch),
 					}),
 				});
 				// Session was replaced/forked while we investigated: drop the verdict.
 				if (!tracker.isCurrent(launch)) return;
-				const outcome = recordedOutcome ?? automaticOutcome(result.answer);
+				const outcome = recordedOutcome ?? automaticOutcome(result);
 				// runConsultation already stripped directives, so PASS detection cannot
 				// be spoofed by `PASS\n\nLESSON[...]`.
 				if (outcome === "pass") {
@@ -699,9 +722,9 @@ export default function setup(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Consult a candid sparring partner to discuss, debate, fact-check, or review",
 		promptGuidelines: [
-			"Use consult_buddy (stance 'debate' or 'discuss') before committing to a significant design or architectural decision.",
+			"Use consult_buddy (stance 'debate' or 'discuss') after initial orientation (reading files, searching) but before committing to a significant design or architectural decision — orientation is not substantive work; writing is.",
 			"Use consult_buddy (stance 'fact_check') when making claims about the codebase, or about library APIs/versions/best practices, that you have not directly verified this session — the buddy can check current docs and the web beyond your knowledge cutoff.",
-			"Use consult_buddy (stance 'review') after completing a substantial piece of work and before declaring it done.",
+			"Use consult_buddy (stance 'review') after completing a substantial piece of work and before declaring it done — make the deliverable durable first (files written, changes committed), then ask for the review.",
 		],
 		parameters: Type.Object({
 			stance: StringEnum([...STANCES] as ["discuss", "debate", "fact_check", "review"], {
