@@ -1480,4 +1480,36 @@ describe("web tools", () => {
 			/no browser/,
 		);
 	});
+
+	it("read_webpage explains how to install a missing agent-browser CLI", async () => {
+		// Pi's executor reports spawn ENOENT as code 1 with no captured output.
+		const exec: ExecFn = async () => ({ stdout: "", stderr: "", code: 1 });
+		const tools = createWebTools(exec);
+		const tool = tools.find((t) => t.name === "read_webpage");
+		assert.ok(tool);
+		await assert.rejects(
+			() => tool.execute("t1", { url: "example.com" }),
+			(error: Error) => {
+				assert.match(error.message, /agent-browser could not be launched/);
+				assert.match(error.message, /npm install -g agent-browser/);
+				assert.match(error.message, /agent-browser install/);
+				return true;
+			},
+		);
+	});
+
+	it("read_webpage does not misdiagnose other silent CLI failures as missing", async () => {
+		const exec: ExecFn = async () => ({ stdout: "", stderr: "", code: 2 });
+		const tools = createWebTools(exec);
+		const tool = tools.find((t) => t.name === "read_webpage");
+		assert.ok(tool);
+		await assert.rejects(
+			() => tool.execute("t1", { url: "example.com" }),
+			(error: Error) => {
+				assert.match(error.message, /agent-browser open failed \(2\)/);
+				assert.doesNotMatch(error.message, /npm install/);
+				return true;
+			},
+		);
+	});
 });

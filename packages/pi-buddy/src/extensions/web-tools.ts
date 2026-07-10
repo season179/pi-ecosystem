@@ -127,8 +127,18 @@ async function readWebpage(
 			{ signal, timeout: BROWSER_TIMEOUT_MS },
 		);
 		if (result.code !== 0) {
+			const diagnostic = (result.stderr || result.stdout).trim();
+			if (result.code === 1 && !diagnostic) {
+				throw new Error(
+					"read_webpage is unavailable: agent-browser could not be launched. " +
+						"Install it with `npm install -g agent-browser`, then run " +
+						"`agent-browser install`. If it is already installed, ensure Pi " +
+						"can execute it from PATH.",
+				);
+			}
+			const suffix = diagnostic ? `: ${diagnostic}` : "";
 			throw new Error(
-				`agent-browser ${args[0]} failed (${result.code}): ${result.stderr || result.stdout}`.trim(),
+				`agent-browser ${args[0]} failed (${result.code})${suffix}`,
 			);
 		}
 		return result.stdout;
