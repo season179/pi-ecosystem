@@ -1,17 +1,36 @@
 # @season179/pi-buddy
 
-Gives [pi](https://github.com/badlogic/pi-mono) a sparring partner: a separate
-model that discusses, debates, pushes back, and fact-checks — like a candid
-senior colleague. The buddy sees the full session transcript and has
-**read-only** access to the repository (`read`, `grep`, `find`, `ls`) and the
-web (`lookup_docs` via DeepWiki, `read_webpage` via agent-browser). It can
-verify claims against actual files and current documentation — beyond both
-models' knowledge cutoffs — but it can never write, click, or act.
+Gives [Pi](https://github.com/badlogic/pi-mono) a sparring partner: a second model that discusses, debates, pushes back, and fact-checks — like a candid senior colleague.
 
-## How it works
+The buddy sees the full session transcript and has **read-only** access to the repository (`read`, `grep`, `find`, `ls`) and the web (`lookup_docs` via DeepWiki, `read_webpage` via agent-browser). It can verify claims against actual files and current documentation — beyond both models' knowledge cutoffs — but it can never write, click, or act.
 
-**BUDDY CONSULT (agent-requested)** — the main agent calls the
-`consult_buddy` tool with a stance:
+## Motivation
+
+Buddy was originally inspired by [Hermes Agent's Mixture of Agents](https://hermes-agent.nousresearch.com/docs/user-guide/features/mixture-of-agents): a second model's perspective measurably improves answers, but Hermes' reference models run without tool or web access, so they can only recall, not verify. Buddy gives the second opinion read-only tools and internet access so it can check claims against the actual code and current documentation. The watchdog mode comes from a different observation: I'm most effective when I'm pair programming, because a colleague catches my mistakes while I'm still making them. Buddy reviews in the background, in real time, for the same reason.
+
+## Installation
+
+```bash
+pi install npm:@season179/pi-buddy
+```
+
+Requirements:
+
+- The buddy model (default `zai/glm-5.2`) must exist in your Pi model registry with a valid API key. No provider is used unless you configure it.
+- Optional: the [agent-browser](https://github.com/vercel-labs/agent-browser) CLI on your PATH, for `read_webpage`. Without it, the buddy still verifies against the repository and DeepWiki.
+
+## How It Works
+
+The buddy gets involved four ways:
+
+| Trigger | What happens |
+|---|---|
+| `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance |
+| `/buddy <question>` | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt |
+| Watchdog (automatic) | After 3 turns without a consult, the buddy investigates in the background while the agent keeps working |
+| Run-end (automatic) | Runs of ≥ 2 turns that never consulted get a quiet background review at completion |
+
+Stances for `consult_buddy`:
 
 | Stance | Behavior |
 |---|---|
@@ -20,57 +39,15 @@ models' knowledge cutoffs — but it can never write, click, or act.
 | `fact_check` | Verifies claims against real files; cites VERIFIED / CONTRADICTED / UNVERIFIABLE |
 | `review` | Quality review of recent work, ordered by severity |
 
-**BUDDY CONSULT (user-requested)** — `/buddy <question>` asks the buddy
-directly. When the agent is idle, the answer is rendered immediately without
-waking the agent. If it completes while the agent is still running, it is queued
-for the next user prompt so Buddy does not steer the active run.
+Automatic reviews are designed to be quiet. `PASS` verdicts are suppressed entirely. Real concerns are steered in with staleness framing (`Reviewed ~N turn(s) ago...`); non-blocking concerns that land more than three turns late are dropped, while blocker/security/regression-style concerns still deliver. If the run already ended, the concern is queued for your next prompt — the agent is never auto-woken.
 
-**BUDDY ADVISORY (auto, watchdog)** — if the agent works 3 turns without
-consulting the buddy, the buddy investigates **in the background while the
-agent keeps working** — like a colleague who checks his suspicion before
-interrupting. `PASS` verdicts are suppressed (no noise), including pass-ish
-answers where Buddy emits a standalone `PASS` plus benign verification text.
-Real concerns are steered in when the verdict lands, with staleness framing
-(`Reviewed ~N turn(s) ago...`). Non-blocking concerns that land more than three
-turns late are suppressed and recorded as `stale_suppressed`; blocker/security/
-regression-style concerns still deliver. If the run already ended, the concern
-is queued for your next prompt — the agent is never auto-woken.
+**Evidence order** — repository first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage` third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in an isolated browser session — no click, fill, type, or eval. Fetched web content is treated as data to evaluate, never instructions.
 
-**BUDDY ADVISORY (auto, run-end)** — runs of ≥ 2 turns that never consulted
-the buddy get a quiet background review at completion (same PASS-suppression).
-Together with the watchdog and requested consults, you should rarely need
-`/buddy`.
-
-**Web fact-checking** — the buddy prefers evidence in this order: repository
-first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage`
-third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in
-an isolated `pi-buddy` browser session — no click, fill, type, or eval.
-Fetched web content is treated as data to evaluate, never instructions.
-
-**Memory** — the buddy is still stateless per call, but the harness injects a
-small, inspectable memory block from `~/.pi/agent/buddy-memory/`:
-
-- `global.md` — stable notes about Season's preferences/corrections
-- `projects/<slug>.md` — durable project facts not already documented in-repo
-
-The buddy has **no write tool**. Instead, harvested consultations (`consult_buddy`
-and `/buddy`) may include structured lines such as `LESSON[project]: ...` or
-`RETRACT: ...`; the harness strips those lines before the agent sees the
-answer, applies bounded/deduped writes, and shows a small notice. Memory notes
-are injected only into requested consultations. Watchdog and run-end advisories
-are never harvested and do not receive memory notes, but their last ~10 verdicts
-are injected as an in-session digest so the buddy can notice its own track
-record.
-
-Curate memory with `/buddy-memory` or edit/delete lines directly. To reset a
-scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
+**Memory** — the buddy is stateless per call, but each requested consultation gets a small, inspectable memory block from `~/.pi/agent/buddy-memory/`: `global.md` for stable preferences and corrections, `projects/<slug>.md` for durable project facts. The buddy has no write tool; instead, consultations may emit structured `LESSON[...]` / `RETRACT:` lines that the harness strips, applies as bounded and deduped writes, and confirms with a small notice. Curate with `/buddy-memory`, or reset a scope with `/buddy-memory clear global|project`.
 
 ## Configuration
 
-- Default buddy model: `zai/glm-5.2`. Override the single-model default with
-  `pi --buddy-model provider/id`.
-- For provider resilience, configure a priority failover chain in
-  `~/.pi/agent/buddy.json`:
+Optional. Lives in `~/.pi/agent/buddy.json`, re-read at the start of every consultation — edits take effect on the next Buddy call, no restart needed:
 
 ```json
 {
@@ -78,139 +55,54 @@ scope: `/buddy-memory clear global` or `/buddy-memory clear project`.
     { "id": "zai/glm-5.2", "label": "primary", "priority": 1 },
     { "id": "anthropic/claude-sonnet-4-5", "label": "fallback", "priority": 2 }
   ],
-  "retry": { "perModelRetries": 1 }
-}
-```
-
-  Buddy reads this file at the start of every consultation, so edits take effect
-  on the next Buddy call without `/reload` or restart. Priority is ascending;
-  Buddy retries the current model for transient failures before falling back to
-  the next configured model. `perModelRetries: 0` means immediate failover with
-  no same-model retry. No provider is used unless explicitly listed.
-- Buddy caps its **visible** output per call so verdicts stay tight and consults
-  stay focused. Buddy never requests extended thinking, so on any
-  opt-in-reasoning model (including the default `zai/glm-5.2`) it runs with
-  reasoning disabled and this cap simply bounds the answer length. Defaults:
-  `2048` for automatic watchdog/run-end
-  reviews, `4096` for requested `consult_buddy`/`/buddy` consults, plus a
-  source-appropriate brevity request appended to the prompt. Override the hard
-  caps in `~/.pi/agent/buddy.json`:
-
-```json
-{
+  "retry": { "perModelRetries": 1 },
   "outputMaxTokens": { "watchdog": 2048, "consult": 4096 }
 }
 ```
 
-  Each field is optional. `watchdog` covers watchdog + run-end reviews; `consult`
-  covers tool + command consults. Values must be integers ≥ 1024 (lower values
-  are ignored with a warning). Set a field to `null` to disable the hard cap for
-  that source class (the brevity request still applies). Truncated answers carry
-  a visible `[Buddy answer truncated ...]` note and can never be recorded as a
-  watchdog `PASS`.
-- Buddy is on by default when installed. Disable it for one Pi session with
-  `pi --buddy-disabled`; re-enable inside the session with `/buddy on`.
-- Every configured buddy model must exist in your pi model registry with a valid
-  API key.
+- **Models** — a priority failover chain (ascending). Buddy retries the current model on transient failures, then falls back to the next. `perModelRetries: 0` means immediate failover. For a single-session override, use `pi --buddy-model provider/id`.
+- **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Truncated answers carry a visible note and never count as a watchdog `PASS`. Buddy never requests extended thinking, so the cap bounds the answer directly.
 
-## Enable / disable
+## Enable / Disable
 
-Use `/buddy off`, `/buddy on`, or `/buddy status` to control Buddy during the
-current Pi process. This slash-command switch is in-memory only; it is sticky
-across forks/session switches in that process but does not write a persistent
-preference. In non-interactive/headless runs, use the startup flag
-`--buddy-disabled`; it seeds the initial in-memory state once, and later
-`/buddy on|off` choices are authoritative for the rest of the process.
-Slash-command confirmations are UI-only. When Buddy is off, automatic
-watchdog/run-end reviews are
-skipped and `consult_buddy` refuses model calls. The extension also removes the
-`consult_buddy` tool from the active tool list when possible, but the runtime
-execute guard is the load-bearing safety check. `/buddy-memory` remains available
-because it only shows or clears local memory files; it does not consult the model.
+Buddy is on by default when installed. Control it per Pi process:
+
+- `/buddy off`, `/buddy on`, `/buddy status` — in-memory switch, sticky across session switches in that process, never persisted.
+- `pi --buddy-disabled` — seeds the initial state for headless or non-interactive runs.
+
+When off, automatic reviews are skipped and `consult_buddy` refuses model calls. `/buddy-memory` stays available since it only touches local files.
 
 ## Telemetry
 
-Each consultation appends one JSONL record to
-`~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort, never breaks a
-consultation): source (`tool`/`command`/`watchdog`), stance, outcome
-(`ok`/`pass`/`concern`/`stale_suppressed`/`error`/`discarded`), trigger
-(`turns`/`run_end` for watchdog records), `turnsElapsed` (verdict staleness),
-rounds, tool-call count, transcript size, provider-reported token usage,
-answer length, `truncated` (whether the answer hit the output-token cap),
-memory block size (`memoryChars`), retry/failover metadata
-(`attempts`, `retried`,
-`modelsAttempted`, `failoverUsed`, `modelFailures`), harvest counts (`lessons`,
-`retractions`, `retractMisses`), and duration. Watchdog/background reviews retry
-once on transient provider failures before falling back or recording an error.
-`stale_suppressed` means an automatic concern landed too late to steer and did
-not contain blocker markers. `discarded` means a background verdict was dropped
-because the session shut down or was replaced mid-investigation.
-
-Token telemetry has two layers:
-
-- `transcriptTokens` is a chars/4 heuristic for the rendered transcript only;
-  it is useful as a context-pressure estimate before provider formatting.
-  Automatic watchdog/run-end reviews use a smaller recent-context transcript
-  budget than requested consultations.
-- `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
-  `reasoningTokens`, `totalTokens`, and `costUsd` come from pi-ai's
-  provider-reported `AssistantMessage.usage`, summed across all Buddy model
-  calls in the consultation. `reasoningTokens` is a subset of `outputTokens`,
-  not an additive category. `finalRoundInputTokens` and
-  `finalRoundTotalTokens` report only the final model call, which is useful for
-  seeing how large the final tool-loop context became.
-
-`costUsd` depends on pi-ai model pricing metadata. The default
-`zai/glm-5.2` reports real token counts but currently has zero pricing metadata,
-so `costUsd: 0` is expected for that model.
-
-Health signals to watch:
-
-- **watchdog pass:concern ratio** — mostly `pass` with occasional `concern`
-  is healthy; all `concern` means it is noisy, all `pass` forever means the
-  threshold or prompt needs tuning.
-- **consult frequency** — no `tool` records across real sessions means the main
-  agent is not consulting; strengthen `promptGuidelines`.
-- **toolCalls** — frequent `fact_check`/`review` with `toolCalls: 0` means the
-  buddy is armchair-guessing instead of verifying.
-- **totalTokens / finalRoundTotalTokens** — provider-reported Buddy token use;
-  use this to spot expensive multi-round consults and large final contexts.
-- **truncated rate** — how often answers hit the output cap. If watchdog
-  truncation climbs above ~10%, raise `outputMaxTokens.watchdog`; if mean
-  `outputTokens` sits far below the cap, consider lowering it.
-- **costUsd** — only meaningful for models with nonzero pricing metadata; it is
-  expected to be `0` for the default `zai/glm-5.2` model.
-- **totalMs** — how much latency the buddy adds per consultation.
-- **failoverUsed / modelsAttempted** — how often the configured primary model
-  failed and which fallback succeeded.
-- **outcome: error** — surfaces failures that would otherwise be invisible
-  (especially silent watchdog failures).
-- **outcome: stale_suppressed** — automatic concern suppressed for staleness;
-  if this climbs, the watchdog is finding issues too late.
-- **lessons per consultation** — should stay low; if it climbs, the learning
-  prompt is too eager. Tune the prompt before raising caps.
-- **retractMisses** — the buddy is hallucinating or misremembering a lesson;
-  inspect the memory files.
+Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, and duration.
 
 ```bash
-# Quick look: outcomes by source
 jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
-
-# Recent provider-reported token usage
-jq -r '[.ts,.source,.outcome,(.totalTokens//"-"),(.finalRoundTotalTokens//"-"),(.costUsd//"-")] | @tsv' ~/.pi/agent/buddy-telemetry.jsonl | tail
 ```
 
-## Development
+See [TELEMETRY.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/TELEMETRY.md) for the full field reference and the health signals worth watching.
+
+## Local Development
 
 ```bash
 npm run build   # compile
-npm test        # build + vitest (pure logic: transcript, trimming, memory, PASS detection)
+npm test        # vitest (pure logic: transcript, trimming, memory, PASS detection)
 ```
 
-Smoke test in a scratch directory:
+Smoke test from the repo, in a scratch directory:
 
 ```bash
 pi -e packages/pi-buddy/src/extensions/buddy.ts
 ```
 
-See `PLAN.md` for the full design rationale.
+See [PLAN.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/PLAN.md) for the full design rationale.
+
+## Compatibility
+
+- Pi: tested with 0.80.x. Pi itself requires Node >= 22.19.
+- Node.js: >= 22 required; developed and tested on Node 24.
+- OS: developed and tested on macOS only. Nothing is intentionally platform-specific, but Linux and Windows are untested.
+
+## Security
+
+Pi extensions execute with your user permissions. The buddy's tools are read-only by construction — no write or edit, read-only shell commands, read-only browser verbs — but it sends your session transcript and repository excerpts to whichever model providers you configure. Fetched web content is treated as untrusted data, never as instructions. Review the source before installing.

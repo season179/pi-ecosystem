@@ -12,6 +12,7 @@ on:
           - all
           - pi-worktree
           - pi-skills-status
+          - pi-buddy
 
 jobs:
   publish:
@@ -32,3 +33,5 @@ jobs:
         if: ${{ inputs.package == 'all' || inputs.package == 'pi-worktree' }}
       - run: npm publish --workspace @season179/pi-skills-status --access public
         if: ${{ inputs.package == 'all' || inputs.package == 'pi-skills-status' }}
+      - run: npm publish --workspace @season179/pi-buddy --access public
+        if: ${{ inputs.package == 'all' || inputs.package == 'pi-buddy' }}
