@@ -1,6 +1,6 @@
 {
   "name": "@season179/pi-worktree",
-  "version": "26.5.5",
+  "version": "26.7.1",
   "description": "Adds a Claude Code-like --worktree flag to Pi.",
   "type": "module",
   "license": "MIT",
