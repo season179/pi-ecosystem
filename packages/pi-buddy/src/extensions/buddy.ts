@@ -1060,7 +1060,10 @@ export default function setup(pi: ExtensionAPI): void {
 
 	pi.on("turn_end", async (_event, ctx) => {
 		if (!buddyEnabled) return;
-		if (tracker.onTurnEnd()) {
+		// Same guard as agent_end: in print/json mode there is no UI to show
+		// the advisory, and headless runs (e.g. pi-delegate workers) would
+		// pay for reviews nobody sees. Tracker still advances either way.
+		if (tracker.onTurnEnd() && ctx.hasUI) {
 			launchBackgroundReview("turns", ctx);
 		}
 	});
