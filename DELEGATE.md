@@ -204,3 +204,32 @@ escalation ladder in v1; the orchestrator taking over IS the escalation.
 - Parallel/multiple workers, synthesis, critics (that was troika; shelved)
 - Worktree isolation, async delegation, in-harness retry loops
 - Worker web access or MCP tools
+
+## 10. Addendum: 2026-07-11 hardening (delivered behavior)
+
+Motivated by the first real dogfood incident: a delegation ran the full
+10-minute cap with a frozen progress display, and the SIGKILL escalation
+turned out to be dead code (`proc.killed` records that a signal was *sent*,
+so it was already true after SIGTERM). Changes, agreed in a Claude↔Codex
+design debate:
+
+- **Kill path** (src/worker.ts): escalation keys on actual process close;
+  workers spawn `detached` and kills go to the process group so tool
+  children (builds, tests) die too; timers and the abort listener are
+  cleaned up on every completion path; signal-killed workers report a
+  nonzero exit instead of masquerading as exit 0.
+- **Worker isolation**: workers run with `--no-extensions` (no MoA/buddy/MCP
+  inside workers). Skills and context files stay enabled — domain-knowledge
+  skills are deliberately available to the worker.
+- **Progress** (src/progress.ts): state-shaped running view re-emitted on a
+  10s heartbeat — turn count, elapsed vs budget, current activity with
+  sanitized args (one line, 80 chars, secrets redacted), last 3 completed
+  activities with durations, and the interrupt hint
+  `esc stops worker · partial work preserved · reset point <sha>`.
+  Tool-less assistant messages surface as one-line narration.
+- **Timeout/abort reporting** (src/result.ts, extension): no automatic
+  post-timeout verify (it could silently add the full verify budget to the
+  wait); instead the report distinguishes "partial work exists — run the
+  verify command yourself to assess salvage" from "no changes were made",
+  and promptGuidelines steer the orchestrator accordingly. User aborts now
+  collect and report the diffstat instead of returning blind.

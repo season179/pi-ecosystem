@@ -76,8 +76,12 @@ export function formatReport(report: DelegateReport): string {
 		lines.push("worker hit its wall-clock timeout and was killed; the tree may contain partial changes.");
 	}
 	if (status === "worker_error") {
-		const reason = worker.errorMessage || worker.stderr.trim() || `exit code ${worker.exitCode}`;
-		lines.push(`worker error: ${capText(reason, 500)}`);
+		if (worker.aborted) {
+			lines.push("worker aborted by the user; partial changes remain in the tree.");
+		} else {
+			const reason = worker.errorMessage || worker.stderr.trim() || `exit code ${worker.exitCode}`;
+			lines.push(`worker error: ${capText(reason, 500)}`);
+		}
 	}
 
 	lines.push("", "diffstat vs checkpoint:");
@@ -91,6 +95,16 @@ export function formatReport(report: DelegateReport): string {
 		const verdict = verify.timedOut ? "TIMED OUT" : `exit ${verify.code}`;
 		lines.push("", `verify (${verdict}):`);
 		lines.push(capText(tailLines(verify.output, VERIFY_TAIL_LINES), VERIFY_TAIL_CAP_CHARS) || " (no output)");
+	} else if (status === "timeout") {
+		const hasWork = !!(changes && (changes.diffstat || changes.untracked.length > 0));
+		lines.push(
+			"",
+			hasWork
+				? "verify: skipped (worker killed at timeout) — partial work exists; run the verify command yourself to assess salvage, or reset to the checkpoint"
+				: "verify: skipped (worker killed at timeout; no changes were made)",
+		);
+	} else if (worker.aborted) {
+		lines.push("", "verify: skipped (delegation aborted by the user)");
 	} else {
 		lines.push("", "verify: skipped (worker did not finish cleanly)");
 	}

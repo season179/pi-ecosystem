@@ -207,6 +207,49 @@ describe("report formatting", () => {
 		expect(report).toContain("(no tracked changes)");
 	});
 
+	it("timeout with partial work points at manual salvage", () => {
+		const report = formatReport({
+			status: "timeout",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult({ timedOut: true, exitCode: 1 }),
+			changes: { diffstat: " a.txt | 5 +++--", untracked: ["gen.txt"] },
+			verify: null,
+		});
+
+		expect(report).toContain("status: timeout");
+		expect(report).toContain("wall-clock timeout");
+		expect(report).toContain("verify: skipped (worker killed at timeout) — partial work exists");
+		expect(report).toContain("run the verify command yourself");
+	});
+
+	it("timeout without changes says so instead of hinting at salvage", () => {
+		const report = formatReport({
+			status: "timeout",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult({ timedOut: true, exitCode: 1 }),
+			changes: { diffstat: "", untracked: [] },
+			verify: null,
+		});
+
+		expect(report).toContain("verify: skipped (worker killed at timeout; no changes were made)");
+		expect(report).not.toContain("salvage");
+	});
+
+	it("user abort reports the partial-work state, not a generic worker error", () => {
+		const report = formatReport({
+			status: "worker_error",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult({ aborted: true, exitCode: 1 }),
+			changes: { diffstat: " a.txt | 2 +-", untracked: [] },
+			verify: null,
+		});
+
+		expect(report).toContain("worker aborted by the user; partial changes remain in the tree.");
+		expect(report).toContain("verify: skipped (delegation aborted by the user)");
+		expect(report).toContain(" a.txt | 2 +-");
+		expect(report).not.toContain("worker error:");
+	});
+
 	it("caps the worker summary", () => {
 		const long = "x".repeat(3000);
 		const report = formatReport({

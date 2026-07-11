@@ -161,12 +161,18 @@ export interface RunWorkerOptions {
 	onEvent?: (event: WorkerStreamEvent) => void;
 	/** Override the pi executable (used outside a pi process). */
 	piCommand?: string;
+	/** SIGTERM→SIGKILL escalation grace. Test seam; defaults to 5s. */
+	sigkillGraceMs?: number;
 }
 
 const SIGKILL_GRACE_MS = 5000;
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--model", options.model];
+	// --no-extensions: the worker gets built-in tools, skills, and context
+	// files, but not the orchestrator's extension stack (MoA, buddy, MCP
+	// servers) — those cost startup seconds and per-turn tokens and can fire
+	// LLM calls of their own inside the worker.
+	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-extensions", "--model", options.model];
 	if (options.tools && options.tools.length > 0) args.push("--tools", options.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
@@ -195,20 +201,57 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 				cwd: options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				// Own process group, so the kill path takes down tool children
+				// (builds, test runs) along with pi itself. Trade-off: if the
+				// orchestrator process dies without running the kill path, the
+				// worker is orphaned rather than auto-killed.
+				detached: true,
 				// Marker lets the delegate tool refuse to run inside a worker,
 				// preventing recursive delegation chains.
 				env: { ...process.env, PI_DELEGATE_WORKER: "1" },
 			});
 
-			const killProc = () => {
-				proc.kill("SIGTERM");
-				const hardKill = setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, SIGKILL_GRACE_MS);
-				hardKill.unref();
+			let closed = false;
+			let timeoutHandle: NodeJS.Timeout | undefined;
+			let hardKillHandle: NodeJS.Timeout | undefined;
+
+			// Signal the worker's whole process group; fall back to the direct
+			// process when the group is already gone.
+			const signalWorker = (sig: NodeJS.Signals) => {
+				try {
+					if (proc.pid) process.kill(-proc.pid, sig);
+					else proc.kill(sig);
+				} catch {
+					try {
+						proc.kill(sig);
+					} catch {
+						/* already dead */
+					}
+				}
 			};
 
-			let timeoutHandle: NodeJS.Timeout | undefined;
+			// Escalation must key on `closed`, never `proc.killed` — killed
+			// only records that a signal was SENT, so it is already true right
+			// after the SIGTERM and would make the SIGKILL branch dead code.
+			const killProc = () => {
+				signalWorker("SIGTERM");
+				hardKillHandle = setTimeout(() => {
+					if (!closed) signalWorker("SIGKILL");
+				}, options.sigkillGraceMs ?? SIGKILL_GRACE_MS);
+				hardKillHandle.unref();
+			};
+
+			const onAbort = () => {
+				aborted = true;
+				killProc();
+			};
+
+			const cleanup = () => {
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				if (hardKillHandle) clearTimeout(hardKillHandle);
+				options.signal?.removeEventListener("abort", onAbort);
+			};
+
 			if (options.timeoutMs && options.timeoutMs > 0) {
 				timeoutHandle = setTimeout(() => {
 					timedOut = true;
@@ -225,23 +268,23 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 				stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
+			proc.on("close", (code, sig) => {
+				closed = true;
+				cleanup();
 				collector.flush();
-				resolve(code ?? 0);
+				// Signal-killed workers (timeout, abort, external) must not
+				// read as exit 0.
+				resolve(code ?? (sig ? 1 : 0));
 			});
 
 			proc.on("error", (err) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
+				closed = true;
+				cleanup();
 				stderr += stderr ? `\n${err.message}` : err.message;
 				resolve(1);
 			});
 
 			if (options.signal) {
-				const onAbort = () => {
-					aborted = true;
-					killProc();
-				};
 				if (options.signal.aborted) onAbort();
 				else options.signal.addEventListener("abort", onAbort, { once: true });
 			}

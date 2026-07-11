@@ -13,6 +13,12 @@ import { Type } from "typebox";
 import { buildWorkerPrompt, WORKER_SYSTEM_PROMPT, type DelegateBrief } from "../brief.js";
 import { loadConfig } from "../config.js";
 import { collectChanges, makeCheckpoint, type Checkpoint, type WorkChanges } from "../git.js";
+import {
+	createProgressTracker,
+	formatProgressLines,
+	HEARTBEAT_MS,
+	type ProgressState,
+} from "../progress.js";
 import { deriveStatus, formatReport, type DelegateStatus, type VerifyOutcome } from "../result.js";
 import { appendTelemetry, buildRecord } from "../telemetry.js";
 import { runWorker, type WorkerResult, type WorkerUsage } from "../worker.js";
@@ -46,7 +52,7 @@ interface DelegateDetails {
 	durationMs?: number;
 	changes?: WorkChanges | null;
 	verify?: VerifyOutcome | null;
-	progress: string[];
+	progress: ProgressState;
 }
 
 export default function setup(pi: ExtensionAPI): void {
@@ -68,6 +74,7 @@ export default function setup(pi: ExtensionAPI): void {
 			"Use delegate for well-specified, mechanically-verifiable coding work (implement-from-spec, boilerplate, pattern application, tests for defined behavior) instead of doing the tool-loop churn yourself.",
 			"Always fill delegate's `context` with conversation-derived constraints — the worker sees none of the session history.",
 			"Delegate the same task at most twice; after that, do it yourself. On verify_failed, prefer sharpening the brief over blind retry.",
+			"On timeout with a non-empty diffstat, inspect the partial work; if it appears coherent, run the brief's verify command yourself before choosing retry, takeover, or reset.",
 			"After a delegation succeeds, spot-check the diff where you have doubts instead of re-reading everything.",
 		],
 		parameters: DelegateParams,
@@ -86,96 +93,118 @@ export default function setup(pi: ExtensionAPI): void {
 				verify: params.verify,
 			};
 
-			const details: DelegateDetails = { status: "running", brief, progress: [] };
-			const emit = (line: string) => {
-				details.progress.push(line);
+			const tracker = createProgressTracker(Date.now(), config.workerTimeoutMs);
+			const details: DelegateDetails = { status: "running", brief, progress: tracker.snapshot() };
+			const emitProgress = () => {
+				details.progress = tracker.snapshot();
 				onUpdate?.({
-					content: [{ type: "text", text: line }],
+					content: [
+						{
+							type: "text",
+							text: formatProgressLines(details.progress, Date.now(), details.checkpoint?.sha.slice(0, 12)).join(
+								"\n",
+							),
+						},
+					],
 					details: { ...details },
 				});
 			};
 
-			const exec: Parameters<typeof makeCheckpoint>[0] = (cmd, args, opts) => pi.exec(cmd, args, opts);
-			const checkpoint = await makeCheckpoint(exec, ctx.cwd);
-			details.checkpoint = checkpoint;
-			emit(
-				`checkpoint ${checkpoint.sha.slice(0, 12)}${checkpoint.committed ? " (auto-committed dirty tree)" : ""}`,
-			);
-
-			const worker = await runWorker({
-				model: config.workerModel,
-				task: buildWorkerPrompt(brief),
-				cwd: ctx.cwd,
-				systemPrompt: WORKER_SYSTEM_PROMPT,
-				timeoutMs: config.workerTimeoutMs,
-				signal,
-				// Test seam: getPiInvocation is only valid inside a real pi
-				// process (argv[1] is pi's entry script). Harnesses that load
-				// this extension outside pi must set PI_DELEGATE_PI_COMMAND=pi
-				// or the worker spawn re-invokes the harness script itself.
-				piCommand: process.env.PI_DELEGATE_PI_COMMAND || undefined,
-				onEvent: (ev) => {
-					if (ev.type === "message" && ev.message.role === "assistant") {
-						const tools = ev.message.content
-							.filter((part) => part.type === "toolCall")
-							.map((part) => (part as { name: string }).name);
-						emit(tools.length > 0 ? `worker: ${tools.join(", ")}` : "worker: thinking/summarizing");
-					}
-				},
-			});
-			details.usage = worker.usage;
-			details.model = worker.model;
-			details.durationMs = worker.durationMs;
-
-			const record = (status: DelegateStatus, changes: WorkChanges | null, verify: VerifyOutcome | null) =>
-				appendTelemetry(
-					config.telemetryPath,
-					buildRecord({ call, model: config.workerModel, status, brief, worker, checkpoint, changes, verify }),
+			// The heartbeat is what keeps the display honest during silent
+			// stretches (worker builds, verify runs): elapsed/budget move even
+			// when no worker event arrives.
+			const heartbeat = setInterval(emitProgress, HEARTBEAT_MS);
+			try {
+				const exec: Parameters<typeof makeCheckpoint>[0] = (cmd, args, opts) => pi.exec(cmd, args, opts);
+				const checkpoint = await makeCheckpoint(exec, ctx.cwd);
+				details.checkpoint = checkpoint;
+				tracker.note(
+					`checkpoint ${checkpoint.sha.slice(0, 12)}${checkpoint.committed ? " (auto-committed dirty tree)" : ""}`,
 				);
+				emitProgress();
 
-			if (worker.aborted) {
-				await record("worker_error", null, null);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `delegation aborted; the tree may contain partial changes. Reject with: git reset --hard ${checkpoint.sha.slice(0, 12)}`,
-						},
-					],
-					details: { ...details, status: "worker_error" as const },
-					isError: true,
-				};
-			}
-
-			const changes = await collectChanges(exec, ctx.cwd, checkpoint.sha);
-			details.changes = changes;
-
-			let verify: VerifyOutcome | null = null;
-			const workerFinishedCleanly = worker.exitCode === 0 && !worker.timedOut && worker.stopReason !== "error";
-			if (workerFinishedCleanly) {
-				emit(`verify: ${brief.verify}`);
-				const verifyResult = await pi.exec("bash", ["-c", brief.verify], {
+				const worker = await runWorker({
+					model: config.workerModel,
+					task: buildWorkerPrompt(brief),
 					cwd: ctx.cwd,
-					timeout: config.verifyTimeoutMs,
+					systemPrompt: WORKER_SYSTEM_PROMPT,
+					timeoutMs: config.workerTimeoutMs,
 					signal,
+					// Test seam: getPiInvocation is only valid inside a real pi
+					// process (argv[1] is pi's entry script). Harnesses that load
+					// this extension outside pi must set PI_DELEGATE_PI_COMMAND=pi
+					// or the worker spawn re-invokes the harness script itself.
+					piCommand: process.env.PI_DELEGATE_PI_COMMAND || undefined,
+					onEvent: (ev) => {
+						const now = Date.now();
+						if (ev.type === "message" && ev.message.role === "assistant") {
+							tracker.onAssistantMessage(ev.message, now);
+						} else if (ev.type === "tool_result" && ev.message.role === "toolResult") {
+							tracker.onToolResult(ev.message, now);
+						}
+						emitProgress();
+					},
 				});
-				verify = {
-					code: verifyResult.code,
-					output: [verifyResult.stdout, verifyResult.stderr].filter(Boolean).join("\n"),
-					timedOut: verifyResult.killed,
+				details.usage = worker.usage;
+				details.model = worker.model;
+				details.durationMs = worker.durationMs;
+
+				const record = (status: DelegateStatus, changes: WorkChanges | null, verify: VerifyOutcome | null) =>
+					appendTelemetry(
+						config.telemetryPath,
+						buildRecord({ call, model: config.workerModel, status, brief, worker, checkpoint, changes, verify }),
+					);
+
+				if (worker.aborted) {
+					// The worker is confirmed dead (runWorker resolves on close),
+					// so the diffstat is stable; show what the partial work is
+					// instead of only saying it may exist.
+					const changes = await collectChanges(exec, ctx.cwd, checkpoint.sha).catch(() => null);
+					details.changes = changes;
+					details.status = "worker_error";
+					await record("worker_error", changes, null);
+					return {
+						content: [
+							{ type: "text", text: formatReport({ status: "worker_error", checkpoint, worker, changes, verify: null }) },
+						],
+						details: { ...details },
+						isError: true,
+					};
+				}
+
+				const changes = await collectChanges(exec, ctx.cwd, checkpoint.sha);
+				details.changes = changes;
+
+				let verify: VerifyOutcome | null = null;
+				const workerFinishedCleanly = worker.exitCode === 0 && !worker.timedOut && worker.stopReason !== "error";
+				if (workerFinishedCleanly) {
+					tracker.setPhase(`verify: ${brief.verify}`, Date.now());
+					emitProgress();
+					const verifyResult = await pi.exec("bash", ["-c", brief.verify], {
+						cwd: ctx.cwd,
+						timeout: config.verifyTimeoutMs,
+						signal,
+					});
+					verify = {
+						code: verifyResult.code,
+						output: [verifyResult.stdout, verifyResult.stderr].filter(Boolean).join("\n"),
+						timedOut: verifyResult.killed,
+					};
+				}
+				details.verify = verify;
+
+				const status = deriveStatus(worker, verify);
+				details.status = status;
+				await record(status, changes, verify);
+
+				return {
+					content: [{ type: "text", text: formatReport({ status, checkpoint, worker, changes, verify }) }],
+					details: { ...details },
+					isError: status === "worker_error" || status === "timeout",
 				};
+			} finally {
+				clearInterval(heartbeat);
 			}
-			details.verify = verify;
-
-			const status = deriveStatus(worker, verify);
-			details.status = status;
-			await record(status, changes, verify);
-
-			return {
-				content: [{ type: "text", text: formatReport({ status, checkpoint, worker, changes, verify }) }],
-				details: { ...details },
-				isError: status === "worker_error" || status === "timeout",
-			};
 		},
 
 		renderCall(args, theme, context) {
@@ -205,8 +234,10 @@ export default function setup(pi: ExtensionAPI): void {
 			let content = `${icon} ${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", status)}`;
 
 			if (status === "running") {
-				const recent = (details.progress ?? []).slice(-5);
-				for (const line of recent) content += `\n  ${theme.fg("dim", line)}`;
+				const lines = details.progress
+					? formatProgressLines(details.progress, Date.now(), details.checkpoint?.sha.slice(0, 12))
+					: [];
+				for (const line of lines) content += `\n  ${theme.fg("dim", line)}`;
 			} else {
 				if (details.changes?.diffstat) {
 					const stat = expanded
