@@ -168,6 +168,18 @@ export interface RunWorkerOptions {
 const SIGKILL_GRACE_MS = 5000;
 
 export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult> {
+	if (options.signal?.aborted) {
+		return {
+			messages: [],
+			usage: emptyUsage(),
+			exitCode: 1,
+			timedOut: false,
+			aborted: true,
+			stderr: "",
+			durationMs: 0,
+		};
+	}
+
 	// --no-extensions: the worker gets built-in tools, skills, and context
 	// files, but not the orchestrator's extension stack (MoA, buddy, MCP
 	// servers) — those cost startup seconds and per-turn tokens and can fire
@@ -212,11 +224,13 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			});
 
 			let closed = false;
+			let killInitiated = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			let hardKillHandle: NodeJS.Timeout | undefined;
 
 			// Signal the worker's whole process group; fall back to the direct
-			// process when the group is already gone.
+			// process when the group is already gone (ChildProcess.kill on a
+			// dead child returns false rather than throwing).
 			const signalWorker = (sig: NodeJS.Signals) => {
 				try {
 					if (proc.pid) process.kill(-proc.pid, sig);
@@ -234,6 +248,7 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 			// only records that a signal was SENT, so it is already true right
 			// after the SIGTERM and would make the SIGKILL branch dead code.
 			const killProc = () => {
+				killInitiated = true;
 				signalWorker("SIGTERM");
 				hardKillHandle = setTimeout(() => {
 					if (!closed) signalWorker("SIGKILL");
@@ -270,6 +285,12 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerResult
 
 			proc.on("close", (code, sig) => {
 				closed = true;
+				// pi closing does not mean its group is empty: a tool child
+				// that traps SIGTERM (test runner, dev server) would survive
+				// the cancelled grace timer and keep mutating the tree. Once
+				// a kill was initiated there is no graceful path left — reap
+				// the group before reporting the worker dead.
+				if (killInitiated) signalWorker("SIGKILL");
 				cleanup();
 				collector.flush();
 				// Signal-killed workers (timeout, abort, external) must not

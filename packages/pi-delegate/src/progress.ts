@@ -31,11 +31,22 @@ export interface ProgressState {
 	recent: CompletedActivity[];
 }
 
-const SECRET_ARG = /\b([A-Za-z0-9_]*(?:key|token|secret|password|credential)[A-Za-z0-9_]*)=\S+/gi;
+// A quoted value must be consumed through its closing quote — a bare \S+
+// stops at the first space and leaks the rest of the secret.
+const SECRET_VALUE = `("[^"]*"|'[^']*'|\\S+)`;
+const SECRET_NAME = `[A-Za-z0-9_-]*(?:key|token|secret|password|credential)[A-Za-z0-9_-]*`;
+const SECRET_ASSIGN = new RegExp(`\\b(${SECRET_NAME})=${SECRET_VALUE}`, "gi");
+const SECRET_FLAG = new RegExp(`(--?${SECRET_NAME})\\s+(?!-)${SECRET_VALUE}`, "gi");
+const SECRET_BEARER = /\b(bearer)\s+\S+/gi;
 
 /** One line, secrets redacted, capped at LABEL_MAX_CHARS. */
 export function sanitizeLabel(text: string): string {
-	const oneLine = text.split("\n")[0].replace(SECRET_ARG, "$1=***").trim();
+	const oneLine = text
+		.split("\n")[0]
+		.replace(SECRET_ASSIGN, "$1=***")
+		.replace(SECRET_FLAG, "$1 ***")
+		.replace(SECRET_BEARER, "$1 ***")
+		.trim();
 	return oneLine.length > LABEL_MAX_CHARS ? `${oneLine.slice(0, LABEL_MAX_CHARS - 1)}…` : oneLine;
 }
 

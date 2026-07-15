@@ -40,6 +40,18 @@ describe("sanitizeLabel", () => {
 		expect(sanitizeLabel("export MY_TOKEN=abc && curl")).toBe("export MY_TOKEN=*** && curl");
 	});
 
+	it("redacts quoted assignment values through their closing quote", () => {
+		expect(sanitizeLabel(`DB_PASSWORD="hunter two words" ./deploy.sh`)).toBe("DB_PASSWORD=*** ./deploy.sh");
+		expect(sanitizeLabel("SECRET='multi word value' run")).toBe("SECRET=*** run");
+	});
+
+	it("redacts space-separated flag values and bearer credentials", () => {
+		expect(sanitizeLabel("curl --token abc123 https://x.test")).toBe("curl --token *** https://x.test");
+		expect(sanitizeLabel("curl -H 'Authorization: Bearer sk-live-42' https://x.test")).toContain("Bearer ***");
+		// A following flag is not a value; nothing to redact.
+		expect(sanitizeLabel("cmd --token --verbose")).toBe("cmd --token --verbose");
+	});
+
 	it("caps at LABEL_MAX_CHARS with an ellipsis", () => {
 		const label = sanitizeLabel("x".repeat(200));
 		expect(label.length).toBe(LABEL_MAX_CHARS);

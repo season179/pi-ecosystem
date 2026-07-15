@@ -135,6 +135,29 @@ describe("runWorker kill path", () => {
 		expect(result.aborted).toBe(false);
 	}, 15_000);
 
+	it("does not spawn at all when the signal is already aborted", async () => {
+		// The fake pi would emit a message if it ever ran.
+		const bin = makeFakePi(
+			`echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ran"}]}}'`,
+		);
+
+		const controller = new AbortController();
+		controller.abort();
+		const result = await runWorker({
+			model: "test/model",
+			task: "noop",
+			cwd: process.cwd(),
+			timeoutMs: 60_000,
+			signal: controller.signal,
+			piCommand: bin,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.messages).toHaveLength(0);
+		expect(result.durationMs).toBe(0);
+	});
+
 	it("aborts via signal and reports aborted with nonzero exit", async () => {
 		const bin = makeFakePi(`echo start\nsleep 60`);
 

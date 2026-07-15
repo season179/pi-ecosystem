@@ -17,6 +17,8 @@ export interface VerifyOutcome {
 	code: number;
 	output: string;
 	timedOut: boolean;
+	/** Verify was killed by a user abort, not its own timeout. */
+	aborted?: boolean;
 }
 
 export function capText(text: string, maxChars: number): string {
@@ -44,7 +46,7 @@ export function workerFailed(worker: WorkerResult): boolean {
 export function deriveStatus(worker: WorkerResult, verify: VerifyOutcome | null): DelegateStatus {
 	if (worker.timedOut) return "timeout";
 	if (workerFailed(worker)) return "worker_error";
-	if (!verify || verify.code !== 0 || verify.timedOut) return "verify_failed";
+	if (!verify || verify.code !== 0 || verify.timedOut || verify.aborted) return "verify_failed";
 	return "success";
 }
 
@@ -52,6 +54,7 @@ export interface DelegateReport {
 	status: DelegateStatus;
 	checkpoint: { sha: string; committed: boolean };
 	worker: WorkerResult;
+	/** Null means change collection FAILED, not that the tree is clean. */
 	changes: WorkChanges | null;
 	/** Null when the worker failed and verify was skipped. */
 	verify: VerifyOutcome | null;
@@ -85,23 +88,31 @@ export function formatReport(report: DelegateReport): string {
 	}
 
 	lines.push("", "diffstat vs checkpoint:");
-	lines.push(changes && changes.diffstat ? changes.diffstat : " (no tracked changes)");
-	if (changes && changes.untracked.length > 0) {
-		lines.push("new untracked files:");
-		for (const file of changes.untracked) lines.push(` ${file}`);
+	if (changes === null) {
+		// Change collection failed (e.g. git interrupted mid-kill). Saying
+		// "no tracked changes" here would be an affirmative lie.
+		lines.push(" (diffstat unavailable — inspect the tree with `git status` / `git diff <checkpoint>` before deciding)");
+	} else {
+		lines.push(changes.diffstat ? changes.diffstat : " (no tracked changes)");
+		if (changes.untracked.length > 0) {
+			lines.push("new untracked files:");
+			for (const file of changes.untracked) lines.push(` ${file}`);
+		}
 	}
 
 	if (verify) {
-		const verdict = verify.timedOut ? "TIMED OUT" : `exit ${verify.code}`;
+		const verdict = verify.aborted ? "ABORTED BY USER — result unknown" : verify.timedOut ? "TIMED OUT" : `exit ${verify.code}`;
 		lines.push("", `verify (${verdict}):`);
 		lines.push(capText(tailLines(verify.output, VERIFY_TAIL_LINES), VERIFY_TAIL_CAP_CHARS) || " (no output)");
 	} else if (status === "timeout") {
-		const hasWork = !!(changes && (changes.diffstat || changes.untracked.length > 0));
+		const hasWork = changes === null ? null : !!(changes.diffstat || changes.untracked.length > 0);
 		lines.push(
 			"",
-			hasWork
-				? "verify: skipped (worker killed at timeout) — partial work exists; run the verify command yourself to assess salvage, or reset to the checkpoint"
-				: "verify: skipped (worker killed at timeout; no changes were made)",
+			hasWork === null
+				? "verify: skipped (worker killed at timeout) — diffstat unavailable; inspect the tree before choosing retry, takeover, or reset"
+				: hasWork
+					? "verify: skipped (worker killed at timeout) — partial work exists; run the verify command yourself to assess salvage, or reset to the checkpoint"
+					: "verify: skipped (worker killed at timeout; no changes were made)",
 		);
 	} else if (worker.aborted) {
 		lines.push("", "verify: skipped (delegation aborted by the user)");

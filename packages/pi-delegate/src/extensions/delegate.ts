@@ -155,7 +155,10 @@ export default function setup(pi: ExtensionAPI): void {
 						buildRecord({ call, model: config.workerModel, status, brief, worker, checkpoint, changes, verify }),
 					);
 
-				if (worker.aborted) {
+				// When the timeout fired first and the user aborted during the
+				// grace window, timeout is the truthful status — let the normal
+				// path derive it instead of reporting worker_error here.
+				if (worker.aborted && !worker.timedOut) {
 					// The worker is confirmed dead (runWorker resolves on close),
 					// so the diffstat is stable; show what the partial work is
 					// instead of only saying it may exist.
@@ -172,7 +175,9 @@ export default function setup(pi: ExtensionAPI): void {
 					};
 				}
 
-				const changes = await collectChanges(exec, ctx.cwd, checkpoint.sha);
+				// null = collection failed (a killed worker can leave git mid-
+				// operation); formatReport renders that distinctly from "clean".
+				const changes = await collectChanges(exec, ctx.cwd, checkpoint.sha).catch(() => null);
 				details.changes = changes;
 
 				let verify: VerifyOutcome | null = null;
@@ -185,10 +190,15 @@ export default function setup(pi: ExtensionAPI): void {
 						timeout: config.verifyTimeoutMs,
 						signal,
 					});
+					// killed covers both the verify timeout and a user abort —
+					// report them apart or an esc during verify reads as
+					// "verify TIMED OUT" and smears the worker's finished work.
+					const verifyAborted = verifyResult.killed && !!signal?.aborted;
 					verify = {
 						code: verifyResult.code,
 						output: [verifyResult.stdout, verifyResult.stderr].filter(Boolean).join("\n"),
-						timedOut: verifyResult.killed,
+						timedOut: verifyResult.killed && !verifyAborted,
+						aborted: verifyAborted,
 					};
 				}
 				details.verify = verify;

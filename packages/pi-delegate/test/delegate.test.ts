@@ -170,6 +170,12 @@ describe("status derivation", () => {
 		expect(deriveStatus(makeWorkerResult(), { code: 0, output: "", timedOut: true })).toBe("verify_failed");
 		expect(deriveStatus(makeWorkerResult(), null)).toBe("verify_failed");
 	});
+
+	it("verify_failed when verify was aborted, even on exit 0", () => {
+		expect(deriveStatus(makeWorkerResult(), { code: 0, output: "", timedOut: false, aborted: true })).toBe(
+			"verify_failed",
+		);
+	});
 });
 
 describe("report formatting", () => {
@@ -248,6 +254,46 @@ describe("report formatting", () => {
 		expect(report).toContain("verify: skipped (delegation aborted by the user)");
 		expect(report).toContain(" a.txt | 2 +-");
 		expect(report).not.toContain("worker error:");
+	});
+
+	it("distinguishes failed change collection from a clean tree", () => {
+		const report = formatReport({
+			status: "worker_error",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult({ aborted: true, exitCode: 1 }),
+			changes: null,
+			verify: null,
+		});
+
+		expect(report).toContain("diffstat unavailable");
+		expect(report).not.toContain("(no tracked changes)");
+	});
+
+	it("timeout with unavailable diffstat asks for inspection, not salvage or all-clear", () => {
+		const report = formatReport({
+			status: "timeout",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult({ timedOut: true, exitCode: 1 }),
+			changes: null,
+			verify: null,
+		});
+
+		expect(report).toContain("verify: skipped (worker killed at timeout) — diffstat unavailable");
+		expect(report).not.toContain("no changes were made");
+		expect(report).not.toContain("partial work exists");
+	});
+
+	it("verify killed by user abort reads as aborted, not timed out", () => {
+		const report = formatReport({
+			status: "verify_failed",
+			checkpoint: { sha: "abcdef1234567890", committed: false },
+			worker: makeWorkerResult(),
+			changes: { diffstat: " a.txt | 2 +-", untracked: [] },
+			verify: { code: 1, output: "interrupted", timedOut: false, aborted: true },
+		});
+
+		expect(report).toContain("verify (ABORTED BY USER — result unknown):");
+		expect(report).not.toContain("TIMED OUT");
 	});
 
 	it("caps the worker summary", () => {
