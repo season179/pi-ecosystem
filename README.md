@@ -8,6 +8,7 @@ Season's Pi packages, published independently to npm.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) - Shows the skills used in the current Pi session.
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) - Automatically replaces assistant messages with highlighted placeholders (proof-of-concept).
 - [`@season179/pi-guard`](./packages/pi-guard) - Prevents destructive or unauthorized coding-agent tool actions.
+- [`@season179/pi-model-fallback`](./packages/pi-model-fallback) - Automatic model failover driven by a standalone fallback-models.json config.
 
 ## Development
 

@@ -16,15 +16,16 @@
     "pack:buddy": "npm pack --workspace @season179/pi-buddy",
     "pack:delegate": "npm pack --workspace @season179/pi-delegate",
     "pack:guard": "npm pack --workspace @season179/pi-guard",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run"
+    "pack:model-fallback": "npm pack --workspace @season179/pi-model-fallback",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run && npm pack --workspace @season179/pi-model-fallback --dry-run"
   },
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "@earendil-works/pi-tui": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
     "@types/node": "^22.15.3",
     "typescript": "^5.9.2",
     "vitest": "^4.1.9"

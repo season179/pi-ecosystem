@@ -1,0 +1,41 @@
+{
+  "name": "@season179/pi-model-fallback",
+  "version": "26.7.0",
+  "description": "Automatic model failover for Pi, driven by a standalone fallback-models.json config.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Season Saw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-model-fallback"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "fallback",
+    "failover",
+    "model",
+    "agent"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extensions/model-fallback.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
