@@ -20,6 +20,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { ConcernDisposition } from "./concern-history.js";
 
 export type BuddySource = "tool" | "command" | "watchdog";
 export type BuddyOutcome =
@@ -91,6 +92,13 @@ export interface BuddyTelemetryRecord {
 	retractMisses?: number;
 	/** Size of the injected memory block in characters. */
 	memoryChars?: number;
+	/** Delivered concern created by this watchdog consultation. */
+	concernId?: string;
+	/** Session concern history included in this consultation. */
+	openConcerns?: number;
+	fixedConcerns?: number;
+	rebuttedConcerns?: number;
+	concernHistoryChars?: number;
 	/** Number of provider consultation attempts (foreground retries included). */
 	attempts?: number;
 	/** True when a transient provider error was retried. */
@@ -113,6 +121,9 @@ export interface BuddyFeedbackTelemetryRecord {
 	previousLevel: number;
 	newLevel: number;
 	watchdogThreshold: number;
+	/** Delivered watchdog concern updated by this feedback event. */
+	concernId?: string;
+	concernDisposition?: ConcernDisposition;
 }
 
 const TELEMETRY_FILE = join(homedir(), ".pi", "agent", "buddy-telemetry.jsonl");

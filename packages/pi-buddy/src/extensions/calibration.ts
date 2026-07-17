@@ -18,6 +18,8 @@ export interface BuddyFeedbackResult {
 	changed: boolean;
 }
 
+const MAX_CALIBRATION_REASON_CHARS = 500;
+
 const WATCHDOG_THRESHOLDS: Record<AdvisoryLevel, number> = {
 	1: 2,
 	0: 3,
@@ -57,7 +59,10 @@ export function buildBuddyCalibrationBlock(
 	note: BuddyCalibrationNote | undefined,
 ): string | undefined {
 	if (!note) return undefined;
-	const reason = note.reason?.trim();
+	const reason = note.reason
+		?.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, MAX_CALIBRATION_REASON_CHARS);
 	const reasonLine = reason
 		? `\nAgent-provided reason (context, not proof): ${reason}`
 		: "";

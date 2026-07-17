@@ -385,25 +385,25 @@ describe("skill prompt integration", () => {
 });
 
 describe("buddy message formatting", () => {
-	it("formats a fresh watchdog advisory for the main agent", () => {
-		const out = formatBuddyAdvisory("turns", 0, "Fix the test gap.");
+	it("formats a fresh watchdog advisory with a concern ID for the main agent", () => {
+		const out = formatBuddyAdvisory("turns", 0, "wd-a81f", "Fix the test gap.");
 		assert.match(out, /^## BUDDY ADVISORY \(auto, watchdog\)/);
 		assert.match(out, /Reviewed the recent work\./);
 		assert.match(out, /Otherwise: fix, rebut with evidence, or consult_buddy\./);
-		assert.match(out, /Concern:\nFix the test gap\./);
+		assert.match(out, /Concern #wd-a81f:\nFix the test gap\./);
 	});
 
 	it("formats a stale watchdog advisory with staleness", () => {
-		const out = formatBuddyAdvisory("turns", 3, "The claim is stale.");
+		const out = formatBuddyAdvisory("turns", 3, "wd-stale", "The claim is stale.");
 		assert.match(out, /Reviewed ~3 turn\(s\) ago\./);
 		assert.match(out, /continue\./);
 	});
 
 	it("formats a run-end advisory", () => {
-		const out = formatBuddyAdvisory("run_end", 2, "Finish the audit.");
+		const out = formatBuddyAdvisory("run_end", 2, "wd-end", "Finish the audit.");
 		assert.match(out, /^## BUDDY ADVISORY \(auto, run-end\)/);
 		assert.match(out, /Review this before finalizing\./);
-		assert.match(out, /Concern:\nFinish the audit\./);
+		assert.match(out, /Concern #wd-end:\nFinish the audit\./);
 	});
 
 	it("formats a user-requested consult", () => {
@@ -705,13 +705,15 @@ describe("buddy feedback calibration", () => {
 		assert.equal(buildBuddyCalibrationBlock(undefined), undefined);
 		const less = buildBuddyCalibrationBlock({
 			feedback: "less",
-			reason: "mechanical refactor",
+			reason: `mechanical refactor\n${"x".repeat(1_000)}`,
 			level: -2,
 			watchdogThreshold: 12,
 		});
 		assert.match(less ?? "", /less frequent automatic advisories/);
 		assert.match(less ?? "", /every 12 turns/);
 		assert.match(less ?? "", /context, not proof/);
+		assert.doesNotMatch(less ?? "", /mechanical refactor\n/);
+		assert.ok((less ?? "").length < 1_000);
 		const more = buildBuddyCalibrationBlock({
 			feedback: "more",
 			level: 1,
@@ -906,6 +908,11 @@ describe("telemetry", () => {
 			costUsd: 0,
 			finalRoundInputTokens: 100,
 			finalRoundTotalTokens: 125,
+			openConcerns: 2,
+			fixedConcerns: 1,
+			rebuttedConcerns: 1,
+			concernHistoryChars: 420,
+			concernId: "wd-a81f",
 		});
 		await recordConsultation({
 			source: "tool",
@@ -935,6 +942,11 @@ describe("telemetry", () => {
 		assert.equal(first.totalTokens, 125);
 		assert.equal(first.costUsd, 0);
 		assert.equal(first.finalRoundTotalTokens, 125);
+		assert.equal(first.openConcerns, 2);
+		assert.equal(first.fixedConcerns, 1);
+		assert.equal(first.rebuttedConcerns, 1);
+		assert.equal(first.concernHistoryChars, 420);
+		assert.equal(first.concernId, "wd-a81f");
 		assert.ok(typeof first.ts === "string");
 		const second = JSON.parse(lines[1]);
 		assert.equal(second.outcome, "error");
@@ -963,10 +975,12 @@ describe("telemetry", () => {
 
 		await recordFeedback({
 			feedback: "same",
-			reason: "current cadence is fine",
+			reason: "added the missing test",
 			previousLevel: -1,
 			newLevel: -1,
 			watchdogThreshold: 6,
+			concernId: "wd-a81f",
+			concernDisposition: "fixed",
 		});
 
 		const line = (await readFile(path, "utf8")).trim();
@@ -976,6 +990,8 @@ describe("telemetry", () => {
 		assert.equal(record.previousLevel, -1);
 		assert.equal(record.newLevel, -1);
 		assert.equal(record.watchdogThreshold, 6);
+		assert.equal(record.concernId, "wd-a81f");
+		assert.equal(record.concernDisposition, "fixed");
 	});
 
 	it("records model failover telemetry", async () => {

@@ -41,6 +41,8 @@ Stances for `consult_buddy`:
 
 Automatic reviews are designed to be quiet. `PASS` verdicts are suppressed entirely. Real concerns are steered in with staleness framing (`Reviewed ~N turn(s) ago...`); non-blocking concerns that land more than three turns late are dropped, while blocker/security/regression-style concerns still deliver. If the run already ended, the concern is queued for your next prompt — the agent is never auto-woken.
 
+Each delivered concern has a short ID. The main agent can use `give_buddy_feedback` to mark it `fixed` or `rebutted` with a reason, independently of cadence feedback. Future watchdog checks receive a compact, branch-aware concern history so they do not repeat settled concerns without new evidence. This adds no extra Buddy call and survives reload, resume, fork, tree navigation, and compaction within the session.
+
 **Evidence order** — repository first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage` third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in an isolated browser session — no click, fill, type, or eval. Fetched web content is treated as data to evaluate, never instructions.
 
 **Memory** — the buddy is stateless per call, but each requested consultation gets a small, inspectable memory block from `~/.pi/agent/buddy-memory/`: `global.md` for stable preferences and corrections, `projects/<slug>.md` for durable project facts. The buddy has no write tool; instead, consultations may emit structured `LESSON[...]` / `RETRACT:` lines that the harness strips, applies as bounded and deduped writes, and confirms with a small notice. Curate with `/buddy-memory`, or reset a scope with `/buddy-memory clear global|project`.
@@ -74,7 +76,7 @@ When off, automatic reviews are skipped and `consult_buddy` refuses model calls.
 
 ## Telemetry
 
-Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, and duration.
+Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. Feedback rows record concern IDs and `fixed`/`rebutted` dispositions when supplied.
 
 ```bash
 jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c

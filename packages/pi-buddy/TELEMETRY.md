@@ -12,10 +12,17 @@ Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl
 - `turnsElapsed` — verdict staleness (turns between snapshot and delivery)
 - `rounds`, `toolCalls` — tool-loop depth and tool-call count
 - `answerChars`, `truncated` — answer length and whether it hit the output-token cap
-- `memoryChars` — injected memory block size
+- `memoryChars` — injected durable-memory block size
+- `concernId` — ID of a delivered watchdog concern (concern outcomes only)
+- `openConcerns`, `fixedConcerns`, `rebuttedConcerns` — session concern-history counts injected into the consultation
+- `concernHistoryChars` — size of the injected concern-history digest
 - `attempts`, `retried`, `modelsAttempted`, `failoverUsed`, `modelFailures` — retry/failover metadata
 - `lessons`, `retractions`, `retractMisses` — memory harvest counts
 - `totalMs` — consultation duration
+
+Feedback rows (`type: "feedback"`) may also contain `concernId` and
+`concernDisposition` (`fixed` or `rebutted`) when the agent records how a
+watchdog concern was settled.
 
 `stale_suppressed` means an automatic concern landed too late to steer and did
 not contain blocker markers. `discarded` means a background verdict was dropped
@@ -65,6 +72,9 @@ reports real token counts but currently has zero pricing metadata, so
   (especially silent watchdog failures).
 - **outcome: stale_suppressed** — automatic concern suppressed for staleness;
   if this climbs, the watchdog is finding issues too late.
+- **concern dispositions** — audit whether concerns are marked fixed or rebutted,
+  and whether later advisories repeat an issue whose disposition was already in
+  the injected history.
 - **lessons per consultation** — should stay low; if it climbs, the learning
   prompt is too eager. Tune the prompt before raising caps.
 - **retractMisses** — the buddy is hallucinating or misremembering a lesson;

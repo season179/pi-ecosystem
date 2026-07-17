@@ -16,9 +16,11 @@
  *   a quiet background review at completion, same PASS-suppression.
  *
  * Buddy model defaults to zai/glm-5.2 (override with --buddy-model).
- * Stateless by design: continuity comes from the transcript itself.
+ * Model calls are stateless. A small branch-aware concern history prevents the
+ * watchdog from re-raising concerns the agent explicitly fixed or rebutted.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
@@ -50,6 +52,11 @@ import {
 	consultBuddy,
 	type ConsultResult,
 } from "./consult.js";
+import {
+	ConcernHistory,
+	rebuildConcernHistory,
+	type ConcernDisposition,
+} from "./concern-history.js";
 import { harvestDirectives, harvestNotice } from "./harvest.js";
 import {
 	buddyRendererLabel,
@@ -127,6 +134,7 @@ export default function setup(pi: ExtensionAPI): void {
 	let memoryCuratedThisSession = false;
 	let currentSkills: Skill[] = [];
 	const verdictRing: string[] = [];
+	const concernHistory = new ConcernHistory();
 	const configWarningsShown = new Set<string>();
 
 	function recordVerdict(trigger: BackgroundTrigger, verdict: string): void {
@@ -138,7 +146,14 @@ export default function setup(pi: ExtensionAPI): void {
 	function buildInjectionBlock(
 		cwd: string,
 		options: { includeMemory: boolean },
-	): { block?: string; memoryChars: number } {
+	): {
+		block?: string;
+		memoryChars: number;
+		openConcerns: number;
+		fixedConcerns: number;
+		rebuttedConcerns: number;
+		concernHistoryChars: number;
+	} {
 		const slug = deriveSlug(cwd);
 		const sections: string[] = [];
 		let memoryChars = 0;
@@ -158,9 +173,16 @@ export default function setup(pi: ExtensionAPI): void {
 		if (verdictRing.length > 0) {
 			sections.push(buildVerdictDigest(verdictRing));
 		}
+		const concernDigest = concernHistory.buildDigest();
+		if (concernDigest) sections.push(concernDigest);
+		const concernCounts = concernHistory.counts();
 		return {
 			block: sections.length > 0 ? sections.join("\n\n") : undefined,
 			memoryChars,
+			openConcerns: concernCounts.open,
+			fixedConcerns: concernCounts.fixed,
+			rebuttedConcerns: concernCounts.rebutted,
+			concernHistoryChars: concernDigest?.length ?? 0,
 		};
 	}
 
@@ -405,7 +427,7 @@ export default function setup(pi: ExtensionAPI): void {
 		/** Maps a successful answer to a telemetry outcome (watchdog: pass/concern). */
 		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
 		/** Extra telemetry computed at record time (e.g. verdict staleness). */
-		extraTelemetry?: () => { turnsElapsed?: number };
+		extraTelemetry?: () => { turnsElapsed?: number; concernId?: string };
 		/** Apply harvested directives to memory (requested consults only). */
 		harvest?: boolean;
 		onActivity?: (line: string) => void;
@@ -557,6 +579,10 @@ export default function setup(pi: ExtensionAPI): void {
 				retractions: applied.retractions,
 				retractMisses: applied.retractMisses,
 				memoryChars: injection.memoryChars,
+				openConcerns: injection.openConcerns,
+				fixedConcerns: injection.fixedConcerns,
+				rebuttedConcerns: injection.rebuttedConcerns,
+				concernHistoryChars: injection.concernHistoryChars,
 				attempts,
 				// More total attempts than distinct models means at least one model had
 				// a same-model retry before success/failover.
@@ -599,6 +625,7 @@ export default function setup(pi: ExtensionAPI): void {
 	): void {
 		if (!buddyEnabled) return;
 		const launch = tracker.launchBackground(trigger);
+		const reviewId = `wd-${randomUUID().slice(0, 12)}`;
 		const controller = new AbortController();
 		backgroundAbort = controller;
 
@@ -647,6 +674,8 @@ export default function setup(pi: ExtensionAPI): void {
 					outcomeOf: (r) => recordAutomaticOutcome(r),
 					extraTelemetry: () => ({
 						turnsElapsed: tracker.turnsElapsedSince(launch),
+						concernId:
+							recordedOutcome === "concern" ? reviewId : undefined,
 					}),
 				});
 				// Session was replaced/forked while we investigated: drop the verdict.
@@ -666,20 +695,39 @@ export default function setup(pi: ExtensionAPI): void {
 					);
 					return;
 				}
-				recordVerdict(
+				const headline =
+					result.answer
+						.split("\n")
+						.find((line) => line.trim().length > 0)
+						?.trim()
+						.slice(0, 120) ?? "Watchdog concern";
+				const concernId = reviewId;
+				const deliveredAt = new Date().toISOString();
+				recordVerdict(trigger, `concern delivered: #${concernId}`);
+				concernHistory.record({
+					id: concernId,
 					trigger,
-					`concern: ${result.answer.split("\n")[0].slice(0, 120)}`,
-				);
+					headline,
+					deliveredAt,
+				});
 				pi.sendMessage(
 					{
 						customType: BUDDY_REVIEW_TYPE,
-						content: formatBuddyAdvisory(trigger, staleness, result.answer),
+						content: formatBuddyAdvisory(
+							trigger,
+							staleness,
+							concernId,
+							result.answer,
+						),
 						display: true,
 						details: {
 							activity: result.activity,
 							source: "watchdog",
 							trigger,
 							turnsElapsed: staleness,
+							concernId,
+							headline,
+							deliveredAt,
 						},
 					},
 					// Steer mid-run; queue for the next prompt when idle. Never
@@ -833,14 +881,16 @@ export default function setup(pi: ExtensionAPI): void {
 		label: "Give Buddy Feedback",
 		description:
 			"Give session-scoped feedback that calibrates Buddy's automatic advisory " +
-			"cadence. Use 'less' when automatic watchdog advisories are too frequent " +
-			"or premature, 'more' when Buddy should be more active, and 'same' when " +
-			"the current level is useful. This never disables run-end review, explicit " +
+			"cadence and optionally records whether a watchdog concern was fixed or " +
+			"rebutted. Use 'less' when automatic advisories are too frequent or " +
+			"premature, 'more' when Buddy should be more active, and 'same' when the " +
+			"current level is useful. This never disables run-end review, explicit " +
 			"consult_buddy, or user /buddy consultations.",
 		promptSnippet:
 			"Calibrate Buddy's automatic advisory cadence with more, same, or less feedback",
 		promptGuidelines: [
 			"Use give_buddy_feedback when Buddy's automatic advisories are too frequent, too timid, or currently well-calibrated.",
+			"Use give_buddy_feedback with concernDisposition 'fixed' after fixing a watchdog concern, or 'rebutted' after disproving it with evidence; include a concrete reason.",
 			"Use 'less' to exponentially back off watchdog cadence; use 'more' to step Buddy back toward normal or more active review.",
 			"Do not use this to avoid review: run-end review and explicit Buddy consultations remain available and are not suppressed.",
 		],
@@ -848,10 +898,22 @@ export default function setup(pi: ExtensionAPI): void {
 			feedback: StringEnum([...BUDDY_FEEDBACKS] as ["more", "same", "less"], {
 				description: "more | same | less — how Buddy should adjust automatic advisories",
 			}),
+			concernId: Type.Optional(
+				Type.String({
+					description:
+						"Concern ID from a Buddy advisory. Omit to target the latest open concern.",
+				}),
+			),
+			concernDisposition: Type.Optional(
+				StringEnum(["fixed", "rebutted"] as const, {
+					description:
+						"fixed when the concern was addressed; rebutted when evidence disproved it",
+				}),
+			),
 			reason: Type.Optional(
 				Type.String({
 					description:
-						"Optional brief reason for auditability. Treated as context, not proof.",
+						"Brief reason for auditability. Required when recording a concern disposition; treated as context, not proof.",
 				}),
 			),
 		}),
@@ -861,6 +923,33 @@ export default function setup(pi: ExtensionAPI): void {
 			}
 			const feedback = params.feedback as BuddyFeedback;
 			const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+			const concernId =
+				typeof params.concernId === "string" ? params.concernId.trim() : "";
+			const concernDisposition = params.concernDisposition as
+				| ConcernDisposition
+				| undefined;
+			if (concernId && !concernDisposition) {
+				throw new Error("concernId requires concernDisposition");
+			}
+			if (concernDisposition && !reason) {
+				throw new Error("A concrete reason is required to mark a concern");
+			}
+			const concernUpdate = concernDisposition
+				? concernHistory.mark({
+						id: concernId || undefined,
+						disposition: concernDisposition,
+						reason,
+					})
+				: undefined;
+			if (concernUpdate && !concernUpdate.ok) {
+				const message =
+					concernUpdate.reason === "no_open_concern"
+						? "No open Buddy concern is available to mark"
+						: concernUpdate.reason === "not_found"
+							? `Buddy concern #${concernId} was not found`
+							: `Buddy concern #${concernId} is already closed`;
+				throw new Error(message);
+			}
 			const result = applyBuddyFeedback(advisoryLevel, feedback);
 			advisoryLevel = result.newLevel;
 			if (feedback !== "same") {
@@ -871,24 +960,48 @@ export default function setup(pi: ExtensionAPI): void {
 					watchdogThreshold: result.watchdogThreshold,
 				};
 			}
+			const updatedConcern = concernUpdate?.ok
+				? concernUpdate.concern
+				: undefined;
 			await recordFeedback({
 				feedback,
 				reason: reason || undefined,
 				previousLevel: result.previousLevel,
 				newLevel: result.newLevel,
 				watchdogThreshold: result.watchdogThreshold,
+				concernId: updatedConcern?.id,
+				concernDisposition: updatedConcern?.status as
+					| ConcernDisposition
+					| undefined,
 			});
 			if (ctx.hasUI && feedback !== "same") {
 				ctx.ui.notify(formatBuddyFeedbackResult(result), "info");
 			}
+			const dispositionResult = updatedConcern
+				? `Concern #${updatedConcern.id} marked ${updatedConcern.status}: ${
+						updatedConcern.status === "rebutted"
+							? updatedConcern.reason
+							: updatedConcern.headline
+					}`
+				: undefined;
 			return {
-				content: [{ type: "text", text: formatBuddyFeedbackResult(result) }],
+				content: [
+					{
+						type: "text",
+						text: [formatBuddyFeedbackResult(result), dispositionResult]
+							.filter(Boolean)
+							.join("\n"),
+					},
+				],
 				details: {
 					feedback,
 					reason: reason || undefined,
 					previousLevel: result.previousLevel,
 					newLevel: result.newLevel,
 					watchdogThreshold: result.watchdogThreshold,
+					concernId: updatedConcern?.id,
+					concernHeadline: updatedConcern?.headline,
+					concernDisposition: updatedConcern?.status,
 				},
 			};
 		},
@@ -1044,10 +1157,19 @@ export default function setup(pi: ExtensionAPI): void {
 		memoryCuratedThisSession = false;
 		currentSkills = [];
 		verdictRing.length = 0;
+		rebuildConcernHistory(ctx.sessionManager.getBranch(), concernHistory);
 		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;
 		await initializeBuddySwitch(ctx);
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		tracker.invalidate();
+		backgroundAbort?.abort();
+		backgroundAbort = undefined;
+		verdictRing.length = 0;
+		rebuildConcernHistory(ctx.sessionManager.getBranch(), concernHistory);
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -1087,6 +1209,7 @@ export default function setup(pi: ExtensionAPI): void {
 		backgroundAbort = undefined;
 		memoryCuratedThisSession = false;
 		verdictRing.length = 0;
+		concernHistory.clear();
 		configWarningsShown.clear();
 		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
 		calibrationNote = undefined;

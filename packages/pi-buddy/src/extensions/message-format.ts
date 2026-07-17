@@ -3,11 +3,14 @@ import type { BackgroundTrigger } from "./policy.js";
 export type BuddyReviewDetails = {
 	source?: string;
 	trigger?: BackgroundTrigger;
+	concernId?: string;
+	headline?: string;
 };
 
 export function formatBuddyAdvisory(
 	trigger: BackgroundTrigger,
 	turnsElapsed: number,
+	concernId: string,
 	answer: string,
 ): string {
 	const origin = trigger === "run_end" ? "run-end" : "watchdog";
@@ -24,7 +27,7 @@ export function formatBuddyAdvisory(
 		freshness,
 		"Otherwise: fix, rebut with evidence, or consult_buddy.",
 		"",
-		"Concern:",
+		`Concern #${concernId}:`,
 		answer,
 	].join("\n");
 }
