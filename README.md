@@ -7,6 +7,7 @@ Season's Pi packages, published independently to npm.
 - [`@season179/pi-worktree`](./packages/pi-worktree) - Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) - Shows the skills used in the current Pi session.
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) - Automatically replaces assistant messages with highlighted placeholders (proof-of-concept).
+- [`@season179/pi-guard`](./packages/pi-guard) - Prevents destructive or unauthorized coding-agent tool actions.
 
 ## Development
 
@@ -16,6 +17,7 @@ npm run build
 npm pack --workspace @season179/pi-worktree
 npm pack --workspace @season179/pi-skills-status
 npm pack --workspace @season179/pi-readbeam
+npm pack --workspace @season179/pi-guard
 ```
 
 ## Publishing
@@ -26,4 +28,5 @@ Scoped public packages require `--access public`:
 npm publish --workspace @season179/pi-worktree --access public
 npm publish --workspace @season179/pi-skills-status --access public
 npm publish --workspace @season179/pi-readbeam --access public
+npm publish --workspace @season179/pi-guard --access public
 ```
