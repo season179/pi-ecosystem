@@ -1,70 +1,15 @@
-import { hasAutomaticConcernMarker } from "./automatic-review.js";
-import { isWatchdogPass } from "./stances.js";
-
 /**
  * Pure state machine for the buddy's automatic advisory behavior.
  *
  * Tracks turn counts within agent runs and decides when to launch background
- * reviews (watchdog after N unconsulted turns, end-of-run review), whether a
- * verdict that lands later should still be delivered (session generation
- * guard), and how to deliver it (steer while the agent runs, nextTurn when
- * idle). Kept free of pi APIs so it is unit-testable.
+ * reviews (watchdog after N unconsulted turns, end-of-run review), protects
+ * launches with a session-generation guard, and chooses the delivery mode.
+ * Current-state publication is owned by WatchdogCoordinator.
  */
 
 export type BackgroundTrigger = "turns" | "run_end";
 export type DeliveryMode = "steer" | "nextTurn";
 export type CommandConsultDelivery = "immediate" | "nextTurn";
-
-/**
- * Deliver concerns reviewed up to 3 turns ago; suppress only turnsElapsed > 3.
- * This matches the initial telemetry cut (`gt3: 39/148` concerns) and is
- * intentionally conservative pending Phase 9 post-implementation measurement.
- */
-export const STALE_CONCERN_MAX_TURNS = 3;
-
-export interface AutomaticConcernDeliveryDecision {
-	deliver: boolean;
-	reason?: "stale_concern";
-}
-
-export function shouldDeliverAutomaticConcern(args: {
-	answer: string;
-	turnsElapsed: number;
-}): AutomaticConcernDeliveryDecision {
-	if (args.turnsElapsed <= STALE_CONCERN_MAX_TURNS) return { deliver: true };
-	if (hasAutomaticConcernMarker(args.answer)) return { deliver: true };
-	return { deliver: false, reason: "stale_concern" };
-}
-
-/** Verdict for an automatic (watchdog/run-end) review that is still current. */
-export type AutomaticVerdict = "pass" | "concern" | "stale_suppressed";
-
-/**
- * Classifies a current automatic review result into a deliverable verdict.
- *
- * A truncated answer can never be a clean PASS: mid-word truncation can strip
- * the concern-marker words the staleness gate relies on, and a length-capped
- * verdict is by definition incomplete. For the same reason it can never be
- * silently stale-suppressed either — the staleness gate keys off concern
- * markers that truncation may have severed, so a known-incomplete verdict is
- * always delivered as a "concern" for the agent to judge. Kept pure (no
- * session-generation guard — the caller handles "discarded") so the
- * truncated-never-PASS rule is testable.
- */
-export function classifyAutomaticVerdict(args: {
-	answer: string;
-	truncated?: boolean;
-	turnsElapsed: number;
-}): AutomaticVerdict {
-	if (args.truncated) return "concern";
-	if (isWatchdogPass(args.answer)) return "pass";
-	return shouldDeliverAutomaticConcern({
-		answer: args.answer,
-		turnsElapsed: args.turnsElapsed,
-	}).deliver
-		? "concern"
-		: "stale_suppressed";
-}
 
 /**
  * User-requested `/buddy` answers should render immediately when the agent is

@@ -41,7 +41,7 @@ export const WATCHDOG_DEFAULT_MAX_TOKENS = 2048;
 export const CONSULT_DEFAULT_MAX_TOKENS = 4096;
 
 const WATCHDOG_SOFT_TARGET =
-	"(Keep your verdict tight: a one-line headline plus only the evidence needed to act — aim under ~200 words. PASS is a single word.)";
+	"(Keep your verdict tight: use the structured verdict tool with a one-line headline plus only the evidence needed to act — aim under ~200 words.)";
 const DISCUSS_DEBATE_SOFT_TARGET =
 	"(Buddy: aim for under ~350 words — focused guidance, not a comprehensive essay.)";
 const REVIEW_SOFT_TARGET =

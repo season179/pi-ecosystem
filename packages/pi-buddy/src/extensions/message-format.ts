@@ -9,17 +9,14 @@ export type BuddyReviewDetails = {
 
 export function formatBuddyAdvisory(
 	trigger: BackgroundTrigger,
-	turnsElapsed: number,
 	concernId: string,
 	answer: string,
 ): string {
 	const origin = trigger === "run_end" ? "run-end" : "watchdog";
 	const freshness =
 		trigger === "run_end"
-			? "Review this before finalizing. If already addressed, say so briefly."
-			: turnsElapsed > 0
-				? `Reviewed ~${turnsElapsed} turn(s) ago. If already addressed, say so briefly and continue.`
-				: "Reviewed the recent work. If already addressed, say so briefly and continue.";
+			? "Revalidated against the settled run."
+			: "Revalidated against the current work.";
 
 	return [
 		`## BUDDY ADVISORY (auto, ${origin})`,

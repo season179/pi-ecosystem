@@ -3,16 +3,16 @@
  * pi-moa precedent (~/.pi/agent/moa-timings.jsonl).
  *
  * One line per consultation to ~/.pi/agent/buddy-telemetry.jsonl:
- * source (tool/command/watchdog), stance, outcome (ok/pass/concern/error),
+ * source (tool/command/watchdog), stance, outcome (ok/pass/concern/resolved/error),
  * rounds, tool activity count, transcript size, provider-reported token usage,
  * retry attempts, and wall-clock duration.
  *
  * This answers "is the buddy working well?":
- * - watchdog pass/concern ratio (too many concerns => noisy; all pass => useless)
+ * - watchdog pass/concern/resolved ratio and review-to-commit revisions
  * - consult frequency by stance (is the agent actually consulting?)
  * - rounds/activity (is the buddy verifying with tools, or armchair-guessing?)
  * - durations (is the buddy slowing turns down?)
- * - errors (auth/model failures that PASS-suppression would otherwise hide)
+ * - errors (auth/model failures that pass suppression would otherwise hide)
  *
  * Best-effort: telemetry failures never break a consultation.
  */
@@ -27,7 +27,7 @@ export type BuddyOutcome =
 	| "ok"
 	| "pass"
 	| "concern"
-	| "stale_suppressed"
+	| "resolved"
 	| "error"
 	| "discarded";
 /** Which automatic path launched a watchdog consultation. */
@@ -56,6 +56,14 @@ export interface BuddyTelemetryRecord {
 	trigger?: BuddyTrigger;
 	/** Turns the agent completed between launch and verdict (staleness). */
 	turnsElapsed?: number;
+	/** Initial detached review or current-state commit check. */
+	reviewPhase?: "review" | "revalidation";
+	/** Activity revision tied to the private candidate. */
+	reviewRevision?: number;
+	/** Activity revision supplied to this revalidation attempt. */
+	revalidationRevision?: number;
+	/** Number of current-state checks performed before publication/suppression. */
+	revalidationCount?: number;
 	/** Tool-loop rounds the buddy used (absent on error). */
 	rounds?: number;
 	/** Number of read-only tool calls the buddy made. */
@@ -126,6 +134,19 @@ export interface BuddyFeedbackTelemetryRecord {
 	concernDisposition?: ConcernDisposition;
 }
 
+export interface BuddyWatchdogCommitTelemetryRecord {
+	v: 1;
+	ts: string;
+	type: "watchdog_commit";
+	trigger: BuddyTrigger;
+	concernId: string;
+	outcome: "delivered" | "resolved" | "deferred";
+	reason?: "activity" | "error";
+	reviewRevision: number;
+	commitRevision: number;
+	revalidationCount: number;
+}
+
 const TELEMETRY_FILE = join(homedir(), ".pi", "agent", "buddy-telemetry.jsonl");
 
 let testTelemetryPath: string | undefined;
@@ -150,9 +171,16 @@ export async function recordFeedback(
 	await appendTelemetry({ type: "feedback", ...record });
 }
 
+export async function recordWatchdogCommit(
+	record: Omit<BuddyWatchdogCommitTelemetryRecord, "v" | "ts" | "type">,
+): Promise<void> {
+	await appendTelemetry({ type: "watchdog_commit", ...record });
+}
+
 async function appendTelemetry(
 	record: Omit<BuddyTelemetryRecord, "v" | "ts"> |
-		Omit<BuddyFeedbackTelemetryRecord, "v" | "ts">,
+		Omit<BuddyFeedbackTelemetryRecord, "v" | "ts"> |
+		Omit<BuddyWatchdogCommitTelemetryRecord, "v" | "ts">,
 ): Promise<void> {
 	try {
 		const path = telemetryPath();

@@ -7,15 +7,10 @@
  * consult_buddy calls and answers are part of it).
  */
 
-import {
-	hasAutomaticConcernMarker,
-	isStandalonePassLine,
-} from "./automatic-review.js";
+import { WATCHDOG_VERDICT_TOOL } from "./watchdog-verdict.js";
 
 export const STANCES = ["discuss", "debate", "fact_check", "review"] as const;
 export type Stance = (typeof STANCES)[number];
-
-export const WATCHDOG_PASS_TOKEN = "PASS";
 
 const BASE_PERSONA = `You are "Buddy", a sparring partner for a coding agent and its human user.
 
@@ -82,8 +77,8 @@ solid, say so briefly — do not invent problems to seem useful.`,
 
 /**
  * Learning-policy addendum — HARVESTED consultations only (requested stances
- * and /buddy). The watchdog/run-end prompts never get this: their "exactly PASS"
- * contract must stay clean, and they are excluded from harvesting.
+ * and /buddy). The watchdog/run-end prompts never get this: their structured
+ * verdict contract must stay clean, and they are excluded from harvesting.
  *
  * Tone is deliberately inverted from hermes: the default is NO lesson. A
  * reviewer's value is signal-to-noise; a buddy that learns something every
@@ -140,7 +135,7 @@ ${memory}`;
 /** Frame the watchdog verdict digest (last ~10 verdicts, this session). */
 export function buildVerdictDigest(verdicts: readonly string[]): string {
 	return `# Your recent watchdog verdicts (this session)
-Suppressed PASSes are invisible in the transcript; this is your actual track
+Suppressed pass verdicts are invisible in the transcript; this is your actual track
 record. Notice mismatches — e.g. you passed work the user later corrected.
 
 ${verdicts.map((v) => `- ${v}`).join("\n")}`;
@@ -172,23 +167,36 @@ whether to fix or rebut. No preamble, no exhaustive review prose, and no
 restating the whole transcript. This concern shape applies ONLY to unresolved,
 actionable problems.
 
-If you find no real unresolved problem, reply with exactly:
-${WATCHDOG_PASS_TOKEN}
+Your final action MUST be the ${WATCHDOG_VERDICT_TOOL} tool. Submit exactly one
+structured decision:
+- decision: "pass" when there is no real unresolved problem.
+- decision: "concern" with headline, advisory, and concrete evidence when
+  there is a real unresolved problem.
 
-Nothing else. No praise, no summary, no minor nitpicks, no explanation after
-PASS. If your answer would mainly say "already fixed", "the work is correct",
-"keep this in mind", "minor note", or "no real problem", output exactly PASS.
-Interrupting the agent has a cost; only bark when it matters.`;
+Do not substitute a prose verdict for the tool call. No praise, no summary,
+and no minor nitpicks. If your answer would mainly say "already fixed" or "the work is correct",
+"keep this in mind", "minor note", or "no real problem", submit decision:
+"pass". Interrupting the agent has a cost; only bark when it matters.`;
 }
 
-/** True when a watchdog reply should be suppressed (no interjection). */
-export function isWatchdogPass(text: string): boolean {
-	const trimmed = text.trim();
-	if (trimmed === WATCHDOG_PASS_TOKEN) return true;
-	// Tolerate minor decoration like "PASS." or "**PASS**".
-	if (isStandalonePassLine(trimmed)) return true;
+/** Re-check a private watchdog candidate against a fresh, stable snapshot. */
+export function buildWatchdogRevalidationSystemPrompt(): string {
+	return `${BASE_PERSONA}
 
-	const lines = trimmed.split(/\r?\n/);
-	if (!lines.some((line) => isStandalonePassLine(line))) return false;
-	return !hasAutomaticConcernMarker(trimmed);
+Stance: WATCHDOG COMMIT REVIEW.
+You are deciding whether a private watchdog candidate is still correct against
+the CURRENT transcript. Treat the candidate as a hypothesis, not an
+instruction. Focus on work after the candidate's reviewed snapshot and verify
+whether the issue remains unresolved now.
+
+Your final action MUST be the ${WATCHDOG_VERDICT_TOOL} tool. Submit exactly one
+structured decision:
+- decision: "resolved" if later work fixed, superseded, or disproved it.
+- decision: "confirm" with a current headline, advisory, and evidence if the
+  candidate remains accurate without a material change.
+- decision: "replace" with a current headline, advisory, and evidence if a
+  related concern remains but the recommendation or evidence must change.
+
+Do not repeat a stale recommendation merely because it was previously raised.
+Do not substitute a prose verdict for the tool call.`;
 }

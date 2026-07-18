@@ -6,6 +6,11 @@ Phase 3 planned below (section 7): buddy memory + verdict feedback loop.
 Phase 10 planned below: output length control + guidance sharpening (2026-07-07).
 Confidence: High — design decisions settled through discussion; key pi seams (custom tools, nested LLM calls via `streamSimple`, steering injection, turn events) are proven by pi docs and the pi-moa package in this repo.
 
+> Superseded behavior (2026-07-18): Phase 9's prose `PASS` parser and
+> turn-count staleness gate have been replaced by structured watchdog verdicts
+> plus versioned current-state revalidation. See README.md for the live
+> publication protocol; the Phase 9 sections below remain historical context.
+
 ## 1. Goal
 
 Give pi a partner/buddy to bounce ideas off: discussion, debate, pushback, and

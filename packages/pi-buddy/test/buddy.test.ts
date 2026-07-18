@@ -1,6 +1,6 @@
 /**
  * Tests for pi-buddy's pure logic: transcript serialization, budget trimming,
- * watchdog PASS detection, and telemetry records.
+ * watchdog commit coordination, structured verdicts, and telemetry records.
  */
 
 import assert from "node:assert/strict";
@@ -43,10 +43,6 @@ import {
 	WATCHDOG_DEFAULT_MAX_TOKENS,
 } from "../src/extensions/output-control.js";
 import {
-	hasAutomaticConcernMarker,
-	isStandalonePassLine,
-} from "../src/extensions/automatic-review.js";
-import {
 	branchToBlocks,
 	entryToBlock,
 	estimateTokens,
@@ -55,23 +51,28 @@ import {
 } from "../src/extensions/transcript.js";
 import {
 	buildStanceSystemPrompt,
+	buildWatchdogRevalidationSystemPrompt,
 	buildWatchdogSystemPrompt,
-	isWatchdogPass,
-	WATCHDOG_PASS_TOKEN,
 } from "../src/extensions/stances.js";
 import {
 	__setTelemetryPathForTests,
 	recordConsultation,
 	recordFeedback,
+	recordWatchdogCommit,
 	telemetryPath,
 } from "../src/extensions/telemetry.js";
 import {
 	BuddyRunTracker,
-	classifyAutomaticVerdict,
 	commandConsultDelivery,
-	STALE_CONCERN_MAX_TURNS,
-	shouldDeliverAutomaticConcern,
 } from "../src/extensions/policy.js";
+import { WatchdogCoordinator } from "../src/extensions/watchdog-coordinator.js";
+import {
+	createWatchdogVerdictTool,
+	extractWatchdogVerdict,
+	WATCHDOG_VERDICT_TOOL,
+} from "../src/extensions/watchdog-verdict.js";
+import { executeBuddyToolCall } from "../src/extensions/buddy-tools.js";
+import setupBuddyExtension from "../src/extensions/buddy.js";
 import {
 	BUDDY_BROWSER_SESSION,
 	createWebTools,
@@ -126,6 +127,238 @@ function messageEntry(message: unknown, id = "e1"): any {
 		message,
 	};
 }
+
+describe("WatchdogCoordinator", () => {
+	it("suppresses a candidate that current-state revalidation finds resolved", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "stale recommendation");
+		coordinator.noteActivity();
+
+		const result = await coordinator.commit(
+			[messageEntry({ role: "toolResult", content: "fixed" }, "e2")],
+			async () => ({ decision: "resolved" }),
+		);
+
+		assert.equal(result.status, "suppressed");
+		if (result.status !== "suppressed") assert.fail("expected suppression");
+		assert.equal(result.reason, "resolved");
+		assert.equal(result.revalidationCount, 1);
+		assert.equal(coordinator.hasPending, false);
+	});
+
+	it("delivers only the candidate confirmed against current state", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "original recommendation");
+		coordinator.noteActivity();
+		const current = [messageEntry({ role: "toolResult", content: "still broken" }, "e2")];
+
+		let published: string | undefined;
+		const result = await coordinator.commit(
+			current,
+			async () => ({
+				decision: "replace",
+				candidate: "current recommendation",
+			}),
+			(candidate) => {
+				published = candidate;
+			},
+		);
+
+		assert.equal(result.status, "deliver");
+		if (result.status !== "deliver") assert.fail("expected a deliver result");
+		assert.equal(result.candidate, "current recommendation");
+		assert.equal(published, "current recommendation");
+		assert.equal(result.snapshot.leafId, "e2");
+		assert.equal(result.revalidationCount, 1);
+		assert.equal(coordinator.hasPending, false);
+	});
+
+	it("defers publication when activity occurs during revalidation", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "candidate");
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const committing = coordinator.commit(
+			reviewed.entries,
+			async () => {
+				await gate;
+				return { decision: "confirm", candidate: "candidate" };
+			},
+			() => assert.fail("activity-invalidated advice must not publish"),
+		);
+		coordinator.noteActivity();
+		release();
+
+		assert.deepEqual(await committing, { status: "deferred", reason: "activity" });
+		assert.equal(coordinator.hasPending, true);
+		const retry = await coordinator.commit(reviewed.entries, async () => ({
+			decision: "confirm",
+			candidate: "candidate",
+		}));
+		assert.equal(retry.status, "deliver");
+		if (retry.status !== "deliver") assert.fail("expected delivery after retry");
+		assert.equal(retry.revalidationCount, 2);
+	});
+
+	it("does not revalidate or publish while a main-agent tool is in flight", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "candidate");
+		coordinator.toolStarted("tool-1");
+		let revalidated = false;
+
+		const result = await coordinator.commit(reviewed.entries, async () => {
+			revalidated = true;
+			return { decision: "confirm", candidate: "candidate" };
+		});
+
+		assert.deepEqual(result, { status: "deferred", reason: "tool_in_flight" });
+		assert.equal(revalidated, false);
+		assert.equal(coordinator.hasPending, true);
+	});
+
+	it("allows only one current-state commit at a time", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "candidate");
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const first = coordinator.commit(reviewed.entries, async () => {
+			await gate;
+			return { decision: "confirm", candidate: "candidate" };
+		});
+		const second = await coordinator.commit(reviewed.entries, async () =>
+			assert.fail("a concurrent commit must not start another revalidation"),
+		);
+
+		assert.deepEqual(second, {
+			status: "deferred",
+			reason: "commit_in_flight",
+		});
+		release();
+		assert.equal((await first).status, "deliver");
+	});
+
+	it("keeps the candidate and unlocks commit after revalidation fails", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "start" })]);
+		coordinator.stage(reviewed, "candidate");
+
+		await assert.rejects(
+			coordinator.commit(reviewed.entries, async () => {
+				throw new Error("provider unavailable");
+			}),
+			/provider unavailable/,
+		);
+		assert.equal(coordinator.hasPending, true);
+
+		const retry = await coordinator.commit(reviewed.entries, async () => ({
+			decision: "confirm",
+			candidate: "candidate",
+		}));
+		assert.equal(retry.status, "deliver");
+		if (retry.status !== "deliver") assert.fail("expected delivery after retry");
+		assert.equal(retry.revalidationCount, 2);
+	});
+
+	it("rejects a candidate produced for a replaced session tree", () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const oldSession = coordinator.capture([messageEntry({ role: "user", content: "old" })]);
+		coordinator.invalidate();
+
+		assert.equal(coordinator.stage(oldSession, "obsolete candidate"), false);
+		assert.equal(coordinator.hasPending, false);
+	});
+
+	it("cannot publish when the session tree changes during revalidation", async () => {
+		const coordinator = new WatchdogCoordinator<string>();
+		const reviewed = coordinator.capture([messageEntry({ role: "user", content: "old" })]);
+		coordinator.stage(reviewed, "obsolete candidate");
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const committing = coordinator.commit(reviewed.entries, async () => {
+			await gate;
+			return { decision: "confirm", candidate: "obsolete candidate" };
+		});
+		coordinator.invalidate();
+		release();
+
+		assert.deepEqual(await committing, { status: "deferred", reason: "activity" });
+		assert.equal(coordinator.hasPending, false);
+	});
+});
+
+describe("structured watchdog verdict", () => {
+	it("returns a typed concern instead of relying on prose markers", async () => {
+		const result = await executeBuddyToolCall(
+			[createWatchdogVerdictTool()],
+			{
+				type: "toolCall",
+				id: "verdict-1",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: {
+					decision: "concern",
+					headline: "Tests are failing",
+					advisory: "The current test suite fails in save.test.ts.",
+					evidence: ["npm test exited 1"],
+				},
+			},
+		);
+
+		assert.deepEqual(result.details, {
+			decision: "concern",
+			headline: "Tests are failing",
+			advisory: "The current test suite fails in save.test.ts.",
+			evidence: ["npm test exited 1"],
+		});
+		assert.deepEqual(extractWatchdogVerdict([result]), result.details);
+	});
+});
+
+describe("watchdog lifecycle wiring", () => {
+	it("registers every mutation hook and commits run-end work at agent_settled", () => {
+		const events = new Set<string>();
+		const pi = new Proxy(
+			{},
+			{
+				get: (_target, property) => {
+					if (property === "on") {
+						return (event: string) => events.add(event);
+					}
+					return () => undefined;
+				},
+			},
+		);
+
+		setupBuddyExtension(pi as any);
+
+		for (const event of [
+			"input",
+			"turn_start",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_end",
+			"user_bash",
+			"session_tree",
+			"turn_end",
+			"agent_settled",
+		]) {
+			assert.equal(events.has(event), true, `missing ${event} hook`);
+		}
+	});
+});
 
 describe("entryToBlock", () => {
 	it("renders user messages with string content", () => {
@@ -290,68 +523,24 @@ describe("stances", () => {
 		}
 	});
 
-	it("watchdog prompt demands bare PASS and concise concern shape only for real concerns", () => {
+	it("watchdog prompts require a structured terminal verdict", () => {
 		const prompt = buildWatchdogSystemPrompt();
-		assert.ok(prompt.includes(WATCHDOG_PASS_TOKEN));
+		assert.ok(prompt.includes(WATCHDOG_VERDICT_TOOL));
+		assert.match(prompt, /decision: "pass"/);
+		assert.match(prompt, /decision: "concern"/);
 		assert.match(prompt, /one-line\nactionable/);
 		assert.match(prompt, /No preamble/);
 		assert.match(prompt, /ONLY to unresolved,\nactionable problems/);
-		assert.match(prompt, /no explanation after\nPASS/);
 		assert.match(prompt, /already fixed/);
 		assert.match(prompt, /the work is correct/);
+
+		const revalidation = buildWatchdogRevalidationSystemPrompt();
+		assert.ok(revalidation.includes(WATCHDOG_VERDICT_TOOL));
+		assert.match(revalidation, /decision: "resolved"/);
+		assert.match(revalidation, /decision: "confirm"/);
+		assert.match(revalidation, /decision: "replace"/);
 	});
 
-	it("suppresses observed pass-ish watchdog answers", () => {
-		assert.equal(isWatchdogPass("PASS"), true);
-		assert.equal(isWatchdogPass("PASS."), true);
-		assert.equal(isWatchdogPass("**PASS**"), true);
-		assert.equal(
-			isWatchdogPass(
-				"PASS\n\nThe work is complete and verified. Both branches pushed, typechecks/tests pass.",
-			),
-			true,
-		);
-		assert.equal(
-			isWatchdogPass(
-				"The agent's answer is correct and well-supported. No factual or technical errors spotted in the cited claims.\n\nPASS",
-			),
-			true,
-		);
-		assert.equal(
-			isWatchdogPass("Concern:\nPASS\n\nNo real problem. Nothing to flag."),
-			true,
-		);
-	});
-
-	it("does not suppress pass-ish answers without a standalone PASS in v1", () => {
-		assert.equal(
-			isWatchdogPass("The implementation is coherent. No real problem. Nothing to flag."),
-			false,
-		);
-	});
-
-	it("keeps real concerns even when they contain a stray PASS line", () => {
-		assert.equal(
-			isWatchdogPass("PASS\n\nThe tests are failing and this must fix the regression before shipping."),
-			false,
-		);
-		assert.equal(
-			isWatchdogPass("PASS\n\nThe implementation is missing a required user requirement."),
-			false,
-		);
-		assert.equal(
-			isWatchdogPass("PASS\n\nSecurity regression: the token is now logged in plaintext."),
-			false,
-		);
-		assert.equal(
-			isWatchdogPass("PASS\n\nThis migration risks data loss for existing users."),
-			false,
-		);
-		assert.equal(
-			isWatchdogPass("PASS\n\nThe agent is heading in the wrong direction; this approach won't scale."),
-			false,
-		);
-	});
 });
 
 describe("skill prompt integration", () => {
@@ -386,23 +575,17 @@ describe("skill prompt integration", () => {
 
 describe("buddy message formatting", () => {
 	it("formats a fresh watchdog advisory with a concern ID for the main agent", () => {
-		const out = formatBuddyAdvisory("turns", 0, "wd-a81f", "Fix the test gap.");
+		const out = formatBuddyAdvisory("turns", "wd-a81f", "Fix the test gap.");
 		assert.match(out, /^## BUDDY ADVISORY \(auto, watchdog\)/);
-		assert.match(out, /Reviewed the recent work\./);
+		assert.match(out, /Revalidated against the current work\./);
 		assert.match(out, /Otherwise: fix, rebut with evidence, or consult_buddy\./);
 		assert.match(out, /Concern #wd-a81f:\nFix the test gap\./);
 	});
 
-	it("formats a stale watchdog advisory with staleness", () => {
-		const out = formatBuddyAdvisory("turns", 3, "wd-stale", "The claim is stale.");
-		assert.match(out, /Reviewed ~3 turn\(s\) ago\./);
-		assert.match(out, /continue\./);
-	});
-
 	it("formats a run-end advisory", () => {
-		const out = formatBuddyAdvisory("run_end", 2, "wd-end", "Finish the audit.");
+		const out = formatBuddyAdvisory("run_end", "wd-end", "Finish the audit.");
 		assert.match(out, /^## BUDDY ADVISORY \(auto, run-end\)/);
-		assert.match(out, /Review this before finalizing\./);
+		assert.match(out, /Revalidated against the settled run\./);
 		assert.match(out, /Concern #wd-end:\nFinish the audit\./);
 	});
 
@@ -431,52 +614,6 @@ describe("buddy message formatting", () => {
 	});
 });
 
-describe("automatic advisory policy", () => {
-	it("delivers fresh and borderline-stale concerns", () => {
-		assert.equal(STALE_CONCERN_MAX_TURNS, 3);
-		assert.deepEqual(
-			shouldDeliverAutomaticConcern({
-				answer: "The implementation misses a required test.",
-				turnsElapsed: 0,
-			}),
-			{ deliver: true },
-		);
-		assert.deepEqual(
-			shouldDeliverAutomaticConcern({
-				answer: "The implementation misses a required test.",
-				turnsElapsed: 3,
-			}),
-			{ deliver: true },
-		);
-	});
-
-	it("suppresses non-blocking concerns that land more than three turns late", () => {
-		assert.deepEqual(
-			shouldDeliverAutomaticConcern({
-				answer: "Consider tightening this wording before finalizing.",
-				turnsElapsed: 4,
-			}),
-			{ deliver: false, reason: "stale_concern" },
-		);
-	});
-
-	it("still delivers stale concerns with blocker markers", () => {
-		const stale = 8;
-		for (const answer of [
-			"Security regression: the token is now logged in plaintext.",
-			"The tests are failing and this is blocking release.",
-			"The implementation is missing a required user requirement.",
-			"This migration risks data loss for existing users.",
-			"The agent is heading in the wrong direction; this approach won't scale.",
-		]) {
-			assert.deepEqual(
-				shouldDeliverAutomaticConcern({ answer, turnsElapsed: stale }),
-				{ deliver: true },
-			);
-		}
-	});
-});
-
 describe("output length control", () => {
 	it("appends a truncation note as its own paragraph with the cap", () => {
 		const noted = applyTruncationNote("Partial verdict about the code", 2048);
@@ -488,16 +625,6 @@ describe("output length control", () => {
 	it("falls back to a generic note when the cap is unknown", () => {
 		const noted = applyTruncationNote("Partial", undefined);
 		assert.ok(noted.endsWith("[Buddy answer truncated at the output-token cap.]"));
-	});
-
-	it("truncation note text is inert to PASS-suppression heuristics", () => {
-		for (const note of [
-			"[Buddy answer truncated at 2048 output tokens.]",
-			"[Buddy answer truncated at the output-token cap.]",
-		]) {
-			assert.equal(hasAutomaticConcernMarker(note), false);
-			assert.equal(isStandalonePassLine(note), false);
-		}
 	});
 
 	it("appends a soft target as its own paragraph, or leaves text unchanged", () => {
@@ -514,7 +641,7 @@ describe("output length control", () => {
 		assert.equal(control.maxTokens, WATCHDOG_DEFAULT_MAX_TOKENS);
 		assert.equal(control.maxTokens, 2048);
 		assert.ok(control.softTargetLine?.includes("Keep your verdict tight"));
-		assert.ok(control.softTargetLine?.includes("PASS is a single word"));
+		assert.ok(control.softTargetLine?.includes("structured verdict tool"));
 	});
 
 	it("gives requested consults more room with stance-specific soft targets", () => {
@@ -563,52 +690,6 @@ describe("output length control", () => {
 			config: { consult: 8192 },
 		});
 		assert.equal(consultOverride.maxTokens, 8192);
-	});
-});
-
-describe("truncated-never-PASS classification", () => {
-	it("classifies a clean PASS as pass only when not truncated", () => {
-		assert.equal(
-			classifyAutomaticVerdict({ answer: "PASS", truncated: false, turnsElapsed: 0 }),
-			"pass",
-		);
-		assert.equal(
-			classifyAutomaticVerdict({ answer: "PASS", turnsElapsed: 0 }),
-			"pass",
-		);
-	});
-
-	it("never classifies a truncated answer as pass", () => {
-		// Exactly "PASS" but truncated: the length cap means the verdict is incomplete.
-		assert.notEqual(
-			classifyAutomaticVerdict({ answer: "PASS", truncated: true, turnsElapsed: 0 }),
-			"pass",
-		);
-		// A concern cut mid-word ("...tests are fail") loses its concern marker, but
-		// truncated=true still forbids pass; fresh (turnsElapsed 0) so it delivers.
-		assert.equal(
-			classifyAutomaticVerdict({
-				answer: "The tests are fail",
-				truncated: true,
-				turnsElapsed: 0,
-			}),
-			"concern",
-		);
-	});
-
-	it("delivers a stale truncated verdict as concern instead of suppressing it", () => {
-		// No surviving concern marker AND stale (turnsElapsed > STALE_CONCERN_MAX_TURNS):
-		// a non-truncated answer here would be stale_suppressed...
-		const answer = "Looks okay so far, though I would want to double-check the";
-		assert.equal(
-			classifyAutomaticVerdict({ answer, truncated: false, turnsElapsed: 10 }),
-			"stale_suppressed",
-		);
-		// ...but truncation makes the verdict known-incomplete, so it is delivered.
-		assert.equal(
-			classifyAutomaticVerdict({ answer, truncated: true, turnsElapsed: 10 }),
-			"concern",
-		);
 	});
 });
 
@@ -924,16 +1005,28 @@ describe("telemetry", () => {
 		});
 		await recordConsultation({
 			source: "watchdog",
-			stance: "watchdog",
-			outcome: "stale_suppressed",
+			stance: "watchdog-revalidation",
+			outcome: "resolved",
 			model: "zai/glm-5.2",
 			totalMs: 55,
 			trigger: "turns",
-			turnsElapsed: 4,
+			concernId: "wd-b92f",
+			reviewPhase: "revalidation",
+			reviewRevision: 12,
+			revalidationRevision: 17,
+			revalidationCount: 1,
+		});
+		await recordWatchdogCommit({
+			trigger: "turns",
+			concernId: "wd-b92f",
+			outcome: "resolved",
+			reviewRevision: 12,
+			commitRevision: 17,
+			revalidationCount: 1,
 		});
 
 		const lines = (await readFile(path, "utf8")).trim().split("\n");
-		assert.equal(lines.length, 3);
+		assert.equal(lines.length, 4);
 		const first = JSON.parse(lines[0]);
 		assert.equal(first.v, 1);
 		assert.equal(first.outcome, "pass");
@@ -952,8 +1045,15 @@ describe("telemetry", () => {
 		assert.equal(second.outcome, "error");
 		assert.equal(second.error, "boom");
 		const third = JSON.parse(lines[2]);
-		assert.equal(third.outcome, "stale_suppressed");
-		assert.equal(third.turnsElapsed, 4);
+		assert.equal(third.outcome, "resolved");
+		assert.equal(third.reviewPhase, "revalidation");
+		assert.equal(third.reviewRevision, 12);
+		assert.equal(third.revalidationRevision, 17);
+		assert.equal(third.revalidationCount, 1);
+		const fourth = JSON.parse(lines[3]);
+		assert.equal(fourth.type, "watchdog_commit");
+		assert.equal(fourth.outcome, "resolved");
+		assert.equal(fourth.commitRevision, 17);
 	});
 
 	it("never throws when the path is unwritable", async () => {
@@ -1028,22 +1128,6 @@ describe("telemetry", () => {
 			"anthropic/claude-sonnet-4-5",
 		]);
 		assert.equal(record.modelFailures[0].errorKind, "rate_limit");
-	});
-});
-
-describe("isWatchdogPass", () => {
-	it("accepts bare and decorated PASS", () => {
-		assert.equal(isWatchdogPass("PASS"), true);
-		assert.equal(isWatchdogPass("  PASS  "), true);
-		assert.equal(isWatchdogPass("PASS."), true);
-		assert.equal(isWatchdogPass("**PASS**"), true);
-	});
-
-	it("rejects substantive replies mentioning PASS", () => {
-		assert.equal(isWatchdogPass("I cannot PASS on this: the loop is wrong"), false);
-		assert.equal(isWatchdogPass("PASS, but one concern: the API is misused"), false);
-		assert.equal(isWatchdogPass("The tests fail"), false);
-		assert.equal(isWatchdogPass(""), false);
 	});
 });
 

@@ -39,7 +39,7 @@ Stances for `consult_buddy`:
 | `fact_check` | Verifies claims against real files; cites VERIFIED / CONTRADICTED / UNVERIFIABLE |
 | `review` | Quality review of recent work, ordered by severity |
 
-Automatic reviews are designed to be quiet. `PASS` verdicts are suppressed entirely. Real concerns are steered in with staleness framing (`Reviewed ~N turn(s) ago...`); non-blocking concerns that land more than three turns late are dropped, while blocker/security/regression-style concerns still deliver. If the run already ended, the concern is queued for your next prompt — the agent is never auto-woken.
+Automatic reviews are designed to be quiet. Buddy submits a structured verdict instead of relying on prose `PASS` parsing. Passes are suppressed entirely; concerns remain private candidates until Buddy revalidates them against an exact, stable current transcript snapshot. If the agent or user produces another message, starts or finishes a tool, runs a shell command, or changes the session tree during that check, publication is deferred and retried at the next stable boundary. Only a currently confirmed or replaced recommendation is delivered; a resolved candidate disappears. If the run already ended, a confirmed concern is queued for your next prompt — the agent is never auto-woken.
 
 Each delivered concern has a short ID. The main agent can use `give_buddy_feedback` to mark it `fixed` or `rebutted` with a reason, independently of cadence feedback. Future watchdog checks receive a compact, branch-aware concern history so they do not repeat settled concerns without new evidence. This adds no extra Buddy call and survives reload, resume, fork, tree navigation, and compaction within the session.
 
@@ -63,7 +63,7 @@ Optional. Lives in `~/.pi/agent/buddy.json`, re-read at the start of every consu
 ```
 
 - **Models** — a priority failover chain (ascending). Buddy retries the current model on transient failures, then falls back to the next. `perModelRetries: 0` means immediate failover. For a single-session override, use `pi --buddy-model provider/id`.
-- **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Truncated answers carry a visible note and never count as a watchdog `PASS`. Buddy never requests extended thinking, so the cap bounds the answer directly.
+- **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Automatic reviews must finish with the structured verdict tool; an incomplete prose answer is an error and is never published. Buddy never requests extended thinking, so the cap bounds the answer directly.
 
 ## Enable / Disable
 
@@ -76,7 +76,7 @@ When off, automatic reviews are skipped and `consult_buddy` refuses model calls.
 
 ## Telemetry
 
-Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. Feedback rows record concern IDs and `fixed`/`rebutted` dispositions when supplied.
+Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. `watchdog_commit` rows record whether a private candidate was delivered, resolved, or deferred by concurrent activity. Feedback rows record concern IDs and `fixed`/`rebutted` dispositions when supplied.
 
 ```bash
 jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
@@ -88,7 +88,7 @@ See [TELEMETRY.md](https://github.com/season179/pi-ecosystem/blob/main/packages/
 
 ```bash
 npm run build   # compile
-npm test        # vitest (pure logic: transcript, trimming, memory, PASS detection)
+npm test        # vitest (pure logic: transcript, trimming, memory, watchdog commit races)
 ```
 
 Smoke test from the repo, in a scratch directory:

@@ -6,10 +6,12 @@ Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl
 ## Fields
 
 - `source` — `tool` (consult_buddy), `command` (/buddy), or `watchdog`
-- `stance` — `discuss` / `debate` / `fact_check` / `review`
-- `outcome` — `ok` / `pass` / `concern` / `stale_suppressed` / `error` / `discarded`
+- `stance` — requested stance, `watchdog`, or `watchdog-revalidation`
+- `outcome` — `ok` / `pass` / `concern` / `resolved` / `error` / `discarded`
 - `trigger` — `turns` or `run_end` for watchdog records
-- `turnsElapsed` — verdict staleness (turns between snapshot and delivery)
+- `turnsElapsed` — turns completed while the initial detached review was running
+- `reviewPhase` — `review` for the initial candidate or `revalidation` for the commit check
+- `reviewRevision`, `revalidationRevision`, `revalidationCount` — activity revisions and attempt count for the versioned watchdog protocol
 - `rounds`, `toolCalls` — tool-loop depth and tool-call count
 - `answerChars`, `truncated` — answer length and whether it hit the output-token cap
 - `memoryChars` — injected durable-memory block size
@@ -24,9 +26,11 @@ Feedback rows (`type: "feedback"`) may also contain `concernId` and
 `concernDisposition` (`fixed` or `rebutted`) when the agent records how a
 watchdog concern was settled.
 
-`stale_suppressed` means an automatic concern landed too late to steer and did
-not contain blocker markers. `discarded` means a background verdict was dropped
-because the session shut down or was replaced mid-investigation.
+Commit rows (`type: "watchdog_commit"`) contain `outcome` (`delivered`,
+`resolved`, or `deferred`), `reviewRevision`, `commitRevision`, and
+`revalidationCount`. Deferred rows include `reason` (`activity` or `error`).
+`discarded` consultation outcomes mean a background verdict was dropped because
+the session shut down or was replaced mid-investigation.
 Watchdog/background reviews retry once on transient provider failures before
 falling back or recording an error.
 
@@ -52,9 +56,12 @@ reports real token counts but currently has zero pricing metadata, so
 
 ## Health signals
 
-- **watchdog pass:concern ratio** — mostly `pass` with occasional `concern`
-  is healthy; all `concern` means it is noisy, all `pass` forever means the
-  threshold or prompt needs tuning.
+- **watchdog pass:concern:resolved ratio** — mostly `pass` with occasional
+  `concern` is healthy; `resolved` measures candidates correctly suppressed by
+  current-state revalidation.
+- **watchdog_commit deferred rate** — frequent `activity` deferrals indicate
+  reviews are colliding with active work; every eventual delivery should have a
+  stable commit revision.
 - **consult frequency** — no `tool` records across real sessions means the main
   agent is not consulting; strengthen `promptGuidelines`.
 - **toolCalls** — frequent `fact_check`/`review` with `toolCalls: 0` means the
@@ -70,8 +77,6 @@ reports real token counts but currently has zero pricing metadata, so
   failed and which fallback succeeded.
 - **outcome: error** — surfaces failures that would otherwise be invisible
   (especially silent watchdog failures).
-- **outcome: stale_suppressed** — automatic concern suppressed for staleness;
-  if this climbs, the watchdog is finding issues too late.
 - **concern dispositions** — audit whether concerns are marked fixed or rebutted,
   and whether later advisories repeat an issue whose disposition was already in
   the injected history.
@@ -83,8 +88,8 @@ reports real token counts but currently has zero pricing metadata, so
 ## Quick queries
 
 ```bash
-# Outcomes by source
-jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
+# Outcomes by source or event type
+jq -r '[.type // .source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
 
 # Recent provider-reported token usage
 jq -r '[.ts,.source,.outcome,(.totalTokens//"-"),(.finalRoundTotalTokens//"-"),(.costUsd//"-")] | @tsv' ~/.pi/agent/buddy-telemetry.jsonl | tail

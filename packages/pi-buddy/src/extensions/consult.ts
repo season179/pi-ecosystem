@@ -13,6 +13,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 	type ToolCall,
+	type ToolResultMessage,
 	type Usage,
 } from "@earendil-works/pi-ai";
 // streamSimple moved to the compat entrypoint in pi-ai 0.80.x; pi's runtime
@@ -31,6 +32,11 @@ import {
 	renderTranscript,
 	type TranscriptBudget,
 } from "./transcript.js";
+import {
+	extractWatchdogVerdict,
+	WATCHDOG_VERDICT_TOOL,
+	type WatchdogVerdict,
+} from "./watchdog-verdict.js";
 
 /** Cap on tool-loop rounds before the buddy is forced to answer. */
 const MAX_TOOL_ROUNDS = 10;
@@ -131,6 +137,8 @@ export function automaticTranscriptBudget(contextWindow: number): TranscriptBudg
 
 export interface ConsultResult {
 	answer: string;
+	/** Structured terminal verdict for automatic watchdog review/revalidation. */
+	watchdogVerdict?: WatchdogVerdict;
 	/** One line per buddy tool call, e.g. "read src/foo.ts". */
 	activity: string[];
 	rounds: number;
@@ -139,8 +147,8 @@ export interface ConsultResult {
 	usage?: BuddyUsageTelemetry;
 	/**
 	 * True when the final model call hit the output-token cap (`stopReason` was
-	 * "length"). A truncated answer is treated as never-PASS by automatic
-	 * reviews and carries a truncation note for the reader.
+	 * "length"). Automatic reviews require a complete structured verdict tool
+	 * call, so an incomplete prose answer is rejected instead of published.
 	 */
 	truncated?: boolean;
 }
@@ -222,6 +230,9 @@ export async function consultBuddy(
 		...createBuddyTools(request.cwd),
 		...(request.extraTools ?? []),
 	];
+	const watchdogVerdictTool = tools.find(
+		(tool) => tool.name === WATCHDOG_VERDICT_TOOL,
+	);
 	const options: SimpleStreamOptions = {
 		apiKey: auth.apiKey,
 		headers: auth.headers,
@@ -247,11 +258,15 @@ export async function consultBuddy(
 		const finalRound = rounds > MAX_TOOL_ROUNDS;
 		const context: Context = {
 			systemPrompt: finalRound
-				? `${baseSystemPrompt}\n\nYour tool budget is exhausted. Give your final answer now from what you already know.`
+				? watchdogVerdictTool
+					? `${baseSystemPrompt}\n\nYour investigation tool budget is exhausted. Submit your required structured verdict now from what you already know.`
+					: `${baseSystemPrompt}\n\nYour tool budget is exhausted. Give your final answer now from what you already know.`
 				: baseSystemPrompt,
 			messages,
 		};
-		if (!finalRound) {
+		if (finalRound && watchdogVerdictTool) {
+			context.tools = [watchdogVerdictTool];
+		} else if (!finalRound) {
 			context.tools = tools;
 		}
 
@@ -274,7 +289,7 @@ export async function consultBuddy(
 		// not be dropped, or the buddy's investigation silently ends on a partial
 		// answer. Truncated tool-arg JSON degrades to a tool-error result inside
 		// executeBuddyToolCall, not a lost round.
-		if (!finalRound && toolCalls.length > 0) {
+		if (context.tools && toolCalls.length > 0) {
 			const results = await executeToolCalls(
 				tools,
 				toolCalls,
@@ -284,6 +299,20 @@ export async function consultBuddy(
 					request.onActivity?.(line);
 				},
 			);
+			const watchdogVerdict = extractWatchdogVerdict(results);
+			if (watchdogVerdict) {
+				return {
+					answer: answerFromWatchdogVerdict(watchdogVerdict),
+					watchdogVerdict,
+					activity,
+					rounds,
+					transcriptTokens: estimateTokens(transcript),
+					usage: usageTelemetry(cumulativeUsage, finalRoundUsage),
+				};
+			}
+			if (finalRound && watchdogVerdictTool) {
+				throw new Error("Buddy produced no valid structured watchdog verdict");
+			}
 			messages = [...messages, ...results];
 			continue;
 		}
@@ -302,6 +331,9 @@ export async function consultBuddy(
 			// cap (2048+) far exceeds a normal verdict, and tool-bearing rounds now
 			// continue rather than terminate here.
 			throw new Error("Buddy produced no answer text");
+		}
+		if (watchdogVerdictTool) {
+			throw new Error("Buddy produced prose instead of a structured watchdog verdict");
 		}
 		const truncated = message.stopReason === "length";
 		return {
@@ -410,13 +442,19 @@ async function executeToolCalls(
 	toolCalls: readonly ToolCall[],
 	signal: AbortSignal | undefined,
 	onActivity: (line: string) => void,
-): Promise<Message[]> {
-	const results: Message[] = [];
+): Promise<ToolResultMessage[]> {
+	const results: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
 		onActivity(describeToolCall(toolCall));
 		results.push(await executeBuddyToolCall(tools, toolCall, signal));
 	}
 	return results;
+}
+
+function answerFromWatchdogVerdict(verdict: WatchdogVerdict): string {
+	if (verdict.decision === "pass") return "PASS";
+	if (verdict.decision === "resolved") return "RESOLVED";
+	return verdict.advisory;
 }
 
 function extractToolCalls(message: AssistantMessage): ToolCall[] {
