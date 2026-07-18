@@ -99,6 +99,13 @@ pi -e packages/pi-buddy/src/extensions/buddy.ts
 
 See [PLAN.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/PLAN.md) for the full design rationale.
 
+The extension is organized around three stateful capabilities: `BuddySession`,
+`ConsultationWorkflow`, and `AutomaticReview`. Pi-specific registration stays in
+the composition root. Contributors should use the
+[domain language](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/CONTEXT.md)
+and preserve the boundaries recorded in the
+[architecture decision](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/adr/0001-capability-first-domain-modules.md).
+
 ## Compatibility
 
 - Pi: tested with 0.80.x. Pi itself requires Node >= 22.19.

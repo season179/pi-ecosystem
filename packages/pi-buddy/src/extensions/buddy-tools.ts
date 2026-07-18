@@ -8,7 +8,6 @@
 
 import {
 	type TextContent,
-	type Tool,
 	type ToolCall,
 	type ToolResultMessage,
 	validateToolArguments,
@@ -19,20 +18,12 @@ import {
 	createLsTool,
 	createReadTool,
 } from "@earendil-works/pi-coding-agent";
+import type { BuddyTool } from "./buddy-tool.js";
+
+export type { BuddyTool } from "./buddy-tool.js";
 
 export const BUDDY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 export type BuddyToolName = (typeof BUDDY_TOOL_NAMES)[number];
-
-type BuddyToolResult = Pick<ToolResultMessage, "content" | "details">;
-
-export type BuddyTool = Tool & {
-	prepareArguments?: (args: unknown) => Record<string, unknown>;
-	execute: (
-		toolCallId: string,
-		params: Record<string, unknown>,
-		signal?: AbortSignal,
-	) => Promise<BuddyToolResult>;
-};
 
 export function createBuddyTools(cwd: string): BuddyTool[] {
 	return [

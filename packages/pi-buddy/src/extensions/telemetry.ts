@@ -20,18 +20,14 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type {
+	BuddyOutcome,
+	BuddySource,
+	BuddyTrigger,
+} from "./buddy-context.js";
 import type { ConcernDisposition } from "./concern-history.js";
 
-export type BuddySource = "tool" | "command" | "watchdog";
-export type BuddyOutcome =
-	| "ok"
-	| "pass"
-	| "concern"
-	| "resolved"
-	| "error"
-	| "discarded";
-/** Which automatic path launched a watchdog consultation. */
-export type BuddyTrigger = "turns" | "run_end";
+export type { BuddyOutcome, BuddySource, BuddyTrigger } from "./buddy-context.js";
 export type BuddyFeedback = "more" | "same" | "less";
 
 export interface BuddyModelFailureTelemetry {

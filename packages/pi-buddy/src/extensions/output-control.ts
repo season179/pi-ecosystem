@@ -12,8 +12,8 @@
  * source/stance mapping is unit-testable.
  */
 
-import { coercePositiveTokens } from "./consult.js";
-import type { BuddySource } from "./telemetry.js";
+import { coercePositiveTokens } from "./token-policy.js";
+import type { BuddySource } from "./buddy-context.js";
 
 /**
  * Optional per-source-class hard caps from buddy.json. A field may be:

@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import type { BuddyTool } from "./buddy-tools.js";
+import type { BuddyTool } from "./buddy-tool.js";
 
 export const WATCHDOG_VERDICT_TOOL = "submit_watchdog_verdict";
 

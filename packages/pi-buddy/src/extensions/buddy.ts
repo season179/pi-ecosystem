@@ -22,45 +22,30 @@
  * watchdog from re-raising concerns the agent explicitly fixed or rebutted.
  */
 
-import { randomUUID } from "node:crypto";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
 	BuildSystemPromptOptions,
 	ExtensionAPI,
 	ExtensionContext,
-	SessionEntry,
 	Skill,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
-import type { BuddyTool } from "./buddy-tools.js";
+import { AutomaticReview } from "./automatic-review.js";
+import type { BuddyTool } from "./buddy-tool.js";
 import {
-	applyBuddyFeedback,
-	buildBuddyCalibrationBlock,
 	BUDDY_FEEDBACKS,
 	formatBuddyFeedbackResult,
-	watchdogThresholdForLevel,
-	type AdvisoryLevel,
-	type BuddyCalibrationNote,
 	type BuddyFeedback,
 } from "./calibration.js";
+import { BuddySession } from "./buddy-session.js";
 import {
-	loadBuddyConfig,
-	splitModelSpec,
-	type BuddyModelCandidate,
-} from "./buddy-config.js";
-import {
-	automaticTranscriptBudget,
-	consultBuddy,
-	type ConsultResult,
-} from "./consult.js";
-import {
-	ConcernHistory,
-	rebuildConcernHistory,
-	type ConcernDisposition,
-} from "./concern-history.js";
-import { harvestDirectives, harvestNotice } from "./harvest.js";
+	ConsultationWorkflow,
+	formatFailoverLine,
+	formatFailoverNotice,
+	type ConsultationInjection,
+} from "./consultation-workflow.js";
+import type { ConcernDisposition } from "./concern-history.js";
 import {
 	buddyRendererLabel,
 	formatBuddyAdvisory,
@@ -68,140 +53,36 @@ import {
 	type BuddyReviewDetails,
 } from "./message-format.js";
 import { deriveSlug, MemoryStore } from "./memory.js";
+import { commandConsultDelivery } from "./policy.js";
 import {
-	type BackgroundTrigger,
-	BuddyRunTracker,
-	commandConsultDelivery,
-} from "./policy.js";
-import {
-	buddyOutputControl,
-	type OutputMaxTokensConfig,
-} from "./output-control.js";
-import {
-	buddyRetryAttemptsForSource,
-	classifyBuddyError,
-	delayWithAbort,
-	formatRetriableBuddyFailure,
-	isRetriableBuddyError,
-	retryDelayMs,
-} from "./retry.js";
-import {
-	buildMemoryBlock,
 	buildStanceSystemPrompt,
-	buildVerdictDigest,
-	buildWatchdogRevalidationSystemPrompt,
-	buildWatchdogSystemPrompt,
 	type Stance,
 	STANCES,
 } from "./stances.js";
 import { appendSkillsToBuddyPrompt } from "./skill-prompt.js";
 import {
-	activeToolsWithBuddyState,
 	CONSULT_BUDDY_TOOL,
 	GIVE_BUDDY_FEEDBACK_TOOL,
 	parseBuddyCommand,
-	seedBuddyEnabledFromFlag,
 } from "./switch.js";
-import {
-	type BuddyOutcome,
-	type BuddySource,
-	type BuddyTrigger,
-	recordConsultation,
-	recordFeedback,
-	recordWatchdogCommit,
-} from "./telemetry.js";
+import { recordFeedback } from "./telemetry.js";
 import { closeBuddyBrowser, createWebTools, type ExecFn } from "./web-tools.js";
-import {
-	WatchdogCoordinator,
-	type WatchdogSnapshot,
-} from "./watchdog-coordinator.js";
-import {
-	createWatchdogVerdictTool,
-	type WatchdogVerdict,
-} from "./watchdog-verdict.js";
+import { createWatchdogVerdictTool } from "./watchdog-verdict.js";
 
 const DEFAULT_BUDDY_MODEL = "zai/glm-5.2";
 const DISABLED_MESSAGE = "Buddy is disabled. Run `/buddy on` to re-enable.";
-const DEFAULT_ADVISORY_LEVEL: AdvisoryLevel = 0;
 const RUN_END_REVIEW_MIN_TURNS = 2;
 const BUDDY_REVIEW_TYPE = "buddy-review";
 const STATUS_KEY = "buddy";
 const BG_STATUS_KEY = "buddy-bg";
 const MODEL_STATUS_KEY = "buddy-model";
-const VERDICT_RING_SIZE = 10;
 
 export default function setup(pi: ExtensionAPI): void {
-	let advisoryLevel: AdvisoryLevel = DEFAULT_ADVISORY_LEVEL;
-	let calibrationNote: BuddyCalibrationNote | undefined;
-	const tracker = new BuddyRunTracker(
-		() => watchdogThresholdForLevel(advisoryLevel),
-		RUN_END_REVIEW_MIN_TURNS,
-	);
-	let backgroundAbort: AbortController | undefined;
-	let browserUsed = false;
-	let buddyEnabled = true;
-	let buddySwitchSeeded = false;
-	let consultToolWasActiveWhenDisabled: boolean | undefined;
-	const memoryStore = new MemoryStore();
-	let memoryCuratedThisSession = false;
+	const session = new BuddySession(new MemoryStore());
 	let currentSkills: Skill[] = [];
-	const verdictRing: string[] = [];
-	const concernHistory = new ConcernHistory();
-	const watchdogCoordinator = new WatchdogCoordinator<WatchdogCandidate>();
-	const configWarningsShown = new Set<string>();
-	let runEndReviewPending = false;
-
-	function recordVerdict(trigger: BackgroundTrigger, verdict: string): void {
-		const time = new Date().toISOString().slice(11, 16);
-		verdictRing.push(`[${time}] ${trigger}: ${verdict}`);
-		if (verdictRing.length > VERDICT_RING_SIZE) verdictRing.shift();
-	}
-
-	function buildInjectionBlock(
-		cwd: string,
-		options: { includeMemory: boolean },
-	): {
-		block?: string;
-		memoryChars: number;
-		openConcerns: number;
-		fixedConcerns: number;
-		rebuttedConcerns: number;
-		concernHistoryChars: number;
-	} {
-		const slug = deriveSlug(cwd);
-		const sections: string[] = [];
-		let memoryChars = 0;
-		if (options.includeMemory) {
-			if (!memoryCuratedThisSession && memoryStore.curate(slug)) {
-				memoryCuratedThisSession = true;
-			}
-			const memory = memoryStore.readForInjection(slug);
-			if (memory) {
-				const memorySection = buildMemoryBlock(memory);
-				memoryChars = memorySection.length;
-				sections.push(memorySection);
-			}
-		}
-		const calibration = buildBuddyCalibrationBlock(calibrationNote);
-		if (calibration) sections.push(calibration);
-		if (verdictRing.length > 0) {
-			sections.push(buildVerdictDigest(verdictRing));
-		}
-		const concernDigest = concernHistory.buildDigest();
-		if (concernDigest) sections.push(concernDigest);
-		const concernCounts = concernHistory.counts();
-		return {
-			block: sections.length > 0 ? sections.join("\n\n") : undefined,
-			memoryChars,
-			openConcerns: concernCounts.open,
-			fixedConcerns: concernCounts.fixed,
-			rebuttedConcerns: concernCounts.rebutted,
-			concernHistoryChars: concernDigest?.length ?? 0,
-		};
-	}
 
 	const execFn: ExecFn = async (command, args, options) => {
-		browserUsed = true;
+		session.markBrowserUsed();
 		return pi.exec(command, args, options);
 	};
 	const webTools: BuddyTool[] = createWebTools(execFn);
@@ -209,6 +90,30 @@ export default function setup(pi: ExtensionAPI): void {
 		...webTools,
 		createWatchdogVerdictTool(),
 	];
+	const consultationWorkflow: ConsultationWorkflow = new ConsultationWorkflow({
+		defaultModelSpec: () =>
+			String(pi.getFlag("buddy-model") ?? DEFAULT_BUDDY_MODEL),
+		buildInjection: (cwd, includeMemory): ConsultationInjection =>
+			session.buildInjection(
+				deriveSlug(cwd),
+				includeMemory,
+				automaticReview.context(),
+			),
+		memoryStore: session.memory,
+		webTools,
+		setModelStatus: setBuddyModelStatus,
+		notifyConfigWarnings,
+	});
+	const automaticReview: AutomaticReview = new AutomaticReview({
+		host: pi,
+		consultation: consultationWorkflow,
+		tools: watchdogTools,
+		getWatchdogThreshold: () => session.watchdogThreshold(),
+		isEnabled: () => session.enabled,
+		reviewMessageType: BUDDY_REVIEW_TYPE,
+		backgroundStatusKey: BG_STATUS_KEY,
+		runEndReviewMinTurns: RUN_END_REVIEW_MIN_TURNS,
+	});
 
 	pi.registerFlag("buddy-disabled", {
 		description:
@@ -226,14 +131,7 @@ export default function setup(pi: ExtensionAPI): void {
 	function applyBuddyToolState(enabled: boolean): void {
 		try {
 			const activeTools = pi.getActiveTools();
-			if (!enabled && consultToolWasActiveWhenDisabled === undefined) {
-				consultToolWasActiveWhenDisabled = activeTools.includes(CONSULT_BUDDY_TOOL);
-			}
-			const nextTools = activeToolsWithBuddyState(
-				activeTools,
-				enabled,
-				consultToolWasActiveWhenDisabled ?? false,
-			);
+			const nextTools = session.activeToolsFor(enabled, activeTools);
 			const changed =
 				nextTools.length !== activeTools.length ||
 				nextTools.some((tool, i) => tool !== activeTools[i]);
@@ -241,31 +139,18 @@ export default function setup(pi: ExtensionAPI): void {
 		} catch {
 			// Best-effort UX only; the consult_buddy execute guard is load-bearing.
 		}
-		if (enabled) consultToolWasActiveWhenDisabled = undefined;
 	}
 
 	function abortBackgroundReview(): void {
-		tracker.invalidate();
-		watchdogCoordinator.invalidate();
-		backgroundAbort?.abort();
-		backgroundAbort = undefined;
+		automaticReview.abort();
 	}
 
 	async function initializeBuddySwitch(ctx?: ExtensionContext): Promise<void> {
-		const shouldRestoreTool = consultToolWasActiveWhenDisabled ?? false;
-		const seeded = seedBuddyEnabledFromFlag(
-			buddyEnabled,
-			buddySwitchSeeded ? undefined : pi.getFlag("buddy-disabled"),
-			buddySwitchSeeded,
-		);
-		buddyEnabled = seeded.enabled;
-		buddySwitchSeeded = seeded.seeded;
-		if (buddyEnabled) {
+		if (session.seedEnablement(pi.getFlag("buddy-disabled"))) {
 			applyBuddyToolState(true);
 			await refreshBuddyModelStatus(ctx);
 			return;
 		}
-		consultToolWasActiveWhenDisabled = shouldRestoreTool ? true : undefined;
 		abortBackgroundReview();
 		applyBuddyToolState(false);
 		setBuddyModelStatus(ctx, undefined);
@@ -281,7 +166,7 @@ export default function setup(pi: ExtensionAPI): void {
 		options: { failover?: boolean } = {},
 	): void {
 		if (!ctx?.hasUI) return;
-		if (!buddyEnabled) {
+		if (!session.enabled) {
 			ctx.ui.setStatus(MODEL_STATUS_KEY, "buddy: off");
 			return;
 		}
@@ -297,12 +182,12 @@ export default function setup(pi: ExtensionAPI): void {
 
 	async function refreshBuddyModelStatus(ctx: ExtensionContext | undefined): Promise<void> {
 		if (!ctx?.hasUI) return;
-		if (!buddyEnabled) {
+		if (!session.enabled) {
 			setBuddyModelStatus(ctx, undefined);
 			return;
 		}
 		try {
-			const plan = await resolveBuddyModelPlan(ctx, "tool");
+			const plan = await consultationWorkflow.resolveModelPlan(ctx, "tool");
 			setBuddyModelStatus(ctx, plan.candidates[0]?.spec);
 		} catch {
 			ctx.ui.setStatus(MODEL_STATUS_KEY, "buddy: unavailable");
@@ -310,11 +195,10 @@ export default function setup(pi: ExtensionAPI): void {
 	}
 
 	function setBuddyEnabled(enabled: boolean, ctx?: ExtensionContext): void {
-		if (enabled === buddyEnabled) {
+		if (!session.setEnabled(enabled)) {
 			notify(ctx, `Buddy is already ${enabled ? "on" : "off"}.`);
 			return;
 		}
-		buddyEnabled = enabled;
 		if (!enabled) abortBackgroundReview();
 		applyBuddyToolState(enabled);
 		if (enabled) {
@@ -332,643 +216,11 @@ export default function setup(pi: ExtensionAPI): void {
 		return commandCtx.getSystemPromptOptions?.().skills ?? currentSkills;
 	}
 
-	interface ResolvedBuddyModelCandidate {
-		spec: string;
-		label?: string;
-		model: Model<Api>;
-	}
-
-	interface BuddyModelPlan {
-		candidates: ResolvedBuddyModelCandidate[];
-		maxAttemptsPerModel: number;
-		/** Per-source-class output caps from buddy.json (undefined => defaults). */
-		outputMaxTokens?: OutputMaxTokensConfig;
-	}
-
-	type RunConsultationResult = ConsultResult & {
-		model: string;
-		modelsAttempted: string[];
-		failoverUsed: boolean;
-	};
-
-	interface WatchdogCandidate {
-		id: string;
-		trigger: BackgroundTrigger;
-		headline: string;
-		advisory: string;
-		evidence: string[];
-		activity: string[];
-		reviewedRevision: number;
-	}
-
-	function formatFailoverLine(result: RunConsultationResult): string | undefined {
-		if (!result.failoverUsed) return undefined;
-		return (
-			`Buddy fallback used: ${result.modelsAttempted.join(" → ")}; ` +
-			`answered by ${result.model}.`
-		);
-	}
-
-	function formatFailoverNotice(result: RunConsultationResult): string {
-		const line = formatFailoverLine(result);
-		return line ? `${line}\n\n${result.answer}` : result.answer;
-	}
-
 	function notifyConfigWarnings(ctx: ExtensionContext, warnings: readonly string[]): void {
 		if (!ctx.hasUI) return;
-		for (const warning of warnings) {
-			if (configWarningsShown.has(warning)) continue;
-			configWarningsShown.add(warning);
+		for (const warning of session.configWarningsToShow(warnings)) {
 			ctx.ui.notify(`Buddy config: ${warning}`, "warning");
 		}
-	}
-
-	function resolveModelSpec(ctx: ExtensionContext, spec: string): Model<Api> {
-		const { provider, id } = splitModelSpec(spec);
-		const model = ctx.modelRegistry.find(provider, id);
-		if (!model) {
-			throw new Error(`Buddy model ${spec} not found in the model registry`);
-		}
-		return model as Model<Api>;
-	}
-
-	function defaultModelSpec(): string {
-		return String(pi.getFlag("buddy-model") ?? DEFAULT_BUDDY_MODEL);
-	}
-
-	async function resolveBuddyModelPlan(
-		ctx: ExtensionContext,
-		source: BuddySource,
-	): Promise<BuddyModelPlan> {
-		// Read per consultation so edits to ~/.pi/agent/buddy.json take effect
-		// immediately; no /reload or restart is required for model-chain changes.
-		const config = await loadBuddyConfig();
-		const warnings = [...config.warnings];
-		const configured = config.models.length > 0;
-		const candidateConfigs = configured
-			? config.models
-			: [{ id: defaultModelSpec(), priority: 1 } satisfies BuddyModelCandidate];
-		const candidates: ResolvedBuddyModelCandidate[] = [];
-		for (const candidate of candidateConfigs) {
-			try {
-				candidates.push({
-					spec: candidate.id,
-					label: candidate.label,
-					model: resolveModelSpec(ctx, candidate.id),
-				});
-			} catch (error) {
-				warnings.push(`${candidate.id}: ${errorToString(error)}`);
-			}
-		}
-		if (configured && candidates.length === 0) {
-			warnings.push(
-				"No usable models in buddy.json; falling back to --buddy-model/default.",
-			);
-			candidates.push({
-				spec: defaultModelSpec(),
-				model: resolveModelSpec(ctx, defaultModelSpec()),
-			});
-		}
-		notifyConfigWarnings(ctx, warnings);
-		if (candidates.length === 0) {
-			throw new Error("No usable Buddy model candidates configured");
-		}
-		return {
-			candidates,
-			maxAttemptsPerModel:
-				config.perModelRetries === undefined
-					? buddyRetryAttemptsForSource(source)
-					: config.perModelRetries + 1,
-			outputMaxTokens: config.outputMaxTokens,
-		};
-	}
-
-	async function runConsultation(args: {
-		ctx: ExtensionContext;
-		systemPrompt: string;
-		requestText: string;
-		source: BuddySource;
-		stance: string;
-		/** Foreground consultations use ctx.signal; detached ones pass their own. */
-		signal?: AbortSignal;
-		/** Exact branch snapshot to review; defaults to the live branch for pulls. */
-		entries?: readonly SessionEntry[];
-		/** Extra tools for source-specific protocols such as watchdog verdicts. */
-		extraTools?: readonly BuddyTool[];
-		statusKey?: string;
-		trigger?: BuddyTrigger;
-		/** Maps a successful answer to a telemetry outcome (watchdog: pass/concern). */
-		outcomeOf?: (result: ConsultResult) => BuddyOutcome;
-		/** Extra telemetry computed at record time (e.g. commit revisions). */
-		extraTelemetry?: () => {
-			turnsElapsed?: number;
-			concernId?: string;
-			reviewPhase?: "review" | "revalidation";
-			reviewRevision?: number;
-			revalidationRevision?: number;
-			revalidationCount?: number;
-		};
-		/** Apply harvested directives to memory (requested consults only). */
-		harvest?: boolean;
-		onActivity?: (line: string) => void;
-	}): Promise<RunConsultationResult> {
-		const statusKey = args.statusKey ?? STATUS_KEY;
-		const startedAt = Date.now();
-		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
-		const signal = args.signal ?? args.ctx.signal;
-		let attempts = 0;
-		const modelsAttempted: string[] = [];
-		const modelFailures: Array<{
-			model: string;
-			label?: string;
-			errorKind: string;
-			retried?: boolean;
-			attempts?: number;
-			error?: string;
-		}> = [];
-		let lastError: unknown;
-		let successfulCandidate: ResolvedBuddyModelCandidate | undefined;
-		let primaryModel = defaultModelSpec();
-		try {
-			const plan = await resolveBuddyModelPlan(args.ctx, args.source);
-			primaryModel = plan.candidates[0]?.spec ?? primaryModel;
-			setBuddyModelStatus(args.ctx, primaryModel);
-			const injection = buildInjectionBlock(args.ctx.cwd, {
-				includeMemory: args.source !== "watchdog",
-			});
-			const outputControl = buddyOutputControl({
-				source: args.source,
-				stance: args.stance,
-				config: plan.outputMaxTokens,
-			});
-			let raw: ConsultResult | undefined;
-			modelLoop: for (const candidate of plan.candidates) {
-				let attemptsForModel = 0;
-				if (!modelsAttempted.includes(candidate.spec)) {
-					modelsAttempted.push(candidate.spec);
-				}
-				setBuddyModelStatus(args.ctx, candidate.spec, {
-					failover: candidate.spec !== primaryModel,
-				});
-				for (;;) {
-					attempts += 1;
-					attemptsForModel += 1;
-					try {
-						args.ctx.ui.setStatus(
-							statusKey,
-							`buddy: consulting ${candidate.spec}...`,
-						);
-						raw = await consultBuddy({
-							requestText: args.requestText,
-							systemPrompt: args.systemPrompt,
-							memoryBlock: injection.block,
-							entries: args.entries ?? args.ctx.sessionManager.getBranch(),
-							cwd: args.ctx.cwd,
-							model: candidate.model,
-							registry: args.ctx.modelRegistry,
-							signal,
-							transcriptBudget:
-								args.source === "watchdog"
-									? automaticTranscriptBudget(candidate.model.contextWindow)
-									: undefined,
-							outputControl,
-							extraTools: args.extraTools ?? webTools,
-							onActivity: (line) => {
-								args.ctx.ui.setStatus(statusKey, `buddy: ${line}`);
-								args.onActivity?.(line);
-							},
-						});
-						successfulCandidate = candidate;
-						break modelLoop;
-					} catch (error) {
-						lastError = error;
-						const retriable = isRetriableBuddyError(error);
-						if (
-							!signal?.aborted &&
-							retriable &&
-							attemptsForModel < plan.maxAttemptsPerModel
-						) {
-							const delayMs = retryDelayMs();
-							args.ctx.ui.setStatus(
-								statusKey,
-								`buddy: ${candidate.spec} busy; retrying in ${(delayMs / 1000).toFixed(1)}s...`,
-							);
-							await delayWithAbort(delayMs, signal);
-							continue;
-						}
-						modelFailures.push({
-							model: candidate.spec,
-							label: candidate.label,
-							errorKind: classifyBuddyError(error),
-							retried: attemptsForModel > 1,
-							attempts: attemptsForModel,
-							error: errorToString(error).slice(0, 500),
-						});
-						if (signal?.aborted) throw error;
-						break;
-					}
-				}
-			}
-			if (!raw || !successfulCandidate) {
-				throw lastError ?? new Error("All Buddy model candidates failed");
-			}
-			const harvested = harvestDirectives(raw.answer);
-			const result: RunConsultationResult = {
-				...raw,
-				answer: harvested.stripped,
-				model: successfulCandidate.spec,
-				modelsAttempted,
-				failoverUsed: successfulCandidate.spec !== primaryModel,
-			};
-			setBuddyModelStatus(args.ctx, result.model, {
-				failover: result.failoverUsed,
-			});
-			let applied = { lessons: 0, retractions: 0, retractMisses: 0 };
-			// Never persist directives harvested from a truncated answer: a
-			// LESSON/RETRACT line cut mid-token would write a corrupted lesson or
-			// (via RETRACT's substring match) delete the wrong one. We still strip
-			// the partial lines above so the agent never sees them.
-			if (
-				args.harvest &&
-				!raw.truncated &&
-				(harvested.lessons.length > 0 || harvested.retractions.length > 0)
-			) {
-				applied = memoryStore.applyDirectives(
-					deriveSlug(args.ctx.cwd),
-					harvested.lessons,
-					harvested.retractions,
-				);
-				const notice = harvestNotice(applied);
-				if (notice && args.ctx.hasUI) args.ctx.ui.notify(notice, "info");
-			}
-			await recordConsultation({
-				source: args.source,
-				stance: args.stance,
-				outcome: args.outcomeOf?.(result) ?? "ok",
-				model: result.model,
-				totalMs: Date.now() - startedAt,
-				trigger: args.trigger,
-				...args.extraTelemetry?.(),
-				rounds: result.rounds,
-				toolCalls: result.activity.length,
-				transcriptTokens: result.transcriptTokens,
-				...result.usage,
-				answerChars: result.answer.length,
-				truncated: result.truncated,
-				lessons: applied.lessons,
-				retractions: applied.retractions,
-				retractMisses: applied.retractMisses,
-				memoryChars: injection.memoryChars,
-				openConcerns: injection.openConcerns,
-				fixedConcerns: injection.fixedConcerns,
-				rebuttedConcerns: injection.rebuttedConcerns,
-				concernHistoryChars: injection.concernHistoryChars,
-				attempts,
-				// More total attempts than distinct models means at least one model had
-				// a same-model retry before success/failover.
-				retried: attempts > modelsAttempted.length,
-				modelsAttempted,
-				failoverUsed: result.failoverUsed,
-				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
-			});
-			return result;
-		} catch (error) {
-			await recordConsultation({
-				source: args.source,
-				stance: args.stance,
-				// Aborted background reviews (session shutdown/switch) are not failures.
-				outcome:
-					args.source === "watchdog" && signal?.aborted ? "discarded" : "error",
-				model: modelsAttempted.at(-1) ?? primaryModel,
-				totalMs: Date.now() - startedAt,
-				trigger: args.trigger,
-				attempts,
-				// More total attempts than distinct models means at least one model had
-				// a same-model retry before all candidates failed.
-				retried: attempts > modelsAttempted.length,
-				modelsAttempted,
-				failoverUsed: modelsAttempted.length > 1,
-				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
-				error: errorToString(error),
-			});
-			throw error;
-		} finally {
-			args.ctx.ui.setStatus(statusKey, undefined);
-		}
-	}
-
-	// --- Detached background review (watchdog + end-of-run) ---
-
-	function watchdogCandidateText(candidate: WatchdogCandidate): string {
-		if (candidate.evidence.length === 0) return candidate.advisory;
-		return [
-			candidate.advisory,
-			"",
-			"Current evidence:",
-			...candidate.evidence.map((entry) => `- ${entry}`),
-		].join("\n");
-	}
-
-	type InitialWatchdogVerdict = Extract<
-		WatchdogVerdict,
-		{ decision: "pass" | "concern" }
-	>;
-	type RevalidationWatchdogVerdict = Extract<
-		WatchdogVerdict,
-		{ decision: "resolved" | "confirm" | "replace" }
-	>;
-
-	function requireInitialVerdict(result: ConsultResult): InitialWatchdogVerdict {
-		const verdict = result.watchdogVerdict;
-		if (!verdict || (verdict.decision !== "pass" && verdict.decision !== "concern")) {
-			throw new Error(
-				"Buddy watchdog did not submit a valid structured review verdict",
-			);
-		}
-		return verdict as InitialWatchdogVerdict;
-	}
-
-	function requireRevalidationVerdict(
-		result: ConsultResult,
-	): RevalidationWatchdogVerdict {
-		const verdict = result.watchdogVerdict;
-		if (
-			!verdict ||
-			(verdict.decision !== "resolved" &&
-				verdict.decision !== "confirm" &&
-				verdict.decision !== "replace")
-		) {
-			throw new Error(
-				"Buddy watchdog did not submit a valid structured revalidation verdict",
-			);
-		}
-		return verdict as RevalidationWatchdogVerdict;
-	}
-
-	async function commitPendingReview(ctx: ExtensionContext): Promise<void> {
-		if (!buddyEnabled || !watchdogCoordinator.hasPending) return;
-		const controller = new AbortController();
-		backgroundAbort = controller;
-		let attemptedTrigger: BackgroundTrigger | undefined;
-		let attemptedCandidate: WatchdogCandidate | undefined;
-		let attemptedSnapshot: WatchdogSnapshot | undefined;
-		let attemptedRevalidationCount = 0;
-		const publish = (
-			candidate: WatchdogCandidate,
-			snapshot: WatchdogSnapshot,
-			revalidationCount: number,
-		): void => {
-			const deliveredAt = new Date().toISOString();
-			pi.sendMessage(
-				{
-					customType: BUDDY_REVIEW_TYPE,
-					content: formatBuddyAdvisory(
-						candidate.trigger,
-						candidate.id,
-						watchdogCandidateText(candidate),
-					),
-					display: true,
-						details: {
-							activity: candidate.activity,
-							source: "watchdog",
-							trigger: candidate.trigger,
-							concernId: candidate.id,
-						headline: candidate.headline,
-						deliveredAt,
-						reviewedRevision: candidate.reviewedRevision,
-						validatedRevision: snapshot.revision,
-						revalidationCount,
-					},
-				},
-				{ deliverAs: tracker.deliveryMode() },
-			);
-			recordVerdict(candidate.trigger, `concern delivered: #${candidate.id}`);
-			concernHistory.record({
-				id: candidate.id,
-				trigger: candidate.trigger,
-				headline: candidate.headline,
-				deliveredAt,
-			});
-		};
-		try {
-			const result = await watchdogCoordinator.commit(
-				ctx.sessionManager.getBranch(),
-				async (candidate, snapshot, revalidationCount) => {
-					attemptedTrigger = candidate.trigger;
-					attemptedCandidate = candidate;
-					attemptedSnapshot = snapshot;
-					attemptedRevalidationCount = revalidationCount;
-					const revalidation = await runConsultation({
-						ctx,
-						systemPrompt: buildWatchdogRevalidationSystemPrompt(),
-						requestText: [
-							"Revalidate this private watchdog candidate against the CURRENT transcript:",
-							`Candidate #${candidate.id} (${candidate.trigger})`,
-							`Originally reviewed at activity revision ${candidate.reviewedRevision}.`,
-							`Current commit snapshot revision: ${snapshot.revision}.`,
-							"",
-							watchdogCandidateText(candidate),
-						].join("\n"),
-						source: "watchdog",
-						stance: "watchdog-revalidation",
-						signal: controller.signal,
-						statusKey: BG_STATUS_KEY,
-						trigger: candidate.trigger,
-						entries: snapshot.entries,
-						extraTools: watchdogTools,
-						outcomeOf: (review) =>
-							requireRevalidationVerdict(review).decision === "resolved"
-								? "resolved"
-								: "concern",
-						extraTelemetry: () => ({
-							concernId: candidate.id,
-							reviewPhase: "revalidation",
-							reviewRevision: candidate.reviewedRevision,
-							revalidationRevision: snapshot.revision,
-							revalidationCount,
-						}),
-					});
-					const verdict = requireRevalidationVerdict(revalidation);
-					if (verdict.decision === "resolved") {
-						return { decision: "resolved" };
-					}
-					return {
-						decision: verdict.decision,
-						candidate: {
-							...candidate,
-							headline: verdict.headline,
-							advisory: verdict.advisory,
-							evidence: verdict.evidence,
-							activity: [...candidate.activity, ...revalidation.activity],
-						},
-					};
-				},
-				publish,
-			);
-
-			if (result.status === "suppressed") {
-				if (attemptedCandidate) {
-					await recordWatchdogCommit({
-						trigger: attemptedCandidate.trigger,
-						concernId: attemptedCandidate.id,
-						outcome: "resolved",
-						reviewRevision: attemptedCandidate.reviewedRevision,
-						commitRevision: result.snapshot.revision,
-						revalidationCount: result.revalidationCount,
-					});
-				}
-				recordVerdict(
-					attemptedTrigger ?? "turns",
-					"resolved before delivery",
-				);
-				return;
-			}
-			if (result.status !== "deliver") {
-				if (
-					result.status === "deferred" &&
-					result.reason === "activity" &&
-					attemptedCandidate &&
-					attemptedSnapshot
-				) {
-					await recordWatchdogCommit({
-						trigger: attemptedCandidate.trigger,
-						concernId: attemptedCandidate.id,
-						outcome: "deferred",
-						reason: "activity",
-						reviewRevision: attemptedCandidate.reviewedRevision,
-						commitRevision: attemptedSnapshot.revision,
-						revalidationCount: attemptedRevalidationCount,
-					});
-				}
-				return;
-			}
-
-			const candidate = result.candidate;
-			await recordWatchdogCommit({
-				trigger: candidate.trigger,
-				concernId: candidate.id,
-				outcome: "delivered",
-				reviewRevision: candidate.reviewedRevision,
-				commitRevision: result.snapshot.revision,
-				revalidationCount: result.revalidationCount,
-			});
-		} catch (error) {
-			if (attemptedCandidate && attemptedSnapshot) {
-				await recordWatchdogCommit({
-					trigger: attemptedCandidate.trigger,
-					concernId: attemptedCandidate.id,
-					outcome: "deferred",
-					reason: "error",
-					reviewRevision: attemptedCandidate.reviewedRevision,
-					commitRevision: attemptedSnapshot.revision,
-					revalidationCount: attemptedRevalidationCount,
-				});
-			}
-			if (!controller.signal.aborted && ctx.hasUI) {
-				ctx.ui.notify(
-					`Buddy watchdog revalidation deferred: ${errorToString(error)}`,
-					"warning",
-				);
-			}
-		} finally {
-			if (backgroundAbort === controller) backgroundAbort = undefined;
-		}
-	}
-
-	function launchBackgroundReview(
-		trigger: BackgroundTrigger,
-		ctx: ExtensionContext,
-	): void {
-		if (!buddyEnabled) return;
-		const launch = tracker.launchBackground(trigger);
-		const reviewSnapshot = watchdogCoordinator.capture(
-			ctx.sessionManager.getBranch(),
-		);
-		const reviewId = `wd-${randomUUID().slice(0, 12)}`;
-		const controller = new AbortController();
-		backgroundAbort = controller;
-
-		const requestText =
-			trigger === "turns"
-				? `Automatic watchdog check-in: the agent has completed ` +
-					`${launch.watchdogThreshold} turns without consulting you. Review ` +
-					`the supplied snapshot and submit a structured verdict.`
-				: `Automatic end-of-run review: the agent has finished its run ` +
-					`without consulting you. Review this run and submit a structured verdict.`;
-
-		// Set once by runConsultation's telemetry outcome hook; re-derived below if absent.
-		let recordedOutcome: BuddyOutcome | undefined;
-		const automaticOutcome = (result: ConsultResult): BuddyOutcome => {
-			if (!tracker.isCurrent(launch)) return "discarded";
-			return requireInitialVerdict(result).decision === "pass"
-				? "pass"
-				: "concern";
-		};
-		const recordAutomaticOutcome = (result: ConsultResult): BuddyOutcome => {
-			recordedOutcome = automaticOutcome(result);
-			return recordedOutcome;
-		};
-
-		// Fire-and-forget: the agent keeps working while the buddy investigates.
-		void (async () => {
-			try {
-				const result = await runConsultation({
-					ctx,
-					systemPrompt: buildWatchdogSystemPrompt(),
-					requestText,
-					source: "watchdog",
-					stance: "watchdog",
-					signal: controller.signal,
-					statusKey: BG_STATUS_KEY,
-					trigger,
-					entries: reviewSnapshot.entries,
-					extraTools: watchdogTools,
-					outcomeOf: (r) => recordAutomaticOutcome(r),
-					extraTelemetry: () => ({
-						turnsElapsed: tracker.turnsElapsedSince(launch),
-						reviewPhase: "review",
-						reviewRevision: reviewSnapshot.revision,
-						concernId:
-							recordedOutcome === "concern" ? reviewId : undefined,
-					}),
-				});
-				// Session was replaced/forked while we investigated: drop the verdict.
-				if (!tracker.isCurrent(launch)) return;
-				const outcome = recordedOutcome ?? automaticOutcome(result);
-				if (outcome === "pass") {
-					recordVerdict(trigger, "PASS");
-					return;
-				}
-				const verdict = requireInitialVerdict(result);
-				if (verdict.decision !== "concern") return;
-				const staged = watchdogCoordinator.stage(reviewSnapshot, {
-					id: reviewId,
-					trigger,
-					headline: verdict.headline,
-					advisory: verdict.advisory,
-					evidence: verdict.evidence,
-					activity: result.activity,
-					reviewedRevision: reviewSnapshot.revision,
-				});
-				if (!staged) return;
-				recordVerdict(trigger, `candidate staged: #${reviewId}`);
-				if (ctx.isIdle()) await commitPendingReview(ctx);
-			} catch (error) {
-				// Background review is best-effort: never surface as a failure,
-				// telemetry already recorded it. Notify only if the session is live.
-				if (tracker.isCurrent(launch) && !controller.signal.aborted) {
-					ctx.ui.notify(
-						isRetriableBuddyError(error)
-							? formatRetriableBuddyFailure()
-							: `Buddy background review failed: ${errorToString(error)}`,
-						"warning",
-					);
-				}
-			} finally {
-				tracker.settleBackground();
-				if (backgroundAbort === controller) backgroundAbort = undefined;
-			}
-		})();
 	}
 
 	// --- The consult_buddy tool (agent-requested consult) ---
@@ -1004,13 +256,13 @@ export default function setup(pi: ExtensionAPI): void {
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
-			if (!buddyEnabled) {
+			if (!session.enabled) {
 				throw new Error(DISABLED_MESSAGE);
 			}
-			tracker.onPull();
+			automaticReview.onConsultationRequested();
 			const stance = params.stance as Stance;
 			const activity: string[] = [];
-			const result = await runConsultation({
+			const result = await consultationWorkflow.run({
 				ctx,
 				systemPrompt: appendSkillsToBuddyPrompt(
 					buildStanceSystemPrompt(stance),
@@ -1137,7 +389,7 @@ export default function setup(pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (!buddyEnabled) {
+			if (!session.enabled) {
 				throw new Error(DISABLED_MESSAGE);
 			}
 			const feedback = params.feedback as BuddyFeedback;
@@ -1154,7 +406,7 @@ export default function setup(pi: ExtensionAPI): void {
 				throw new Error("A concrete reason is required to mark a concern");
 			}
 			const concernUpdate = concernDisposition
-				? concernHistory.mark({
+				? automaticReview.markConcern({
 						id: concernId || undefined,
 						disposition: concernDisposition,
 						reason,
@@ -1169,16 +421,7 @@ export default function setup(pi: ExtensionAPI): void {
 							: `Buddy concern #${concernId} is already closed`;
 				throw new Error(message);
 			}
-			const result = applyBuddyFeedback(advisoryLevel, feedback);
-			advisoryLevel = result.newLevel;
-			if (feedback !== "same") {
-				calibrationNote = {
-					feedback,
-					reason: reason || undefined,
-					level: result.newLevel,
-					watchdogThreshold: result.watchdogThreshold,
-				};
-			}
+			const result = session.applyFeedback(feedback, reason || undefined);
 			const updatedConcern = concernUpdate?.ok
 				? concernUpdate.concern
 				: undefined;
@@ -1256,13 +499,13 @@ export default function setup(pi: ExtensionAPI): void {
 			const parsed = parseBuddyCommand(args);
 			if (parsed.kind === "control") {
 				if (parsed.action === "status") {
-					notify(ctx, `Buddy is ${buddyEnabled ? "on" : "off"}.`);
+					notify(ctx, `Buddy is ${session.enabled ? "on" : "off"}.`);
 					return;
 				}
 				setBuddyEnabled(parsed.action === "on", ctx);
 				return;
 			}
-			if (!buddyEnabled) {
+			if (!session.enabled) {
 				if (ctx.hasUI) ctx.ui.notify(DISABLED_MESSAGE, "warning");
 				return;
 			}
@@ -1273,9 +516,9 @@ export default function setup(pi: ExtensionAPI): void {
 					"";
 			}
 			if (!question) return;
-			tracker.onPull();
+			automaticReview.onConsultationRequested();
 			try {
-				const result = await runConsultation({
+				const result = await consultationWorkflow.run({
 					ctx,
 					systemPrompt: appendSkillsToBuddyPrompt(
 						buildStanceSystemPrompt("discuss"),
@@ -1302,7 +545,9 @@ export default function setup(pi: ExtensionAPI): void {
 						failoverUsed: result.failoverUsed,
 					},
 				};
-				if (commandConsultDelivery(tracker.deliveryMode()) === "immediate") {
+				if (
+					commandConsultDelivery(automaticReview.deliveryMode()) === "immediate"
+				) {
 					pi.sendMessage(message);
 				} else {
 					pi.sendMessage(message, { deliverAs: "nextTurn" });
@@ -1329,7 +574,7 @@ export default function setup(pi: ExtensionAPI): void {
 					}
 					return;
 				}
-				const cleared = memoryStore.clear(scope, slug);
+				const cleared = session.memory.clear(scope, slug);
 				if (ctx.hasUI) {
 					ctx.ui.notify(
 						cleared
@@ -1342,10 +587,10 @@ export default function setup(pi: ExtensionAPI): void {
 			}
 			const sections: string[] = [];
 			for (const [label, file] of [
-				["Global", memoryStore.globalPath()],
-				["Project", memoryStore.projectPath(slug)],
+				["Global", session.memory.globalPath()],
+				["Project", session.memory.projectPath(slug)],
 			] as const) {
-				const lines = memoryStore.readLines(file);
+				const lines = session.memory.readLines(file);
 				sections.push(`${label} (${file}):`);
 				if (lines.length === 0) {
 					sections.push("  (empty)");
@@ -1373,50 +618,41 @@ export default function setup(pi: ExtensionAPI): void {
 	// --- Automatic triggers ---
 
 	pi.on("session_start", async (_event, ctx) => {
-		abortBackgroundReview();
-		runEndReviewPending = false;
-		memoryCuratedThisSession = false;
+		automaticReview.restoreSession(ctx.sessionManager.getBranch());
+		session.resetForSession();
 		currentSkills = [];
-		verdictRing.length = 0;
-		rebuildConcernHistory(ctx.sessionManager.getBranch(), concernHistory);
-		configWarningsShown.clear();
-		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
-		calibrationNote = undefined;
 		await initializeBuddySwitch(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		abortBackgroundReview();
-		runEndReviewPending = false;
-		verdictRing.length = 0;
-		rebuildConcernHistory(ctx.sessionManager.getBranch(), concernHistory);
+		automaticReview.restoreTree(ctx.sessionManager.getBranch());
 	});
 
 	// Every main-session mutation advances the optimistic commit token. A
 	// revalidation that overlaps any of these events is discarded and retried at
 	// the next stable boundary.
 	pi.on("input", () => {
-		watchdogCoordinator.noteActivity();
+		automaticReview.noteActivity();
 	});
 
 	pi.on("turn_start", () => {
-		watchdogCoordinator.noteActivity();
+		automaticReview.noteActivity();
 	});
 
 	pi.on("message_end", () => {
-		watchdogCoordinator.noteActivity();
+		automaticReview.noteActivity();
 	});
 
 	pi.on("tool_execution_start", (event) => {
-		watchdogCoordinator.toolStarted(event.toolCallId);
+		automaticReview.toolStarted(event.toolCallId);
 	});
 
 	pi.on("tool_execution_end", (event) => {
-		watchdogCoordinator.toolEnded(event.toolCallId);
+		automaticReview.toolEnded(event.toolCallId);
 	});
 
 	pi.on("user_bash", () => {
-		watchdogCoordinator.noteActivity();
+		automaticReview.noteActivity();
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -1424,59 +660,34 @@ export default function setup(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_start", async () => {
-		runEndReviewPending = false;
-		tracker.onAgentStart();
+		automaticReview.agentStarted();
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
-		if (!buddyEnabled) return;
-		await commitPendingReview(ctx);
-		// Unlike agent_end, no hasUI guard: turn-cadence reviews deliver via
-		// pi.sendMessage steering, which reaches the agent loop even without
-		// a UI. Headless delegate workers are excluded upstream by
-		// --no-extensions, not here.
-		if (tracker.onTurnEnd() && !watchdogCoordinator.hasPending) {
-			launchBackgroundReview("turns", ctx);
-		}
+		await automaticReview.turnEnded(ctx);
 	});
 
 	pi.on("agent_end", async () => {
-		runEndReviewPending = tracker.onAgentEnd();
+		automaticReview.agentEnded();
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		await commitPendingReview(ctx);
-		const shouldReview = runEndReviewPending;
-		runEndReviewPending = false;
-		if (!buddyEnabled) return;
-		// In print/json mode the process exits right after the run, so a
-		// run-end review would always be aborted mid-flight — telemetry showed
-		// only instant 'discarded' records. hasUI is false exactly in those
-		// modes; don't launch a doomed consultation there.
-		if (shouldReview && ctx.hasUI && !watchdogCoordinator.hasPending) {
-			launchBackgroundReview("run_end", ctx);
-		}
+		await automaticReview.agentSettled(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		abortBackgroundReview();
-		runEndReviewPending = false;
-		memoryCuratedThisSession = false;
-		verdictRing.length = 0;
-		concernHistory.clear();
-		configWarningsShown.clear();
-		advisoryLevel = DEFAULT_ADVISORY_LEVEL;
-		calibrationNote = undefined;
+		automaticReview.shutdown();
+		session.resetForShutdown();
 		if (ctx.hasUI) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 			ctx.ui.setStatus(BG_STATUS_KEY, undefined);
 			ctx.ui.setStatus(MODEL_STATUS_KEY, undefined);
 		}
-		if (browserUsed) {
+		if (session.shouldCloseBrowser) {
 			await closeBuddyBrowser((command, args, options) =>
 				pi.exec(command, args, options),
 			);
-			browserUsed = false;
+			session.markBrowserClosed();
 		}
 	});
 

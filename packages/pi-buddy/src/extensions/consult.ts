@@ -21,11 +21,11 @@ import {
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ModelRegistry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
-	type BuddyTool,
 	createBuddyTools,
 	describeToolCall,
 	executeBuddyToolCall,
 } from "./buddy-tools.js";
+import type { BuddyTool } from "./buddy-tool.js";
 import {
 	branchToBlocks,
 	estimateTokens,
@@ -37,6 +37,9 @@ import {
 	WATCHDOG_VERDICT_TOOL,
 	type WatchdogVerdict,
 } from "./watchdog-verdict.js";
+import { coercePositiveTokens } from "./token-policy.js";
+
+export { coercePositiveTokens } from "./token-policy.js";
 
 /** Cap on tool-loop rounds before the buddy is forced to answer. */
 const MAX_TOOL_ROUNDS = 10;
@@ -164,19 +167,6 @@ export function appendSoftTarget(
 	const target = softTargetLine?.trim();
 	if (!target) return requestText;
 	return `${requestText}\n\n${target}`;
-}
-
-/**
- * Coerces a caller/config-supplied token count to a positive integer, or
- * `undefined` when it is not a usable positive finite number. Shared by every
- * place that turns a cap into a pi-ai `maxTokens` (consultBuddy options, the
- * truncation note, and output-control's resolveMaxTokens) so the
- * "positive finite -> floor, else drop" rule lives in one spot.
- */
-export function coercePositiveTokens(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value > 0
-		? Math.floor(value)
-		: undefined;
 }
 
 /**

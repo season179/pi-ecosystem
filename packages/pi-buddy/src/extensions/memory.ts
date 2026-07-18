@@ -34,6 +34,21 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import type {
+	ApplyResult,
+	BuddyMemory,
+	MemoryLine,
+	MemoryScope,
+	ScopedLesson,
+} from "./memory-contract.js";
+
+export type {
+	ApplyResult,
+	BuddyMemory,
+	MemoryLine,
+	MemoryScope,
+	ScopedLesson,
+} from "./memory-contract.js";
 
 /** Per-file character budget (hermes-style char caps, not tokens). */
 export const MEMORY_FILE_BUDGET = 2000;
@@ -43,12 +58,6 @@ export const EXPIRY_DAYS = 90;
 export const MAX_BAKS = 3;
 /** Advisory lock is considered stale after this. */
 export const LOCK_STALE_MS = 5000;
-
-export type MemoryScope = "global" | "project";
-
-export type MemoryLine =
-	| { kind: "entry"; date: string; text: string }
-	| { kind: "raw"; line: string };
 
 // --- Pure: slug derivation ---
 
@@ -189,18 +198,7 @@ export function retractEntry(
 
 // --- Fs wrapper ---
 
-export interface ApplyResult {
-	lessons: number;
-	retractions: number;
-	retractMisses: number;
-}
-
-export interface ScopedLesson {
-	scope: MemoryScope;
-	text: string;
-}
-
-export class MemoryStore {
+export class MemoryStore implements BuddyMemory {
 	constructor(
 		readonly baseDir: string = join(
 			homedir(),

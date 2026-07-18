@@ -10,7 +10,7 @@
  */
 
 import { Type } from "typebox";
-import type { BuddyTool } from "./buddy-tools.js";
+import type { BuddyTool } from "./buddy-tool.js";
 
 /** Head-truncation cap for web tool output (chars ~ bytes for ASCII). */
 export const WEB_OUTPUT_LIMIT = 50_000;
