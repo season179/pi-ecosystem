@@ -29,6 +29,17 @@ const PHASE_DECISIONS: Record<WatchdogPhase, readonly string[]> = {
 	revalidation: ["resolved", "confirm", "replace"],
 };
 
+/**
+ * Decisions that must carry headline/advisory/evidence. Mirrors the
+ * WatchdogConcernFields members of the WatchdogVerdict union — keep the two
+ * in sync when adding a decision kind.
+ */
+const CONCERN_FIELD_DECISIONS: readonly string[] = [
+	"concern",
+	"confirm",
+	"replace",
+];
+
 const PHASE_GUIDANCE: Record<WatchdogPhase, string> = {
 	review:
 		'Use "pass" when there is no real unresolved problem, or "concern" ' +
@@ -59,23 +70,13 @@ const PHASE_GUIDANCE: Record<WatchdogPhase, string> = {
  * in-loop.
  */
 function verdictParametersFor(phase: WatchdogPhase) {
-	const decision =
-		phase === "review"
-			? Type.Union([Type.Literal("pass"), Type.Literal("concern")], {
-					description: `The watchdog decision kind. ${PHASE_GUIDANCE.review}`,
-				})
-			: Type.Union(
-					[
-						Type.Literal("resolved"),
-						Type.Literal("confirm"),
-						Type.Literal("replace"),
-					],
-					{
-						description: `The watchdog decision kind. ${PHASE_GUIDANCE.revalidation}`,
-					},
-				);
 	return Type.Object({
-		decision,
+		decision: Type.Union(
+			PHASE_DECISIONS[phase].map((decision) => Type.Literal(decision)),
+			{
+				description: `The watchdog decision kind. ${PHASE_GUIDANCE[phase]}`,
+			},
+		),
 		headline: Type.Optional(
 			Type.String({
 				description:
@@ -101,9 +102,9 @@ export function createWatchdogVerdictTool(phase: WatchdogPhase): BuddyTool {
 	return {
 		name: WATCHDOG_VERDICT_TOOL,
 		description:
-		`Submit the final structured watchdog decision: ${PHASE_DECISIONS[phase]
-			.map((decision) => `"${decision}"`)
-			.join(", ")}. This must be your final action.`,
+			`Submit the final structured watchdog decision: ${PHASE_DECISIONS[phase]
+				.map((decision) => `"${decision}"`)
+				.join(", ")}. This must be your final action.`,
 		parameters: verdictParametersFor(phase),
 		async execute(_toolCallId, params) {
 			const verdict = params as {
@@ -127,7 +128,7 @@ export function createWatchdogVerdictTool(phase: WatchdogPhase): BuddyTool {
 						`${PHASE_GUIDANCE[phase]} Submit again with a valid decision.`,
 				);
 			}
-			if (decision !== "pass" && decision !== "resolved") {
+			if (CONCERN_FIELD_DECISIONS.includes(decision)) {
 				const missing: string[] = [];
 				if (typeof verdict.headline !== "string") missing.push("headline");
 				if (typeof verdict.advisory !== "string") missing.push("advisory");

@@ -420,6 +420,87 @@ describe("structured watchdog verdict", () => {
 		assert.equal(extractWatchdogVerdict([result]), undefined);
 	});
 
+	// pi-ai's validateToolArguments coerces near-miss arguments (TypeBox
+	// Convert semantics): a bare string becomes a one-element evidence array,
+	// numbers become strings. That repair is what lets weak models' sloppy
+	// shapes through — lock it in as intended. Uncoercible shapes still fail
+	// schema validation; missing fields fail at execute() time.
+	it("repairs coercible evidence shapes instead of rejecting them", async () => {
+		for (const [evidence, expected] of [
+			["npm test exited 1", ["npm test exited 1"]],
+			[[1, 2, 3], ["1", "2", "3"]],
+		] as const) {
+			const result = await executeBuddyToolCall(
+				[createWatchdogVerdictTool("review")],
+				{
+					type: "toolCall",
+					id: "verdict-evidence",
+					name: WATCHDOG_VERDICT_TOOL,
+					arguments: {
+						decision: "concern",
+						headline: "Tests are failing",
+						advisory: "The suite fails in save.test.ts.",
+						evidence,
+					},
+				},
+			);
+			assert.equal(result.isError, false);
+			assert.deepEqual(extractWatchdogVerdict([result]), {
+				decision: "concern",
+				headline: "Tests are failing",
+				advisory: "The suite fails in save.test.ts.",
+				evidence: expected,
+			});
+		}
+	});
+
+	it("rejects uncoercible evidence as a tool error naming the field", async () => {
+		const result = await executeBuddyToolCall(
+			[createWatchdogVerdictTool("review")],
+			{
+				type: "toolCall",
+				id: "verdict-evidence-bad",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: {
+					decision: "concern",
+					headline: "Tests are failing",
+					advisory: "The suite fails in save.test.ts.",
+					evidence: [{ file: "save.test.ts" }],
+				},
+			},
+		);
+		assert.equal(result.isError, true);
+		const text = (result.content[0] as { text: string }).text;
+		assert.match(text, /evidence/);
+		assert.equal(extractWatchdogVerdict([result]), undefined);
+	});
+
+	it("execute() enforces the phase contract for callers that skip schema validation", async () => {
+		const tool = createWatchdogVerdictTool("review");
+		await assert.rejects(
+			tool.execute("verdict-direct", {
+				decision: "confirm",
+				headline: "Still broken",
+				advisory: "Keep the test.",
+				evidence: ["src/example.ts:10"],
+			}),
+			/review phase/,
+		);
+		await assert.rejects(
+			tool.execute("verdict-direct", { decision: "concern" }),
+			/headline, advisory, evidence/,
+		);
+		await assert.rejects(
+			tool.execute("verdict-direct", {
+				decision: "concern",
+				headline: "Tests are failing",
+				advisory: "The suite fails.",
+				evidence: [{ file: "save.test.ts" }],
+			}),
+			/evidence/,
+		);
+	});
+
 	it("accepts a complete revalidation verdict", async () => {
 		const result = await executeBuddyToolCall(
 			[createWatchdogVerdictTool("revalidation")],
