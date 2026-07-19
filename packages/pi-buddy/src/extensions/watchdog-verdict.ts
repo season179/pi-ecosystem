@@ -17,30 +17,55 @@ export type WatchdogVerdict =
 	| ({ decision: "confirm" } & WatchdogConcernFields)
 	| ({ decision: "replace" } & WatchdogConcernFields);
 
-const concernShape = (decision: "concern" | "confirm" | "replace") =>
-	Type.Object({
-		decision: Type.Literal(decision),
-		headline: Type.String({ description: "One-line actionable headline" }),
-		advisory: Type.String({
-			description: "Concise current-state recommendation and evidence",
+/**
+ * Verdict-tool parameters.
+ *
+ * Deliberately a FLAT object, not a top-level union of per-decision shapes.
+ * A top-level `anyOf`/`oneOf` schema breaks weaker tool-callers — notably
+ * zai/glm-5.2, which calls the tool but emits empty arguments `{}` against a
+ * union schema (verified live: 6/6 empty args → 6/6 valid once flattened).
+ * `decision` stays a nested enum; `headline`/`advisory`/`evidence` are schema-
+ * optional because a "pass"/"resolved" verdict needs none of them, and
+ * `isWatchdogVerdict` enforces the conditional requirement for
+ * concern/confirm/replace at runtime.
+ */
+const verdictParameters = Type.Object({
+	decision: Type.Union(
+		[
+			Type.Literal("pass"),
+			Type.Literal("concern"),
+			Type.Literal("resolved"),
+			Type.Literal("confirm"),
+			Type.Literal("replace"),
+		],
+		{ description: "The watchdog decision kind." },
+	),
+	headline: Type.Optional(
+		Type.String({
+			description:
+				"Required for concern/confirm/replace. One-line actionable headline.",
 		}),
-		evidence: Type.Array(Type.String(), {
-			description: "Concrete current transcript or repository evidence",
+	),
+	advisory: Type.Optional(
+		Type.String({
+			description:
+				"Required for concern/confirm/replace. Concise current-state recommendation and evidence.",
 		}),
-	});
+	),
+	evidence: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Required for concern/confirm/replace. Concrete current transcript or repository evidence.",
+		}),
+	),
+});
 
 export function createWatchdogVerdictTool(): BuddyTool {
 	return {
 		name: WATCHDOG_VERDICT_TOOL,
 		description:
 			"Submit the final structured watchdog decision. This must be your final action.",
-		parameters: Type.Union([
-			Type.Object({ decision: Type.Literal("pass") }),
-			concernShape("concern"),
-			Type.Object({ decision: Type.Literal("resolved") }),
-			concernShape("confirm"),
-			concernShape("replace"),
-		]),
+		parameters: verdictParameters,
 		async execute(_toolCallId, params) {
 			const verdict = params as WatchdogVerdict;
 			return {

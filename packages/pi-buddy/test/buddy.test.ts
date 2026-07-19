@@ -69,6 +69,7 @@ import { WatchdogCoordinator } from "../src/extensions/watchdog-coordinator.js";
 import {
 	createWatchdogVerdictTool,
 	extractWatchdogVerdict,
+	isWatchdogVerdict,
 	WATCHDOG_VERDICT_TOOL,
 } from "../src/extensions/watchdog-verdict.js";
 import { executeBuddyToolCall } from "../src/extensions/buddy-tools.js";
@@ -324,6 +325,40 @@ describe("structured watchdog verdict", () => {
 			evidence: ["npm test exited 1"],
 		});
 		assert.deepEqual(extractWatchdogVerdict([result]), result.details);
+	});
+
+	// Regression for the 07-18 watchdog outage: the verdict tool's parameters
+	// used to be a top-level union (anyOf of per-decision shapes). zai/glm-5.2
+	// called the tool but emitted empty args `{}` against that schema (100% of
+	// runs), producing "no valid structured watchdog verdict" errors. A flat
+	// object schema is what weaker tool-callers can populate — keep it that way.
+	it("keeps the verdict-tool schema a flat object, not a top-level union", () => {
+		const params = createWatchdogVerdictTool().parameters as Record<string, unknown>;
+		assert.equal(params.type, "object");
+		assert.equal(params.anyOf, undefined);
+		assert.equal(params.oneOf, undefined);
+		assert.deepEqual(params.required, ["decision"]);
+		const properties = params.properties as Record<string, unknown>;
+		assert.ok(properties.decision, "decision property");
+		assert.ok(properties.headline, "headline property");
+		assert.ok(properties.advisory, "advisory property");
+		assert.ok(properties.evidence, "evidence property");
+	});
+
+	it("rejects the empty-args verdict glm-5.2 used to emit, and incomplete concerns", () => {
+		assert.equal(isWatchdogVerdict({}), false);
+		assert.equal(isWatchdogVerdict({ decision: "pass" }), true);
+		assert.equal(isWatchdogVerdict({ decision: "resolved" }), true);
+		assert.equal(isWatchdogVerdict({ decision: "concern" }), false);
+		assert.equal(
+			isWatchdogVerdict({
+				decision: "concern",
+				headline: "Tests are failing",
+				advisory: "The suite fails in save.test.ts.",
+				evidence: ["npm test exited 1"],
+			}),
+			true,
+		);
 	});
 });
 
