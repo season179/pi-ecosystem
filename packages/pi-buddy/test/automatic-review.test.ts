@@ -57,6 +57,8 @@ describe("AutomaticReview", () => {
 				return result;
 			},
 		} as any;
+		const reviewTools: any[] = [];
+		const revalidationTools: any[] = [];
 		const review = new AutomaticReview({
 			host: {
 				sendMessage(message: any, options: any) {
@@ -64,7 +66,8 @@ describe("AutomaticReview", () => {
 				},
 			} as any,
 			consultation,
-			tools: [],
+			tools: reviewTools,
+			revalidationTools,
 			getWatchdogThreshold: () => 1,
 			isEnabled: () => true,
 			reviewMessageType: "buddy-review",
@@ -85,6 +88,8 @@ describe("AutomaticReview", () => {
 		assert.equal(calls.length, 2);
 		assert.equal(calls[0].stance, "watchdog");
 		assert.equal(calls[1].stance, "watchdog-revalidation");
+		assert.equal(calls[0].extraTools, reviewTools);
+		assert.equal(calls[1].extraTools, revalidationTools);
 		assert.equal(sent[0].message.customType, "buddy-review");
 		assert.equal(sent[0].message.details.concernId, "wd-test");
 		assert.equal(sent[0].message.details.revalidationCount, 1);
@@ -131,6 +136,7 @@ describe("AutomaticReview", () => {
 				},
 			} as any,
 			tools: [],
+			revalidationTools: [],
 			getWatchdogThreshold: () => 1,
 			isEnabled: () => true,
 			reviewMessageType: "buddy-review",
@@ -190,6 +196,7 @@ describe("AutomaticReview", () => {
 				},
 			} as any,
 			tools: [],
+			revalidationTools: [],
 			getWatchdogThreshold: () => 1,
 			isEnabled: () => true,
 			reviewMessageType: "buddy-review",

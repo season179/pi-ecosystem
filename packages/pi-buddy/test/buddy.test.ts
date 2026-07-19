@@ -304,7 +304,7 @@ describe("WatchdogCoordinator", () => {
 describe("structured watchdog verdict", () => {
 	it("returns a typed concern instead of relying on prose markers", async () => {
 		const result = await executeBuddyToolCall(
-			[createWatchdogVerdictTool()],
+			[createWatchdogVerdictTool("review")],
 			{
 				type: "toolCall",
 				id: "verdict-1",
@@ -333,16 +333,115 @@ describe("structured watchdog verdict", () => {
 	// runs), producing "no valid structured watchdog verdict" errors. A flat
 	// object schema is what weaker tool-callers can populate — keep it that way.
 	it("keeps the verdict-tool schema a flat object, not a top-level union", () => {
-		const params = createWatchdogVerdictTool().parameters as Record<string, unknown>;
-		assert.equal(params.type, "object");
-		assert.equal(params.anyOf, undefined);
-		assert.equal(params.oneOf, undefined);
-		assert.deepEqual(params.required, ["decision"]);
-		const properties = params.properties as Record<string, unknown>;
-		assert.ok(properties.decision, "decision property");
-		assert.ok(properties.headline, "headline property");
-		assert.ok(properties.advisory, "advisory property");
-		assert.ok(properties.evidence, "evidence property");
+		for (const phase of ["review", "revalidation"] as const) {
+			const params = createWatchdogVerdictTool(phase).parameters as Record<
+				string,
+				unknown
+			>;
+			assert.equal(params.type, "object");
+			assert.equal(params.anyOf, undefined);
+			assert.equal(params.oneOf, undefined);
+			assert.deepEqual(params.required, ["decision"]);
+			const properties = params.properties as Record<string, unknown>;
+			assert.ok(properties.decision, "decision property");
+			assert.ok(properties.headline, "headline property");
+			assert.ok(properties.advisory, "advisory property");
+			assert.ok(properties.evidence, "evidence property");
+		}
+	});
+
+	// Regression for the 07-19 post-fix failures: with all five decisions in
+	// one enum, glm-5.2 submitted valid-but-out-of-phase verdicts (e.g.
+	// "confirm" during the initial review), which requireInitialVerdict had to
+	// reject. Scope each phase's enum so the schema itself rejects them.
+	it("scopes the decision enum to the watchdog phase", () => {
+		const decisionConsts = (phase: "review" | "revalidation") => {
+			const params = createWatchdogVerdictTool(phase).parameters as Record<
+				string,
+				any
+			>;
+			return params.properties.decision.anyOf.map(
+				(entry: { const: string }) => entry.const,
+			);
+		};
+		assert.deepEqual(decisionConsts("review"), ["pass", "concern"]);
+		assert.deepEqual(decisionConsts("revalidation"), [
+			"resolved",
+			"confirm",
+			"replace",
+		]);
+	});
+
+	it("rejects out-of-phase decisions as tool errors the model can correct", async () => {
+		const outOfPhase = await executeBuddyToolCall(
+			[createWatchdogVerdictTool("review")],
+			{
+				type: "toolCall",
+				id: "verdict-2",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: {
+					decision: "confirm",
+					headline: "Still broken",
+					advisory: "Keep the test.",
+					evidence: ["src/example.ts:10"],
+				},
+			},
+		);
+		assert.equal(outOfPhase.isError, true);
+		assert.equal(extractWatchdogVerdict([outOfPhase]), undefined);
+
+		const passInRevalidation = await executeBuddyToolCall(
+			[createWatchdogVerdictTool("revalidation")],
+			{
+				type: "toolCall",
+				id: "verdict-3",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: { decision: "pass" },
+			},
+		);
+		assert.equal(passInRevalidation.isError, true);
+		assert.equal(extractWatchdogVerdict([passInRevalidation]), undefined);
+	});
+
+	it("rejects incomplete concerns with an error naming the missing fields", async () => {
+		const result = await executeBuddyToolCall(
+			[createWatchdogVerdictTool("review")],
+			{
+				type: "toolCall",
+				id: "verdict-4",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: { decision: "concern", headline: "Tests are failing" },
+			},
+		);
+		assert.equal(result.isError, true);
+		const text = (result.content[0] as { text: string }).text;
+		assert.match(text, /advisory/);
+		assert.match(text, /evidence/);
+		assert.equal(extractWatchdogVerdict([result]), undefined);
+	});
+
+	it("accepts a complete revalidation verdict", async () => {
+		const result = await executeBuddyToolCall(
+			[createWatchdogVerdictTool("revalidation")],
+			{
+				type: "toolCall",
+				id: "verdict-5",
+				name: WATCHDOG_VERDICT_TOOL,
+				arguments: {
+					decision: "confirm",
+					headline: "Still broken",
+					advisory: "Keep the compatibility test.",
+					evidence: ["test/example.test.ts:20"],
+				},
+			},
+		);
+		assert.equal(result.isError, false);
+		assert.deepEqual(extractWatchdogVerdict([result]), {
+			decision: "confirm",
+			headline: "Still broken",
+			advisory: "Keep the compatibility test.",
+			evidence: ["test/example.test.ts:20"],
+		});
 	});
 
 	it("rejects the empty-args verdict glm-5.2 used to emit, and incomplete concerns", () => {

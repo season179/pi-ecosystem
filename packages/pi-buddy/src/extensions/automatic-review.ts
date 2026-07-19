@@ -57,7 +57,10 @@ interface AutomaticReviewConsultation {
 export interface AutomaticReviewOptions {
 	host: Pick<ExtensionAPI, "sendMessage">;
 	consultation: AutomaticReviewConsultation;
+	/** Tools for the initial detached review (review-phase verdict tool). */
 	tools: readonly BuddyTool[];
+	/** Tools for the commit-time revalidation (revalidation-phase verdict tool). */
+	revalidationTools: readonly BuddyTool[];
 	getWatchdogThreshold: () => number;
 	isEnabled: () => boolean;
 	reviewMessageType: string;
@@ -274,7 +277,7 @@ export class AutomaticReview {
 						statusKey: this.options.backgroundStatusKey,
 						trigger: candidate.trigger,
 						entries: snapshot.entries,
-						extraTools: this.options.tools,
+						extraTools: this.options.revalidationTools,
 						outcomeOf: (review) =>
 							requireRevalidationVerdict(review).decision === "resolved"
 								? "resolved"

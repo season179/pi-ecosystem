@@ -88,7 +88,11 @@ export default function setup(pi: ExtensionAPI): void {
 	const webTools: BuddyTool[] = createWebTools(execFn);
 	const watchdogTools: BuddyTool[] = [
 		...webTools,
-		createWatchdogVerdictTool(),
+		createWatchdogVerdictTool("review"),
+	];
+	const watchdogRevalidationTools: BuddyTool[] = [
+		...webTools,
+		createWatchdogVerdictTool("revalidation"),
 	];
 	const consultationWorkflow: ConsultationWorkflow = new ConsultationWorkflow({
 		defaultModelSpec: () =>
@@ -108,6 +112,7 @@ export default function setup(pi: ExtensionAPI): void {
 		host: pi,
 		consultation: consultationWorkflow,
 		tools: watchdogTools,
+		revalidationTools: watchdogRevalidationTools,
 		getWatchdogThreshold: () => session.watchdogThreshold(),
 		isEnabled: () => session.enabled,
 		reviewMessageType: BUDDY_REVIEW_TYPE,
