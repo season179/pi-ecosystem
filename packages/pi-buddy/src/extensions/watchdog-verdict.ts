@@ -148,6 +148,18 @@ export function createWatchdogVerdictTool(phase: WatchdogPhase): BuddyTool {
 					);
 				}
 			}
+			// Reconstruct rather than pass `params` through: the guards above
+			// justify each field cast, and a fresh object strips any extra
+			// properties the model sent alongside the contract fields.
+			const submitted: WatchdogVerdict =
+				decision === "pass" || decision === "resolved"
+					? ({ decision } as WatchdogVerdict)
+					: ({
+							decision,
+							headline: verdict.headline as string,
+							advisory: verdict.advisory as string,
+							evidence: verdict.evidence as string[],
+						} as WatchdogVerdict);
 			return {
 				content: [
 					{
@@ -155,12 +167,19 @@ export function createWatchdogVerdictTool(phase: WatchdogPhase): BuddyTool {
 						text: `Watchdog verdict submitted: ${decision}`,
 					},
 				],
-				details: verdict as unknown as WatchdogVerdict,
+				details: submitted,
 			};
 		},
 	};
 }
 
+/**
+ * Extraction-layer shape guard for verdict tool results. Deliberately
+ * phase-AGNOSTIC: phase enforcement lives in the per-phase tool schema and
+ * execute() validation above, so this only re-checks the structural contract
+ * (decision kind + conditional concern fields) on results that already came
+ * back non-error. Do not treat it as the phase authority.
+ */
 export function isWatchdogVerdict(value: unknown): value is WatchdogVerdict {
 	if (typeof value !== "object" || value === null) return false;
 	const verdict = value as Partial<WatchdogVerdict>;
