@@ -19,15 +19,19 @@ npm pack --workspace @season179/pi-worktree
 npm pack --workspace @season179/pi-skills-status
 npm pack --workspace @season179/pi-readbeam
 npm pack --workspace @season179/pi-guard
+npm pack --workspace @season179/pi-model-fallback
 ```
 
 ## Publishing
 
-Scoped public packages require `--access public`:
+Scoped public packages require `--access public`. Prefer the GitHub Actions
+`Publish` workflow (`workflow_dispatch`) for packages listed there; local
+publish works the same way:
 
 ```bash
 npm publish --workspace @season179/pi-worktree --access public
 npm publish --workspace @season179/pi-skills-status --access public
 npm publish --workspace @season179/pi-readbeam --access public
 npm publish --workspace @season179/pi-guard --access public
+npm publish --workspace @season179/pi-model-fallback --access public
 ```
