@@ -16,21 +16,23 @@ the `herdr` CLI / socket API plus a SKILL.md teaching its use.
 pi can already do every synchronous orchestration step through bash +
 that skill: split panes, `agent start`, `agent prompt`, `agent read`.
 The one missing primitive is what Claude Code gets from background
-shells: a **non-blocking wait**. A bash `herdr agent wait` pins pi's
-whole turn — no parallelism across workers, no talking to Season
-meanwhile, a paid model idling on a sleep. pi-herdr adds exactly that
-missing half: watches on herdr events that **wake pi when they fire**,
-via `pi.sendMessage(..., { triggerTurn })`.
+shells: a **non-blocking wait**. A bash `herdr agent wait` or long-running
+CI command pins pi's whole turn — no parallelism across workers, no
+talking to Season meanwhile, a paid model idling on a sleep. pi-herdr
+adds exactly that missing half: watches on herdr events and bounded,
+model-initiated commands that **wake pi when they fire**, via
+`pi.sendMessage(..., { triggerTurn })`.
 
 Division of labor, deliberately lopsided:
 
 - **herdr owns**: worker processes (visible panes Season can watch and
   grab), agent detection, lifecycle states, waits with occupant pinning
   and stall detection, output reads, worktrees, focus/UX.
-- **pi-herdr owns**: registering watches, waking pi with a compact event
-  card, steering the orchestration loop.
+- **pi-herdr owns**: registering watches, bounded command-watch children,
+  waking pi with a compact event card, steering the orchestration loop.
 - **bash + SKILL.md own**: every synchronous herdr operation. We wrap
-  nothing that already works.
+  nothing that already works; command mode exists only for work that must
+  finish asynchronously and wake the orchestrator.
 
 Facts pi-herdr depends on (herdr 0.7.5; SKILL.md and the binary are the
 authority, herdr updates weekly): every managed pane gets `HERDR_ENV=1`,
@@ -50,11 +52,14 @@ on update).
    is installed as a pi skill and carries all CLI knowledge; the
    extension registers only watch-management tools. Smaller surface, no
    drift when herdr's CLI evolves.
-2. **v1 watch mechanism: one waiter child per watch** — spawn
-   `herdr agent wait`/`pane wait-output` and react to its exit + JSON.
-   The CLI already owns target resolution, occupant pinning, stall
-   detection, settled-state defaults; watches are few (2–5 workers).
-   v2 candidate: one persistent `events.subscribe` socket connection.
+2. **v1 watch mechanism: one child per watch** — spawn
+   `herdr agent wait`/`pane wait-output` for herdr targets, or fixed
+   `/bin/sh -c` for a bounded command, then react to its exit. The CLI
+   owns target resolution, occupant pinning, stall detection, and
+   settled-state defaults. WatchManager owns command timeouts and the
+   shared SIGTERM→grace→SIGKILL lifecycle. Watches remain few (2–5).
+   v2 candidate for herdr-backed watches: one persistent
+   `events.subscribe` socket connection.
 3. **Wake-on-fire by default.** `steer` mid-turn, `triggerTurn` when
    idle; session wake budget (default 20, consumed only after a
    successful send) degrades to `nextTurn` + footer badge. Watches fire
@@ -90,7 +95,9 @@ on update).
    `blocked` only).
 8. **Anti-poll + anti-block steering** in the tool descriptions: never
    run `herdr agent wait` or `--wait` prompts through bash; prompt
-   without `--wait`, then `herdr_watch`.
+   without `--wait`, then `herdr_watch`. Prefer command mode for CI,
+   builds, and deploys so completion and the exit code require neither a
+   pane nor a model-authored sentinel.
 9. **Pi extension, not a herdr plugin.** Both ends live inside the pi
    process (`registerTool`, `sendMessage` delivery policy, renderer,
    session cleanup); a herdr plugin's only channel into pi is typing
@@ -100,6 +107,21 @@ on update).
 Tool contract, steering text, and config now live in the code
 (`src/extensions/herdr.ts`) and README — this doc no longer duplicates
 them.
+
+## CI watching
+
+Command mode was added after a real CI output watch silently failed to
+produce its sentinel. The pane command ran `gh run watch`, then assigned
+its exit code to `status`; zsh defines `status` as a read-only special
+parameter, so the shell aborted before printing the sentinel. The output
+watch correctly waited forever, but the fire-and-forget pane error was not
+visible to the orchestrator. A command watch removes this fragile protocol:
+it runs the CI command directly, is always bounded by a required timeout,
+and fires with the numeric exit code whether that code is zero or non-zero.
+
+Output watches remain appropriate for genuine pane-output conditions. When
+a sentinel is unavoidable, print `"$?"` inline and retain a `%s` placeholder
+in the typed command so the echoed command cannot match its own sentinel.
 
 ## Status and durable findings
 
@@ -126,9 +148,11 @@ them.
 ## Non-goals (v1)
 
 Wrapping synchronous CLI commands as tools; raw socket client (v2);
-generic non-herdr background jobs (herdr panes *are* the background
-shells); managing worker processes ourselves; cross-session watches;
-touching the herdr-managed `herdr-agent-state.ts`.
+unbounded or persistent generic background-job management; managing herdr
+worker processes ourselves; cross-session watches; touching the
+herdr-managed `herdr-agent-state.ts`. Bounded, model-initiated command
+watches are intentionally in scope, but they are one-shot observations,
+not a general process supervisor.
 
 ## Known hazards
 

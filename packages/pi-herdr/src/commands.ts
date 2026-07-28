@@ -64,9 +64,13 @@ export function registerWatchesCommand(pi: ExtensionAPI, deps: WatchCommandDeps)
 				ctx.ui.notify(choice, "info");
 				return;
 			}
+			const subject =
+				record.spec.mode === "command"
+					? "the command"
+					: `"${record.spec.target}"`;
 			const ok = await ctx.ui.confirm(
 				"Stop watch?",
-				`Kill watch #${record.id} ("${record.spec.target}")?`,
+				`Kill watch #${record.id} (${subject})?`,
 			);
 			if (!ok) return;
 			try {

@@ -1,7 +1,7 @@
 {
   "name": "@season179/pi-herdr",
   "version": "26.7.0",
-  "description": "Non-blocking herdr watches so a pi orchestrator inside herdr is woken when workers settle.",
+  "description": "Non-blocking pi watches over herdr agents, pane output, and bounded commands.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",

@@ -9,6 +9,7 @@ import type { WatchOutcome, WatchRecordPublic } from "./types.js";
 const MAX_TAIL_LINES = 20;
 const MAX_NOTE_CHARS = 40;
 const MAX_MATCH_CHARS = 60;
+const MAX_COMMAND_CHARS = 60;
 
 /** Compact duration: `41s`, `3m41s`, `1h02m`. */
 export function formatDuration(ms: number): string {
@@ -23,6 +24,11 @@ export function formatDuration(ms: number): string {
 
 function truncate(text: string, maxChars: number): string {
 	return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+}
+
+/** Normalize and bound a command before showing it in tool or UI text. */
+export function summarizeCommand(command: string): string {
+	return truncate(command.trim().replace(/\s+/gu, " "), MAX_COMMAND_CHARS);
 }
 
 /** Read a string from loosely-shaped CLI JSON, trying several paths. */
@@ -60,8 +66,11 @@ function conditionSummary(record: WatchRecordPublic): string {
 			spec.until && spec.until.length > 0 ? spec.until.join("|") : "idle|done|blocked";
 		return `agent ${spec.target} (until ${until})`;
 	}
+	if (spec.mode === "command") {
+		return `command "${summarizeCommand(spec.command)}"`;
+	}
 	if (spec.regex !== undefined) return `output ${spec.target} (regex /${spec.regex}/)`;
-	return `output ${spec.target} (match "${spec.match ?? ""}")`;
+	return `output ${spec.target} (match "${spec.match}")`;
 }
 
 /**
@@ -73,7 +82,10 @@ export function formatWatchCard(
 	outcome: WatchOutcome,
 	tail?: string,
 ): string {
-	const header = `watch #${record.id} "${record.spec.target}"`;
+	const commandMode = record.spec.mode === "command";
+	const header = commandMode
+		? `watch #${record.id} command`
+		: `watch #${record.id} "${record.spec.target}"`;
 	const duration = formatDuration(outcome.durationMs);
 	const lines: string[] = [];
 	switch (outcome.kind) {
@@ -87,6 +99,10 @@ export function formatWatchCard(
 					state
 						? `${header} fired: agent settled (${state}) after ${duration}`
 						: `${header} fired: agent settled after ${duration}`,
+				);
+			} else if (record.spec.mode === "command") {
+				lines.push(
+					`${header} completed (exit ${outcome.exitCode ?? "?"}) after ${duration}`,
 				);
 			} else {
 				lines.push(`${header} fired: output matched after ${duration}`);
@@ -114,6 +130,9 @@ export function formatWatchCard(
 		case "killed":
 			lines.push(`${header} stopped after ${duration}`);
 			break;
+	}
+	if (record.spec.mode === "command") {
+		lines.push(`command: ${summarizeCommand(record.spec.command)}`);
 	}
 	if (record.spec.note) lines.push(`note: ${record.spec.note}`);
 	if (tail) {
