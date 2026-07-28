@@ -80,8 +80,8 @@ Because this package publishes compiled JavaScript, build before using `pi -e` f
 
 ```bash
 npm pack
-tar -tf season179-pi-worktree-26.5.5.tgz
-pi install ./season179-pi-worktree-26.5.5.tgz
+tar -tf season179-pi-worktree-26.7.1.tgz
+pi install ./season179-pi-worktree-26.7.1.tgz
 ```
 
 The tarball should include:

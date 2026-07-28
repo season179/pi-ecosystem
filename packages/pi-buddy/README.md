@@ -43,7 +43,11 @@ Automatic reviews are designed to be quiet. Buddy submits a structured verdict i
 
 Each delivered concern has a short ID. The main agent can use `give_buddy_feedback` to mark it `fixed` or `rebutted` with a reason, independently of cadence feedback. Future watchdog checks receive a compact, branch-aware concern history so they do not repeat settled concerns without new evidence. This adds no extra Buddy call and survives reload, resume, fork, tree navigation, and compaction within the session.
 
+**Cadence** — the watchdog's 3-turn trigger is only the default. `give_buddy_feedback` (`more` | `same` | `less`) moves a session-scoped advisory level between +1 and −3, mapping to a watchdog cadence of 2, 3, 6, 12, or 24 turns: `less` backs off exponentially, `more` steps back toward normal, `same` records that the current level is fine without changing it. The level resets with each Pi process, and feedback never disables run-end review or explicit consultations.
+
 **Evidence order** — repository first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage` third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in an isolated browser session — no click, fill, type, or eval. Fetched web content is treated as data to evaluate, never instructions.
+
+**Skills** — requested consultations (`consult_buddy` and `/buddy`) include Pi's native Agent Skills catalog in the buddy's system prompt, in the same progressive-disclosure format the main agent gets. The buddy can read any listed SKILL.md with its `read` tool, so it evaluates work against the same skill instructions the agent is following.
 
 **Memory** — the buddy is stateless per call, but each requested consultation gets a small, inspectable memory block from `~/.pi/agent/buddy-memory/`: `global.md` for stable preferences and corrections, `projects/<slug>.md` for durable project facts. The buddy has no write tool; instead, consultations may emit structured `LESSON[...]` / `RETRACT:` lines that the harness strips, applies as bounded and deduped writes, and confirms with a small notice. Curate with `/buddy-memory`, or reset a scope with `/buddy-memory clear global|project`.
 
@@ -82,7 +86,7 @@ Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl
 jq -r '[.source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
 ```
 
-See [TELEMETRY.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/TELEMETRY.md) for the full field reference and the health signals worth watching.
+See [TELEMETRY.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/TELEMETRY.md) for the full field reference and the health signals worth watching.
 
 ## Local Development
 
@@ -97,12 +101,12 @@ Smoke test from the repo, in a scratch directory:
 pi -e packages/pi-buddy/src/extensions/buddy.ts
 ```
 
-See [PLAN.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/PLAN.md) for the full design rationale.
+See [docs/design-history.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/design-history.md) for the design decisions that still bind and why they were made.
 
 The extension is organized around three stateful capabilities: `BuddySession`,
 `ConsultationWorkflow`, and `AutomaticReview`. Pi-specific registration stays in
 the composition root. Contributors should use the
-[domain language](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/CONTEXT.md)
+[domain language](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/CONTEXT.md)
 and preserve the boundaries recorded in the
 [architecture decision](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/adr/0001-capability-first-domain-modules.md).
 

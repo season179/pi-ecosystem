@@ -99,18 +99,10 @@ npm test --workspace @season179/pi-readbeam
 npx tsc -p packages/pi-readbeam/tsconfig.json --watch
 ```
 
-## Public API
+## Internals
 
-```typescript
-import {
-  segmentContent, isProtected, isProse,
-  createAnalyzer, CompromiseAnalyzer,
-  renderContent,
-} from "@season179/pi-readbeam";
-
-import type {
-  Segment, ProtectedSegment, ProseSegment, SegmentKind,
-  LinguisticSpan, LinguisticAnalyzer, SpanKind,
-  RenderOptions,
-} from "@season179/pi-readbeam";
-```
+The extension module re-exports its pipeline for tests: `segmentContent`,
+`isProtected`, `isProse`, `createAnalyzer`, `CompromiseAnalyzer`,
+`renderContent`, and the associated types (`Segment`, `LinguisticSpan`,
+`RenderOptions`, ...). The package declares no `main`/`exports` entry —
+it is a Pi extension, not an importable library.

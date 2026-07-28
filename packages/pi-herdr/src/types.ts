@@ -1,10 +1,9 @@
 /**
  * Shared types for pi-herdr.
  *
- * These are the hard cross-worker contracts: every other module
+ * These are the hard cross-module contracts: every other module
  * (herdr-cli, watches, policy, render, commands, the extension) imports
- * from here. Keep this file export-only — no runtime logic, no extra
- * exports beyond what the contract in briefs/COMMON.md lists.
+ * from here. Keep this file export-only — no runtime logic.
  */
 
 /** A watch either waits on an agent's lifecycle or on a pane's output. */

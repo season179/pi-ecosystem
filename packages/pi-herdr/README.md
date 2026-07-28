@@ -41,6 +41,9 @@ footer chip, `/watches`, toasts, telemetry. Not yet exercised live:
 `/watches` interactive UI, toasts, output-mode watches, wake-budget
 degradation.
 
+Design decisions, findings, and known hazards:
+[docs/DESIGN.md](./docs/DESIGN.md).
+
 ## Config
 
 Optional `~/.pi/agent/herdr.json` (defaults in code, loud error on unknown

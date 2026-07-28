@@ -30,7 +30,9 @@ Restart Pi or run `/reload` after installation.
 | Human `!` shell | Unchanged; Pi Guard does not intercept it |
 | Reviewer failure, timeout, malformed response, or truncated action | Blocked |
 
-There is no restrictive shell sandbox, network domain allowlist, credential stripping, destructive-command denylist, or unknown-CLI denylist after approval.
+Built-in `write`/`edit` skip the reviewer deliberately: they cannot execute arbitrary CLI programs, so path checks plus a recovery snapshot cover them without adding reviewer latency to every ordinary workspace write.
+
+There is no restrictive shell sandbox, network domain allowlist, credential stripping, destructive-command denylist, or unknown-CLI denylist after approval. These mechanisms were deliberately removed — each one could override an aligned approval, contradicting the policy above — so do not re-add any of them as a "safety improvement".
 
 ## Reviewer policy
 
@@ -67,7 +69,7 @@ Optional global configuration:
 
 ```json
 {
-  "protectedPaths": [".git", ".env", ".env.*"],
+  "protectedPaths": [".git", ".pi/guard.json", ".env", ".env.*"],
   "reviewer": {
     "model": "zai/glm-5.2",
     "timeoutMs": 30000,
@@ -77,7 +79,7 @@ Optional global configuration:
 ```
 
 - `reviewer.model` defaults to the current Pi model and must use `provider/model` syntax when set.
-- `protectedPaths` applies only to built-in `write` and `edit`.
+- `protectedPaths` applies only to built-in `write` and `edit`; the list shown above is the default.
 - Legacy `mode`, `shell`, `trustedTools`, and `reviewer.mode` settings are ignored with a warning.
 
 A project may only add protected write paths in `<workspace>/.pi/guard.json`:
@@ -88,7 +90,7 @@ A project may only add protected write paths in `<workspace>/.pi/guard.json`:
 }
 ```
 
-Project configuration cannot select the reviewer or loosen user policy.
+Project configuration cannot select the reviewer or loosen user policy — a project config that sets `mode`, `reviewer`, or `trustedTools` fails config loading outright rather than being ignored.
 
 ## Commands
 

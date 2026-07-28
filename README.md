@@ -4,34 +4,36 @@ Season's Pi packages, published independently to npm.
 
 ## Packages
 
+- [`@season179/pi-buddy`](./packages/pi-buddy) - A cheap buddy model that watches the session and raises concerns.
+- [`@season179/pi-moa`](./packages/pi-moa) - Mixture-of-agents provider: reference models privately advise an aggregator each turn.
+- [`@season179/pi-herdr`](./packages/pi-herdr) - Non-blocking watches + wake so a pi orchestrator can herd workers inside herdr.
+- [`@season179/pi-guard`](./packages/pi-guard) - Intent reviewer that blocks unauthorized or unrelated tool actions.
+- [`@season179/pi-model-fallback`](./packages/pi-model-fallback) - Automatic model failover driven by a standalone fallback-models.json config.
 - [`@season179/pi-worktree`](./packages/pi-worktree) - Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) - Shows the skills used in the current Pi session.
-- [`@season179/pi-readbeam`](./packages/pi-readbeam) - Automatically replaces assistant messages with highlighted placeholders (proof-of-concept).
-- [`@season179/pi-guard`](./packages/pi-guard) - Prevents destructive or unauthorized coding-agent tool actions.
-- [`@season179/pi-model-fallback`](./packages/pi-model-fallback) - Automatic model failover driven by a standalone fallback-models.json config.
+- [`@season179/pi-readbeam`](./packages/pi-readbeam) - Replaces assistant messages with highlighted placeholders (proof-of-concept).
+
+Retired: `packages/pi-delegate` (failed experiment, never published — see
+[docs/DELEGATE.md](./docs/DELEGATE.md)).
+
+Design docs live in `docs/` — at the repo root for cross-package history
+(shelved/retired designs), and per package for the living ones
+(e.g. `packages/pi-herdr/docs/DESIGN.md`).
 
 ## Development
 
 ```bash
 npm install
-npm run build
-npm pack --workspace @season179/pi-worktree
-npm pack --workspace @season179/pi-skills-status
-npm pack --workspace @season179/pi-readbeam
-npm pack --workspace @season179/pi-guard
-npm pack --workspace @season179/pi-model-fallback
+npm run build          # all workspaces
+npm run validate       # build + npm pack dry-runs
 ```
 
 ## Publishing
 
-Scoped public packages require `--access public`. Prefer the GitHub Actions
-`Publish` workflow (`workflow_dispatch`) for packages listed there; local
-publish works the same way:
+Calver versioning (`YY.M.PATCH`). Use the GitHub Actions `Publish`
+workflow (`workflow_dispatch`, trusted publishing) for packages listed
+there; a brand-new package needs one manual first publish:
 
 ```bash
-npm publish --workspace @season179/pi-worktree --access public
-npm publish --workspace @season179/pi-skills-status --access public
-npm publish --workspace @season179/pi-readbeam --access public
-npm publish --workspace @season179/pi-guard --access public
-npm publish --workspace @season179/pi-model-fallback --access public
+npm publish --workspace @season179/<package> --access public
 ```

@@ -67,6 +67,21 @@ investigation phase before they advise:
 }
 ```
 
+Beyond the model slots, a preset takes a few basic shape and sampling fields:
+
+- `maxReferences` caps how many `referenceModels` a preset may declare — a validation
+  guard, checked at load time (`referenceConcurrency` must not exceed it either). It is
+  an integer `>= 1` and **defaults to `8`**; raise it only to declare a larger fleet.
+- `referenceTemperature` sets the sampling temperature for **reference requests only**
+  (any finite number), e.g. to run the advisors a little warmer for more varied advice.
+  It is applied after the caller's options, so the preset governs reference sampling
+  regardless of the caller. It is **unset by default** — references inherit the
+  caller's temperature.
+- `aggregatorTemperature` is the aggregator-side mirror: it pins the sampling
+  temperature of the **aggregator request only** (any finite number), also applied
+  after the caller's options, and also **unset by default** (the aggregator inherits
+  the caller's temperature).
+
 ### Tuning reference latency
 
 Reference outputs are truncated to `maxReferenceOutputChars` before they reach the
@@ -115,6 +130,13 @@ have answered, no matter how fast the batch is overall. That is `referenceQuorum
   failures). It is **unset by default** (every reference is awaited, exactly as before),
   must be ≤ the number of `referenceModels`, and composes with `referenceTimeoutMs`. Set it
   when you configure several references but only need the fastest few to move on.
+
+- `referenceConcurrency` caps how many references run **at once**. It is an integer
+  `>= 1`, at most `maxReferences`, and **defaults to `4`**. A preset with more references
+  than slots makes later references wait for a slot before they even start, stretching
+  the phase past the slowest single reference; raising the cap shortens the phase at the
+  cost of burstier provider traffic, lowering it trades latency for gentler rate-limit
+  pressure.
 
 A reasoning reference model can also spend most of its wall-clock *thinking* before it
 emits any advice text. That thinking never reaches the aggregator or the display (only
