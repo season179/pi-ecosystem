@@ -1,6 +1,7 @@
 {
   "name": "@season179/pi-delegate",
   "version": "26.5.5",
+  "private": true,
   "description": "Lets the main Pi agent delegate well-scoped coding tasks to a cheap worker model.",
   "type": "module",
   "license": "MIT",

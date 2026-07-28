@@ -1,7 +1,23 @@
 # pi-delegate: Orchestrator → Cheap-Worker Delegation for Pi
 
-Date: 2026-07-03
-Status: **DESIGN AGREED** (discussion with Season, 2026-07-03). Not yet implemented.
+Date: 2026-07-03 (retired 2026-07-28)
+Status: **FAILED EXPERIMENT — RETIRED** (Season's verdict, 2026-07-28).
+Reference-only, same standing as TROIKA.md.
+
+> **Note to agents:** do not build on this design, load this package,
+> refer to or copy its code, or propose orchestrator→cheap-worker
+> delegation revivals (Season, 2026-07-28). It was built (M1–M3),
+> dogfooded, and judged a failure. The package was never published to npm
+> and is not installed in `~/.pi`; it remains in-tree only as a historical
+> record and can be deleted at any time (git history keeps everything).
+>
+> **Why it failed** (Season, 2026-07-28): superseded by better tooling.
+> Agent-multiplexer/ADE environments — herdr, Orca ADE — let pi delegate to
+> *visible, managed* agents (real panes, lifecycle detection, human can
+> watch and intervene) better than this extension's invisible headless
+> worker subprocesses ever could. The goal lives on; this mechanism lost.
+> Successor direction: HERDR.md.
+
 Working name: `pi-delegate` (placeholder).
 
 ## 1. The Idea
