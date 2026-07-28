@@ -78,10 +78,15 @@ or mistyped fields):
 ```
 
 - `maxWatches` — concurrent armed watches (capacity guard).
-- `wakeBudget` — auto-wakes per session; `0` disables auto-wake.
+- `wakeBudget` — maximum consecutive attempted idle wakes without interactive or RPC input; resets when such input arrives, and `0` disables auto-wake.
 - `includeTailLines` — tail lines attached to the wake card; `0` disables.
 - `toastOn` — herdr states that also fire a desktop toast.
 - `telemetryPath` — JSONL sink per fired watch; `""` disables.
+
+When a positive wake budget is exhausted, watch cards continue to arrive
+without starting an idle turn. The footer and watch list expose the budget
+state, and the first suppressed idle wake in each attendance epoch sends a
+desktop notification.
 
 ## License
 

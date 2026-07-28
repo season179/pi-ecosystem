@@ -32,10 +32,22 @@ describe("buildTelemetryRecord", () => {
 			stderr: "",
 		};
 
-		const record = buildTelemetryRecord(watch, outcome, true, true, 3);
+		const record = buildTelemetryRecord(watch, outcome, {
+			delivery: {
+				deliverAs: "steer",
+				triggerTurn: true,
+				countsAsWake: true,
+				reason: "wake-granted",
+				wakesUsedAfter: 3,
+			},
+			wakeBudget: 20,
+		});
 
 		assert.equal(record.mode, "command");
 		assert.equal(record.exitCode, 7);
+		assert.equal(record.deliveryReason, "wake-granted");
+		assert.equal(record.wakesUsed, 3);
+		assert.equal(record.wakeBudget, 20);
 		assert.equal("target" in record, false);
 		assert.equal("command" in record, false);
 		assert.doesNotMatch(JSON.stringify(record), /super-secret/u);
@@ -60,11 +72,76 @@ describe("buildTelemetryRecord", () => {
 			stderr: "",
 		};
 
-		const record = buildTelemetryRecord(watch, outcome, false, false, 0);
+		const record = buildTelemetryRecord(watch, outcome, {
+			delivery: {
+				deliverAs: "steer",
+				triggerTurn: false,
+				countsAsWake: false,
+				reason: "budget-exhausted",
+				wakesUsedAfter: 20,
+			},
+			wakeBudget: 20,
+		});
 
 		assert.equal(record.mode, "agent");
 		assert.equal(record.target, "reviewer");
 		assert.equal("exitCode" in record, false);
+	});
+
+	it("retains a delivery snapshot after mutable epoch state resets", () => {
+		let epochWakesUsed = 20;
+		const delivery = {
+			deliverAs: "steer" as const,
+			triggerTurn: false,
+			countsAsWake: false,
+			reason: "budget-exhausted" as const,
+			wakesUsedAfter: epochWakesUsed,
+		};
+		epochWakesUsed = 0;
+
+		const record = buildTelemetryRecord(
+			{
+				id: 14,
+				spec: { mode: "agent", target: "reviewer", wake: true },
+				startedAt: 1_000,
+				status: "fired",
+			},
+			{
+				kind: "fired",
+				exitCode: 0,
+				durationMs: 500,
+				stdout: "",
+				stderr: "",
+			},
+			{ delivery, wakeBudget: 20 },
+		);
+
+		assert.equal(epochWakesUsed, 0);
+		assert.equal(record.wakesUsed, 20);
+		assert.equal(record.wakeBudget, 20);
+	});
+
+	it("omits deliveryReason for stale or stopped no-decision snapshots", () => {
+		const record = buildTelemetryRecord(
+			{
+				id: 15,
+				spec: { mode: "agent", target: "reviewer", wake: true },
+				startedAt: 1_000,
+				status: "stopped",
+			},
+			{
+				kind: "killed",
+				exitCode: null,
+				durationMs: 500,
+				stdout: "",
+				stderr: "",
+			},
+			{ wakesUsed: 7, wakeBudget: 20 },
+		);
+
+		assert.equal("deliveryReason" in record, false);
+		assert.equal(record.wakesUsed, 7);
+		assert.equal(record.wakeBudget, 20);
 	});
 });
 

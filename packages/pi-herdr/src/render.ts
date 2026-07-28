@@ -4,7 +4,15 @@
  * short lines (~72 chars), no ANSI colors (pi themes the message box).
  */
 
+import type { DeliveryReason } from "./policy.js";
 import type { WatchOutcome, WatchRecordPublic } from "./types.js";
+
+export interface WatchCardDelivery {
+	reason: DeliveryReason;
+	wakesUsedAfter: number;
+	wakeBudget: number;
+	countsAsWake: boolean;
+}
 
 const MAX_TAIL_LINES = 20;
 const MAX_NOTE_CHARS = 40;
@@ -81,6 +89,7 @@ export function formatWatchCard(
 	record: WatchRecordPublic,
 	outcome: WatchOutcome,
 	tail?: string,
+	delivery?: WatchCardDelivery,
 ): string {
 	const commandMode = record.spec.mode === "command";
 	const header = commandMode
@@ -135,6 +144,18 @@ export function formatWatchCard(
 		lines.push(`command: ${summarizeCommand(record.spec.command)}`);
 	}
 	if (record.spec.note) lines.push(`note: ${record.spec.note}`);
+	if (delivery?.reason === "budget-exhausted") {
+		lines.push(
+			`wake budget exhausted (${delivery.wakesUsedAfter}/${delivery.wakeBudget}) — this and further wake-enabled watches will not wake an idle session until interactive or RPC input`,
+		);
+	} else if (
+		delivery?.countsAsWake &&
+		delivery.wakesUsedAfter === delivery.wakeBudget
+	) {
+		lines.push(
+			`wake budget: final attempted idle wake (${delivery.wakesUsedAfter}/${delivery.wakeBudget})`,
+		);
+	}
 	if (tail) {
 		const tailLines = tail.replace(/\n+$/, "").split("\n").slice(-MAX_TAIL_LINES);
 		lines.push("last lines:");
@@ -148,12 +169,24 @@ export function formatWatchLine(record: WatchRecordPublic, nowMs: number): strin
 	const elapsed =
 		record.status === "armed" ? formatDuration(nowMs - record.startedAt) : "-";
 	let line = `#${record.id} ${record.status}  ${conditionSummary(record)}  ${elapsed}`;
+	if (!record.spec.wake) line += " [no wake]";
 	if (record.spec.note) line += `  — ${truncate(record.spec.note, MAX_NOTE_CHARS)}`;
 	return line;
 }
 
-/** Footer chip text, or undefined when nothing is armed. */
-export function formatStatusChip(armedCount: number): string | undefined {
-	if (armedCount <= 0) return undefined;
-	return `herdr: ${armedCount} ${armedCount === 1 ? "watch" : "watches"}`;
+/** Footer chip text, or undefined when no positive-budget status exists. */
+export function formatStatusChip(
+	armedCount: number,
+	wakesUsed: number,
+	wakeBudget: number,
+): string | undefined {
+	if (wakeBudget === 0) {
+		return armedCount > 0
+			? `herdr: ${armedCount} ${armedCount === 1 ? "watch" : "watches"} · wake off`
+			: "herdr: wake off";
+	}
+	if (armedCount <= 0) {
+		return wakesUsed > 0 ? `herdr: wakes ${wakesUsed}/${wakeBudget}` : undefined;
+	}
+	return `herdr: ${armedCount} ${armedCount === 1 ? "watch" : "watches"} · wakes ${wakesUsed}/${wakeBudget}`;
 }

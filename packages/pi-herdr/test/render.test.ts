@@ -213,6 +213,42 @@ describe("formatWatchCard", () => {
 		assert.equal(lines[2], "  line 6");
 		assert.equal(lines[21], "  line 25");
 	});
+
+	it("annotates the final attempted idle wake", () => {
+		const card = formatWatchCard(record(), outcome(), undefined, {
+			reason: "wake-granted",
+			wakesUsedAfter: 3,
+			wakeBudget: 3,
+			countsAsWake: true,
+		});
+		assert.match(card, /wake budget: final attempted idle wake \(3\/3\)$/u);
+	});
+
+	it("places the exact exhaustion annotation before the tail", () => {
+		const card = formatWatchCard(record(), outcome(), "tail evidence", {
+			reason: "budget-exhausted",
+			wakesUsedAfter: 20,
+			wakeBudget: 20,
+			countsAsWake: false,
+		});
+		const warning =
+			"wake budget exhausted (20/20) — this and further wake-enabled watches will not wake an idle session until interactive or RPC input";
+		assert.equal(card.split("\n")[1], warning);
+		assert.ok(card.indexOf(warning) < card.indexOf("last lines:"));
+	});
+
+	it("omits budget annotations for disabled and ordinary deliveries", () => {
+		for (const delivery of [
+			{ reason: "wake-disabled" as const, wakesUsedAfter: 1, wakeBudget: 3, countsAsWake: false },
+			{ reason: "budget-disabled" as const, wakesUsedAfter: 0, wakeBudget: 0, countsAsWake: false },
+			{ reason: "wake-granted" as const, wakesUsedAfter: 1, wakeBudget: 3, countsAsWake: true },
+		]) {
+			assert.doesNotMatch(
+				formatWatchCard(record(), outcome(), undefined, delivery),
+				/wake budget/u,
+			);
+		}
+	});
 });
 
 describe("formatWatchLine", () => {
@@ -283,18 +319,33 @@ describe("formatWatchLine", () => {
 		const line = formatWatchLine(record({ status: "armed", spec: { note } }), 0);
 		assert.ok(line.endsWith(`  — ${"a".repeat(39)}…`));
 	});
+
+	it("marks only non-waking watch rows", () => {
+		assert.match(
+			formatWatchLine(record({ spec: { wake: false } }), 0),
+			/ \[no wake\]/u,
+		);
+		assert.doesNotMatch(formatWatchLine(record(), 0), /\[no wake\]/u);
+	});
 });
 
 describe("formatStatusChip", () => {
-	it("is undefined when nothing is armed", () => {
-		assert.equal(formatStatusChip(0), undefined);
+	it("renders singular and plural armed-watch positive-budget states", () => {
+		assert.equal(formatStatusChip(1, 7, 20), "herdr: 1 watch · wakes 7/20");
+		assert.equal(formatStatusChip(2, 7, 20), "herdr: 2 watches · wakes 7/20");
 	});
 
-	it("singularizes one watch", () => {
-		assert.equal(formatStatusChip(1), "herdr: 1 watch");
+	it("renders used and exhausted positive budgets with no watches", () => {
+		assert.equal(formatStatusChip(0, 7, 20), "herdr: wakes 7/20");
+		assert.equal(formatStatusChip(0, 20, 20), "herdr: wakes 20/20");
 	});
 
-	it("pluralizes several watches", () => {
-		assert.equal(formatStatusChip(3), "herdr: 3 watches");
+	it("omits an unused positive budget with no watches", () => {
+		assert.equal(formatStatusChip(0, 0, 20), undefined);
+	});
+
+	it("renders zero-budget states with and without watches", () => {
+		assert.equal(formatStatusChip(2, 0, 0), "herdr: 2 watches · wake off");
+		assert.equal(formatStatusChip(0, 0, 0), "herdr: wake off");
 	});
 });

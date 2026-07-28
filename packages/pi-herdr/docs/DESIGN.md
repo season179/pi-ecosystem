@@ -60,11 +60,17 @@ on update).
    shared SIGTERM→grace→SIGKILL lifecycle. Watches remain few (2–5).
    v2 candidate for herdr-backed watches: one persistent
    `events.subscribe` socket connection.
-3. **Wake-on-fire by default.** `steer` mid-turn, `triggerTurn` when
-   idle; session wake budget (default 20, consumed only after a
-   successful send) degrades to `nextTurn` + footer badge. Watches fire
-   **once** and are removed — re-watching is an explicit orchestrator
-   decision (the anti-loop property).
+3. **Wake-on-fire by default, with a consecutive unattended-wake
+   budget.** `steer` mid-turn, `triggerTurn` when idle. The default budget
+   is 20 attempted idle wakes; busy steering is free. It resets on
+   `interactive` or `rpc` input and on session start. One-shot watches and
+   explicit re-arming remain the primary anti-loop property. At positive-
+   budget exhaustion, cards stay visible but do not trigger an idle turn,
+   and the first suppressed idle wake in each attendance epoch sends a
+   desktop warning. The implementation continues using
+   `deliverAs: "steer"`; an idle, non-triggering custom card is appended
+   to session context without starting a model turn. Budget zero deliberately
+   disables auto-wake.
 4. **Watches survive Esc.** Each watch owns its own `AbortController`;
    never capture the turn's `ctx.signal`. Cancel is explicit
    (`herdr_unwatch`, `/orchestrate off`, shutdown).
@@ -132,10 +138,11 @@ in the typed command so the echoed command cannot match its own sentinel.
   `recent-unwrapped` reads capture full transcripts; SKILL.md's
   bare-group discovery step exits code 2 by design (cosmetic); the
   blocking gap confirmed — bash waits pinned the turn end-to-end.
-- **M2 (watch layer) + M3 (wake + UX)** ✅ 2026-07-28. 55 unit tests
+- **M2 (watch layer) + M3 (wake + UX)** ✅ 2026-07-28. Unit tests
   against a fake-herdr fixture (`PI_HERDR_COMMAND` seam); kill path
-  keyed on the close event with a shutdown latch; wake budget consumed
-  only after a successful send. Live smokes: fire on settle, tail-
+  keyed on the close event with a shutdown latch; each attempted idle wake
+  is accounted immediately before fire-and-forget delivery. Live smokes:
+  fire on settle, tail-
   carrying wake card, `triggerTurn` waking an idle orchestrator,
   telemetry record; conversational promotion verified (plain "you are
   the orchestrator" → `herdr_orchestrate` + `herdr_watch` in the same

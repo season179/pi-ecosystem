@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import { registerWatchesCommand } from "../commands.js";
 import { loadHerdrConfig } from "../config.js";
 import { runHerdr } from "../herdr-cli.js";
-import { decideDelivery } from "../policy.js";
+import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
 	formatStatusChip,
 	formatWatchCard,
@@ -136,13 +136,18 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+export type TelemetrySnapshot =
+	| { delivery: DeliveryDecision; wakeBudget: number }
+	| { delivery?: undefined; wakesUsed: number; wakeBudget: number };
+
 export function buildTelemetryRecord(
 	record: WatchRecordPublic,
 	outcome: WatchOutcome,
-	triggerTurn: boolean,
-	countsAsWake: boolean,
-	wakesUsed: number,
+	snapshot: TelemetrySnapshot,
 ): Record<string, unknown> {
+	const delivery = snapshot.delivery;
+	const wakesUsed =
+		delivery === undefined ? snapshot.wakesUsed : delivery.wakesUsedAfter;
 	return {
 		watchId: record.id,
 		...(record.spec.mode === "command"
@@ -151,9 +156,11 @@ export function buildTelemetryRecord(
 		mode: record.spec.mode,
 		kind: outcome.kind,
 		durationMs: outcome.durationMs,
-		triggerTurn,
-		countsAsWake,
+		triggerTurn: delivery?.triggerTurn ?? false,
+		countsAsWake: delivery?.countsAsWake ?? false,
+		...(delivery === undefined ? {} : { deliveryReason: delivery.reason }),
 		wakesUsed,
+		wakeBudget: snapshot.wakeBudget,
 	};
 }
 
@@ -167,15 +174,23 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	let promoted = process.env.PI_HERDR_ORCHESTRATOR === "1";
 	let agentBusy = false;
 	let wakesUsed = 0;
+	let exhaustionNotified = false;
 	let uiCtx: ExtensionContext | undefined;
 	let sessionGeneration = 0;
 
 	const updateFooter = (): void => {
 		try {
 			if (!uiCtx?.hasUI) return;
+			if (!promoted) {
+				uiCtx.ui.setStatus("herdr", undefined);
+				return;
+			}
 			const armedCount =
 				manager?.list().filter((record) => record.status === "armed").length ?? 0;
-			uiCtx.ui.setStatus("herdr", formatStatusChip(armedCount));
+			uiCtx.ui.setStatus(
+				"herdr",
+				formatStatusChip(armedCount, wakesUsed, config.wakeBudget),
+			);
 		} catch {
 			// Footer rendering is best-effort and must not affect watches.
 		}
@@ -201,18 +216,11 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	const writeTelemetry = (
 		record: WatchRecordPublic,
 		outcome: WatchOutcome,
-		triggerTurn: boolean,
-		countsAsWake: boolean,
+		snapshot: TelemetrySnapshot,
 	): void => {
 		appendTelemetry(
 			config.telemetryPath,
-			buildTelemetryRecord(
-				record,
-				outcome,
-				triggerTurn,
-				countsAsWake,
-				wakesUsed,
-			),
+			buildTelemetryRecord(record, outcome, snapshot),
 		);
 	};
 
@@ -222,10 +230,15 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		outcome: WatchOutcome,
 	): Promise<void> => {
 		let telemetryWritten = false;
+		let telemetrySnapshot: TelemetrySnapshot | undefined;
 		try {
 			updateFooter();
 			if (record.status === "stopped") {
-				writeTelemetry(record, outcome, false, false);
+				telemetrySnapshot = {
+					wakesUsed,
+					wakeBudget: config.wakeBudget,
+				};
+				writeTelemetry(record, outcome, telemetrySnapshot);
 				telemetryWritten = true;
 				return;
 			}
@@ -262,21 +275,34 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			}
 
 			if (generation !== sessionGeneration) {
-				writeTelemetry(record, outcome, false, false);
+				telemetrySnapshot = {
+					wakesUsed,
+					wakeBudget: config.wakeBudget,
+				};
+				writeTelemetry(record, outcome, telemetrySnapshot);
 				telemetryWritten = true;
 				return;
 			}
 
+			const busyAtDecision = agentBusy;
 			const delivery = decideDelivery({
 				wake: record.spec.wake,
-				agentBusy,
+				agentBusy: busyAtDecision,
 				wakesUsed,
 				wakeBudget: config.wakeBudget,
+			});
+			wakesUsed = delivery.wakesUsedAfter;
+			telemetrySnapshot = { delivery, wakeBudget: config.wakeBudget };
+			const content = formatWatchCard(record, outcome, tail, {
+				reason: delivery.reason,
+				wakesUsedAfter: delivery.wakesUsedAfter,
+				wakeBudget: config.wakeBudget,
+				countsAsWake: delivery.countsAsWake,
 			});
 			pi.sendMessage(
 				{
 					customType: WATCH_MESSAGE_TYPE,
-					content: formatWatchCard(record, outcome, tail),
+					content,
 					display: true,
 					details: { record, outcomeKind: outcome.kind },
 				},
@@ -285,7 +311,29 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 					triggerTurn: delivery.triggerTurn,
 				},
 			);
-			if (delivery.countsAsWake) wakesUsed += 1;
+			const notifyExhaustion =
+				delivery.reason === "budget-exhausted" &&
+				!busyAtDecision &&
+				!exhaustionNotified;
+			if (notifyExhaustion) exhaustionNotified = true;
+			updateFooter();
+
+			if (notifyExhaustion) {
+				try {
+					await runHerdr(
+						[
+							"notification",
+							"show",
+							`Herdr wake budget exhausted (${delivery.wakesUsedAfter}/${config.wakeBudget}); watch #${record.id} did not start a turn`,
+							"--sound",
+							"request",
+						],
+						{ timeoutMs: 5_000 },
+					);
+				} catch {
+					// Exhaustion notifications are best-effort; the latch stays set.
+				}
+			}
 
 			const state =
 				record.spec.mode === "agent"
@@ -310,15 +358,16 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				}
 			}
 
-			writeTelemetry(
-				record,
-				outcome,
-				delivery.triggerTurn,
-				delivery.countsAsWake,
-			);
+			writeTelemetry(record, outcome, telemetrySnapshot);
 			telemetryWritten = true;
 		} catch (error) {
-			if (!telemetryWritten) writeTelemetry(record, outcome, false, false);
+			if (!telemetryWritten) {
+				telemetrySnapshot ??= {
+					wakesUsed,
+					wakeBudget: config.wakeBudget,
+				};
+				writeTelemetry(record, outcome, telemetrySnapshot);
+			}
 			if (generation === sessionGeneration) {
 				try {
 					pi.sendMessage(
@@ -414,11 +463,14 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				record.spec.mode === "command"
 					? conditionSummary(record.spec)
 					: `${record.spec.target} (${conditionSummary(record.spec)})`;
+			const deliveryPromise = record.spec.wake
+				? "you will be woken when it fires; continue other work or end your turn."
+				: "report will be delivered without starting a turn";
 			return {
 				content: [
 					{
 						type: "text",
-						text: `watch #${record.id} armed on ${armedOn} — you will be woken when it fires; continue other work or end your turn.`,
+						text: `watch #${record.id} armed on ${armedOn} — ${deliveryPromise}`,
 					},
 				],
 				details: { watchId: record.id },
@@ -463,15 +515,25 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		async execute() {
 			if (manager === undefined) throw new Error("no active session");
 			const records = manager.list();
-			const text =
+			const header =
+				config.wakeBudget === 0
+					? "wake: off (budget 0)"
+					: `wake budget: ${wakesUsed}/${config.wakeBudget} attempted idle wakes since last interactive or RPC input`;
+			const rows =
 				records.length === 0
 					? "no watches"
 					: records
 							.map((record) => formatWatchLine(record, Date.now()))
 							.join("\n");
 			return {
-				content: [{ type: "text", text }],
-				details: { count: records.length },
+				content: [{ type: "text", text: `${header}\n${rows}` }],
+				details: {
+					count: records.length,
+					wakesUsed,
+					wakeBudget: config.wakeBudget,
+					exhausted:
+						config.wakeBudget > 0 && wakesUsed >= config.wakeBudget,
+				},
 			};
 		},
 	});
@@ -509,10 +571,20 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.on("input", (event, ctx) => {
+		uiCtx = ctx;
+		if (event.source === "interactive" || event.source === "rpc") {
+			wakesUsed = 0;
+			exhaustionNotified = false;
+			updateFooter();
+		}
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		uiCtx = ctx;
 		agentBusy = false;
 		wakesUsed = 0;
+		exhaustionNotified = false;
 		const generation = ++sessionGeneration;
 		const oldManager = manager;
 		manager = undefined;
