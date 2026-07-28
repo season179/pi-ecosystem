@@ -1,5 +1,9 @@
 # pi-moa design notes
 
+Status: **RETIRED 2026-07-28 — superseded by `@season179/pi-buddy`**
+(Season's verdict). Reference-only, same standing as the repo-root
+`docs/TROIKA.md` and `docs/DELEGATE.md` tombstones.
+
 Durable decisions and rationale that are not recoverable from the code or the
 README. Consolidated from the original implementation plan (2026-06-30) and the
 agentic-references design note (`feat/moa-smart`, merged as `461fe2f`). Where

@@ -1,4 +1,11 @@
-# @season179/pi-moa
+# @season179/pi-moa (RETIRED)
+
+**Retired 2026-07-28 — superseded by
+[`@season179/pi-buddy`](../pi-buddy).** A cheap buddy model reviewing the
+session replaced the per-turn mixture-of-agents ensemble. No further
+development; the package stays in-tree as a historical record, and
+already-published versions remain on npm as-is. Do not install or build
+on it.
 
 Adds a synthetic `moa` provider to Pi for Mixture of Agents orchestration.
 

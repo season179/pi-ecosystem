@@ -1,6 +1,7 @@
 {
   "name": "@season179/pi-moa",
   "version": "26.5.5",
+  "private": true,
   "description": "Adds a Mixture of Agents provider to Pi.",
   "type": "module",
   "license": "MIT",
