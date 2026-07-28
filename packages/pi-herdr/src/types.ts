@@ -6,23 +6,53 @@
  * from here. Keep this file export-only — no runtime logic.
  */
 
-/** A watch either waits on an agent's lifecycle or on a pane's output. */
-export type WatchMode = "agent" | "output";
+/** A watch waits on an agent, pane output, or a bounded command. */
+export type WatchMode = "agent" | "output" | "command";
 
-/**
- * Declarative description of one non-blocking watch. Built from
- * `herdr_watch` tool input and turned into CLI args by `buildWatchArgs`.
- */
-export interface WatchSpec {
-	target: string; // agent name or pane id
-	mode: WatchMode;
-	until?: string[]; // agent mode only; herdr defaults if absent
-	match?: string; // output mode: literal substring
-	regex?: string; // output mode: Rust regex (mutually exclusive with match)
-	timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
+interface WatchSpecShared {
 	note?: string; // orchestrator's reminder, echoed in the wake card
 	wake: boolean; // may this watch triggerTurn an idle agent?
 }
+
+/** Wait for a herdr agent lifecycle state. */
+export interface AgentWatchSpec extends WatchSpecShared {
+	mode: "agent";
+	target: string;
+	until?: string[]; // herdr defaults if absent
+	timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
+	match?: never;
+	regex?: never;
+	command?: never;
+}
+
+interface OutputWatchSpecShared extends WatchSpecShared {
+	mode: "output";
+	target: string;
+	timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
+	until?: never;
+	command?: never;
+}
+
+/** Wait for exactly one literal or Rust-regex condition in pane output. */
+export type OutputWatchSpec = OutputWatchSpecShared &
+	(
+		| { match: string; regex?: never }
+		| { match?: never; regex: string }
+	);
+
+/** Run a bounded POSIX-shell command and fire whenever it exits. */
+export interface CommandWatchSpec extends WatchSpecShared {
+	mode: "command";
+	command: string;
+	timeoutMs: number;
+	target?: never;
+	until?: never;
+	match?: never;
+	regex?: never;
+}
+
+/** Declarative description of one non-blocking watch. */
+export type WatchSpec = AgentWatchSpec | OutputWatchSpec | CommandWatchSpec;
 
 /** Lifecycle of a watch record as seen by the orchestrator. */
 export type WatchStatus = "armed" | "fired" | "stopped";

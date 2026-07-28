@@ -6,11 +6,16 @@ import {
 	formatWatchCard,
 	formatWatchLine,
 } from "../src/render.js";
-import type { WatchOutcome, WatchRecordPublic, WatchSpec } from "../src/types.js";
+import type {
+	CommandWatchSpec,
+	WatchOutcome,
+	WatchRecordPublic,
+	WatchSpec,
+} from "../src/types.js";
 
 function record(overrides: {
 	id?: number;
-	spec?: Partial<WatchSpec>;
+	spec?: Record<string, unknown>;
 	startedAt?: number;
 	status?: WatchRecordPublic["status"];
 } = {}): WatchRecordPublic {
@@ -19,6 +24,26 @@ function record(overrides: {
 		spec: {
 			target: "reviewer",
 			mode: "agent",
+			wake: true,
+			...overrides.spec,
+		} as WatchSpec,
+		startedAt: overrides.startedAt ?? 0,
+		status: overrides.status ?? "fired",
+	};
+}
+
+function commandRecord(overrides: {
+	id?: number;
+	spec?: Partial<CommandWatchSpec>;
+	startedAt?: number;
+	status?: WatchRecordPublic["status"];
+} = {}): WatchRecordPublic {
+	return {
+		id: overrides.id ?? 9,
+		spec: {
+			mode: "command",
+			command: "gh run watch 303 --exit-status",
+			timeoutMs: 3_600_000,
 			wake: true,
 			...overrides.spec,
 		},
@@ -102,6 +127,45 @@ describe("formatWatchCard", () => {
 		assert.equal(
 			card,
 			['watch #7 "w1:p3" fired: output matched after 1s', "match: all done"].join("\n"),
+		);
+	});
+
+	it("renders command completion with a prominent non-zero exit code", () => {
+		const card = formatWatchCard(
+			commandRecord({
+				spec: { command: "  gh   run\nwatch 303 --exit-status  " },
+			}),
+			outcome({ exitCode: 3, durationMs: 41000 }),
+		);
+		assert.equal(
+			card,
+			[
+				"watch #9 command completed (exit 3) after 41s",
+				"command: gh run watch 303 --exit-status",
+			].join("\n"),
+		);
+	});
+
+	it("renders the command on timeout and stopped cards", () => {
+		assert.equal(
+			formatWatchCard(
+				commandRecord(),
+				outcome({ kind: "timeout", exitCode: null, durationMs: 60000 }),
+			),
+			[
+				"watch #9 command timed out after 1m00s",
+				"command: gh run watch 303 --exit-status",
+			].join("\n"),
+		);
+		assert.equal(
+			formatWatchCard(
+				commandRecord(),
+				outcome({ kind: "killed", exitCode: null, durationMs: 8000 }),
+			),
+			[
+				"watch #9 command stopped after 8s",
+				"command: gh run watch 303 --exit-status",
+			].join("\n"),
 		);
 	});
 
@@ -197,6 +261,21 @@ describe("formatWatchLine", () => {
 			41000,
 		);
 		assert.equal(regexLine, "#4 armed  output w1:p3 (regex /err(or)?/)  41s");
+	});
+
+	it("summarizes and normalizes command-mode rows without a target", () => {
+		const line = formatWatchLine(
+			commandRecord({
+				status: "armed",
+				spec: { command: "  gh   run\nwatch 303 --exit-status  " },
+			}),
+			41000,
+		);
+		assert.equal(
+			line,
+			'#9 armed  command "gh run watch 303 --exit-status"  41s',
+		);
+		assert.doesNotMatch(line, /undefined/u);
 	});
 
 	it("truncates long notes to 40 chars", () => {

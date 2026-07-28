@@ -2,17 +2,35 @@
 
 A pi extension that lets a pi orchestrator running **inside
 [herdr](https://github.com/season179/herdr)** register **non-blocking
-watches** on other agents/panes and get **woken** when they settle — so an
-orchestrator can dispatch a herd of workers and then end its turn instead
-of blocking on `--wait` loops.
+watches** on other agents, pane output, or bounded commands and get
+**woken** when they finish — so an orchestrator can dispatch work and then
+end its turn instead of blocking on `--wait` loops.
 
-Each watch spawns a single `herdr ... wait` child process (the CLI already
-owns target resolution, occupant pinning, and settled-state defaults) and
-fires **once**: on fire the extension wakes the idle orchestrator via
-`triggerTurn` (or steers it mid-turn), delivering a compact card with the
-target, the state transition, the elapsed time, and the orchestrator's own
-`note`. Evidence stays in herdr; the orchestrator reads more only when it
-has doubts.
+A watch fires **once**. Agent and output watches spawn a single
+`herdr ... wait` child, leaving target resolution, occupant pinning, and
+snapshot matching to herdr. Command watches spawn `/bin/sh -c` directly and
+fire on any numeric exit code, including non-zero. On fire the extension
+wakes the idle orchestrator via `triggerTurn` (or steers it mid-turn),
+delivering a compact card with the condition, elapsed time, note, and
+bounded evidence tail.
+
+## Watch modes
+
+- `agent` — requires an agent `target`; waits for herdr lifecycle states.
+- `output` — requires a pane `target` and exactly one literal `match` or
+  Rust-syntax `regex`. Herdr searches the existing pane snapshot
+  immediately when the watch is armed.
+- `command` — requires a non-empty `command` and a positive `timeoutMs`.
+  The command inherits pi-herdr's cwd and environment, runs under the
+  predictable POSIX `/bin/sh -c` contract, and reports its exit code.
+  Commands are never written to telemetry because they may contain secrets.
+
+Prefer command mode for CI runs, builds, and deploys; it needs no pane or
+sentinel. If an output sentinel is genuinely needed, print the status
+inline, for example `…; printf '\n__TAG_%s__\n' "$?"`. Never assign to
+`status` first: it is read-only in zsh and aborts the rest of the command.
+Keep the `%s` placeholder in the typed command so its echo cannot
+false-match the sentinel regex.
 
 ## Activation
 

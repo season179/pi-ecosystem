@@ -14,6 +14,7 @@ import {
 	formatStatusChip,
 	formatWatchCard,
 	formatWatchLine,
+	summarizeCommand,
 } from "../render.js";
 import { appendTelemetry } from "../telemetry.js";
 import type { WatchOutcome, WatchRecordPublic, WatchSpec } from "../types.js";
@@ -28,15 +29,40 @@ const WATCH_TOOL_NAMES = [
 const WATCH_TOOL_NAME_SET: ReadonlySet<string> = new Set(WATCH_TOOL_NAMES);
 
 const WATCH_DESCRIPTION =
-	"Register a non-blocking watch on a herdr agent or pane. You will be woken with a report when it fires — do NOT poll `herdr agent read` in a loop, and NEVER run `herdr agent wait` or `agent prompt --wait` through bash (that blocks your whole turn). The pattern: prompt the worker WITHOUT --wait, then herdr_watch it, then end your turn or do other work.";
+	"Register a non-blocking watch on a herdr agent, pane, or bounded command. You will be woken with a report when it fires — do NOT poll `herdr agent read` in a loop, and NEVER run `herdr agent wait` or `agent prompt --wait` through bash (that blocks your whole turn). To watch a command finishing (CI runs, builds, deploys), prefer mode: 'command': you are woken with its exit code, with no pane or sentinel needed. For workers, prompt WITHOUT --wait, then herdr_watch them, then end your turn or do other work.";
 
 const WatchParams = Type.Object({
-	target: Type.String({ description: "Unique live agent name or pane ID" }),
-	mode: Type.Optional(StringEnum(["agent", "output"] as const)),
+	target: Type.Optional(
+		Type.String({
+			description: "Required for agent/output mode: unique live agent name or pane ID",
+		}),
+	),
+	mode: Type.Optional(StringEnum(["agent", "output", "command"] as const)),
 	until: Type.Optional(Type.Array(Type.String())),
-	match: Type.Optional(Type.String()),
-	regex: Type.Optional(Type.String()),
-	timeoutMs: Type.Optional(Type.Number()),
+	match: Type.Optional(
+		Type.String({
+			description:
+				"Output mode literal substring. Exactly one of match/regex; the existing pane snapshot is searched immediately on arm.",
+		}),
+	),
+	regex: Type.Optional(
+		Type.String({
+			description:
+				"Output mode Rust-syntax regex. Exactly one of regex/match; the existing pane snapshot is searched immediately on arm.",
+		}),
+	),
+	command: Type.Optional(
+		Type.String({
+			description:
+				"Command mode only: non-empty POSIX-shell command run as /bin/sh -c. Fires on any numeric exit code, including non-zero; signal deaths report as errors.",
+		}),
+	),
+	timeoutMs: Type.Optional(
+		Type.Number({
+			description:
+				"Positive integer timeout in milliseconds; required for command mode.",
+		}),
+	),
 	note: Type.Optional(Type.String()),
 	wake: Type.Optional(Type.Boolean()),
 });
@@ -93,8 +119,11 @@ function conditionSummary(spec: WatchSpec): string {
 			? `until ${spec.until.join("|")}`
 			: "until idle|done|blocked";
 	}
+	if (spec.mode === "command") {
+		return `command "${summarizeCommand(spec.command)}"`;
+	}
 	if (spec.regex !== undefined) return `regex /${spec.regex}/`;
-	return `match "${spec.match ?? ""}"`;
+	return `match "${spec.match}"`;
 }
 
 function lastLines(text: string, count: number): string | undefined {
@@ -105,6 +134,27 @@ function lastLines(text: string, count: number): string | undefined {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+export function buildTelemetryRecord(
+	record: WatchRecordPublic,
+	outcome: WatchOutcome,
+	triggerTurn: boolean,
+	countsAsWake: boolean,
+	wakesUsed: number,
+): Record<string, unknown> {
+	return {
+		watchId: record.id,
+		...(record.spec.mode === "command"
+			? { exitCode: outcome.exitCode }
+			: { target: record.spec.target }),
+		mode: record.spec.mode,
+		kind: outcome.kind,
+		durationMs: outcome.durationMs,
+		triggerTurn,
+		countsAsWake,
+		wakesUsed,
+	};
 }
 
 export default function herdrExtension(pi: ExtensionAPI): void {
@@ -154,16 +204,16 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		triggerTurn: boolean,
 		countsAsWake: boolean,
 	): void => {
-		appendTelemetry(config.telemetryPath, {
-			watchId: record.id,
-			target: record.spec.target,
-			mode: record.spec.mode,
-			kind: outcome.kind,
-			durationMs: outcome.durationMs,
-			triggerTurn,
-			countsAsWake,
-			wakesUsed,
-		});
+		appendTelemetry(
+			config.telemetryPath,
+			buildTelemetryRecord(
+				record,
+				outcome,
+				triggerTurn,
+				countsAsWake,
+				wakesUsed,
+			),
+		);
 	};
 
 	const handleOutcome = async (
@@ -202,7 +252,12 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 					tail = extractTail(tailResult.json, tailResult.stdout);
 				}
 			}
-			if (tail === undefined && outcome.json === undefined) {
+			if (record.spec.mode === "command") {
+				tail = lastLines(
+					[outcome.stdout, outcome.stderr].filter(Boolean).join("\n"),
+					10,
+				);
+			} else if (tail === undefined && outcome.json === undefined) {
 				tail = lastLines(outcome.stdout || outcome.stderr, 10);
 			}
 
@@ -232,8 +287,12 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			);
 			if (delivery.countsAsWake) wakesUsed += 1;
 
-			const state = extractAgentState(outcome.json);
+			const state =
+				record.spec.mode === "agent"
+					? extractAgentState(outcome.json)
+					: undefined;
 			if (
+				record.spec.mode === "agent" &&
 				outcome.kind === "fired" &&
 				state !== undefined &&
 				config.toastOn.includes(state)
@@ -329,30 +388,37 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use herdr_watch after prompting a herdr worker without --wait; continue other work or end the turn until the watch reports.",
 			"Never poll herdr agent read in a loop or run herdr agent wait or agent prompt --wait through bash; use herdr_watch instead.",
+			"To watch a command finishing (CI runs, builds, deploys), prefer mode: 'command' — you are woken with the exit code; no pane or sentinel is needed.",
+			"If a pane sentinel is still appropriate, print the exit status inline: …; printf '\\n__TAG_%s__\\n' \"$?\". Never assign to status: it is read-only in zsh and aborts the rest of the line. Keep a %s-style placeholder in the typed command so its echoed text cannot false-match the regex.",
 		],
 		parameters: WatchParams,
 		executionMode: "sequential",
 		async execute(_toolCallId, params) {
 			if (manager === undefined) throw new Error("no active session");
-			const spec: WatchSpec = {
-				target: params.target,
+			const specInput = {
 				mode: params.mode ?? "agent",
+				...(params.target === undefined ? {} : { target: params.target }),
 				...(params.until === undefined ? {} : { until: params.until }),
 				...(params.match === undefined ? {} : { match: params.match }),
 				...(params.regex === undefined ? {} : { regex: params.regex }),
+				...(params.command === undefined ? {} : { command: params.command }),
 				...(params.timeoutMs === undefined
 					? {}
 					: { timeoutMs: params.timeoutMs }),
 				...(params.note === undefined ? {} : { note: params.note }),
 				wake: params.wake ?? true,
 			};
-			const record = manager.start(spec);
+			const record = manager.start(specInput as WatchSpec);
 			updateFooter();
+			const armedOn =
+				record.spec.mode === "command"
+					? conditionSummary(record.spec)
+					: `${record.spec.target} (${conditionSummary(record.spec)})`;
 			return {
 				content: [
 					{
 						type: "text",
-						text: `watch #${record.id} armed on ${record.spec.target} (${conditionSummary(record.spec)}) — you will be woken when it fires; continue other work or end your turn.`,
+						text: `watch #${record.id} armed on ${armedOn} — you will be woken when it fires; continue other work or end your turn.`,
 					},
 				],
 				details: { watchId: record.id },
