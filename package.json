@@ -17,7 +17,8 @@
     "pack:delegate": "npm pack --workspace @season179/pi-delegate",
     "pack:guard": "npm pack --workspace @season179/pi-guard",
     "pack:model-fallback": "npm pack --workspace @season179/pi-model-fallback",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run && npm pack --workspace @season179/pi-model-fallback --dry-run"
+    "pack:memory": "npm pack --workspace @season179/pi-memory",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run && npm pack --workspace @season179/pi-model-fallback --dry-run && npm pack --workspace @season179/pi-memory --dry-run"
   },
   "engines": {
     "node": ">=22"
