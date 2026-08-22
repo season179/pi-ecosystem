@@ -2,7 +2,7 @@
 
 Gives [Pi](https://github.com/badlogic/pi-mono) a sparring partner: a second model that discusses, debates, pushes back, and fact-checks — like a candid senior colleague.
 
-The buddy sees the full session transcript and has **read-only** access to the repository (`read`, `grep`, `find`, `ls`) and the web (`lookup_docs` via DeepWiki, `read_webpage` via agent-browser). It can verify claims against actual files and current documentation — beyond both models' knowledge cutoffs — but it can never write, click, or act.
+The buddy sees the active persisted session transcript (subject to context-budget trimming), receives bounded runtime context including the current working directory, and has **read-only** access to the repository (`read`, `grep`, `find`, `ls`) and the web (`lookup_docs` via DeepWiki, `read_webpage` via agent-browser). Pi's system/developer prompt is not a persisted session entry and is not forwarded. The buddy can verify claims against actual files and current documentation — beyond both models' knowledge cutoffs — but it can never write, click, or act.
 
 ## Motivation
 
@@ -118,4 +118,4 @@ and preserve the boundaries recorded in the
 
 ## Security
 
-Pi extensions execute with your user permissions. The buddy's tools are read-only by construction — no write or edit, read-only shell commands, read-only browser verbs — but it sends your session transcript and repository excerpts to whichever model providers you configure. Fetched web content is treated as untrusted data, never as instructions. Review the source before installing.
+Pi extensions execute with your user permissions. The buddy's tools are read-only by construction — no write or edit, read-only shell commands, read-only browser verbs — but it sends your session transcript, current working-directory path, and repository excerpts to whichever model providers you configure. Fetched web content is treated as untrusted data, never as instructions. Review the source before installing.
