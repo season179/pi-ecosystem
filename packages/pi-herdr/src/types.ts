@@ -79,6 +79,7 @@ export type OutcomeKind = "fired" | "timeout" | "killed" | "error";
 export interface WatchOutcome {
 	kind: OutcomeKind;
 	exitCode: number | null;
+	signal?: NodeJS.Signals; // present when the child closed because of a signal
 	durationMs: number;
 	stdout: string; // raw CLI stdout (may be JSON)
 	stderr: string;

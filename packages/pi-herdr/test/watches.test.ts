@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "vitest";
 import type {
@@ -20,7 +23,9 @@ const fixture = fileURLToPath(
 );
 const originalBehavior = process.env.FAKE_HERDR_BEHAVIOR;
 const originalDelay = process.env.FAKE_HERDR_DELAY_MS;
+const originalStallReadyLog = process.env.FAKE_HERDR_STALL_READY_LOG;
 const managers: WatchManager[] = [];
+const stallReadyLogs: string[] = [];
 
 type OutcomeEvent = { record: WatchRecordPublic; outcome: WatchOutcome };
 
@@ -74,14 +79,23 @@ function sleep(ms: number): Promise<void> {
 beforeEach(() => {
 	process.env.FAKE_HERDR_BEHAVIOR = "ok";
 	delete process.env.FAKE_HERDR_DELAY_MS;
+	delete process.env.FAKE_HERDR_STALL_READY_LOG;
 });
 
 afterEach(async () => {
 	while (managers.length > 0) await managers.pop()?.shutdown();
+	while (stallReadyLogs.length > 0) {
+		rmSync(stallReadyLogs.pop() as string, { force: true });
+	}
 	if (originalBehavior === undefined) delete process.env.FAKE_HERDR_BEHAVIOR;
 	else process.env.FAKE_HERDR_BEHAVIOR = originalBehavior;
 	if (originalDelay === undefined) delete process.env.FAKE_HERDR_DELAY_MS;
 	else process.env.FAKE_HERDR_DELAY_MS = originalDelay;
+	if (originalStallReadyLog === undefined) {
+		delete process.env.FAKE_HERDR_STALL_READY_LOG;
+	} else {
+		process.env.FAKE_HERDR_STALL_READY_LOG = originalStallReadyLog;
+	}
 });
 
 describe("buildWatchArgs", () => {
@@ -387,24 +401,35 @@ describe("WatchManager", () => {
 		},
 	);
 
-	it("escalates an ignored SIGTERM to SIGKILL when stopped", async () => {
-		process.env.FAKE_HERDR_BEHAVIOR = "stall";
-		const harness = createHarness({ killGraceMs: 100 });
-		const completed = harness.nextOutcome();
-		const started = harness.manager.start(agentSpec());
-		await sleep(150);
+	it.skipIf(process.platform === "win32")(
+		"escalates an ignored SIGTERM to SIGKILL when stopped",
+		async () => {
+			process.env.FAKE_HERDR_BEHAVIOR = "stall";
+			const readyLog = join(
+				tmpdir(),
+				`pi-herdr-stall-ready-${process.pid}-${Date.now()}`,
+			);
+			process.env.FAKE_HERDR_STALL_READY_LOG = readyLog;
+			stallReadyLogs.push(readyLog);
+			const harness = createHarness({ killGraceMs: 100 });
+			const completed = harness.nextOutcome();
+			const started = harness.manager.start(agentSpec());
+			const readyDeadline = Date.now() + 2_000;
+			while (!existsSync(readyLog) && Date.now() < readyDeadline) await sleep(10);
+			assert.ok(existsSync(readyLog), "fake herdr did not become ready");
 
-		const stopStartedAt = Date.now();
-		const stopped = await harness.manager.stop(started.id);
-		const event = await completed;
+			const stopped = await harness.manager.stop(started.id);
+			const event = await completed;
 
-		assert.ok(Date.now() - stopStartedAt >= 100);
-		assert.ok(Date.now() - stopStartedAt < 2_000);
-		assert.deepEqual(stopped.map((record) => record.id), [started.id]);
-		assert.equal(event.record.status, "stopped");
-		assert.equal(event.outcome.kind, "killed");
-		assert.equal(harness.events.length, 1);
-	});
+			assert.match(readFileSync(readyLog, "utf8"), /^ready\nSIGTERM\n$/u);
+			assert.deepEqual(stopped.map((record) => record.id), [started.id]);
+			assert.equal(event.record.status, "stopped");
+			assert.equal(event.outcome.kind, "killed");
+			assert.equal(event.outcome.exitCode, null);
+			assert.equal(event.outcome.signal, "SIGKILL");
+			assert.equal(harness.events.length, 1);
+		},
+	);
 
 	it("enforces capacity only while watches are armed", async () => {
 		process.env.FAKE_HERDR_DELAY_MS = "100";

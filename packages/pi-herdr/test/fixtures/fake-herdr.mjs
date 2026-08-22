@@ -38,10 +38,15 @@ switch (behavior) {
 		console.error(JSON.stringify({ error: { code: "wait_timeout" } }));
 		process.exitCode = 1;
 		break;
-	case "stall":
-		process.on("SIGTERM", () => {});
+	case "stall": {
+		const logPath = process.env.FAKE_HERDR_STALL_READY_LOG;
+		process.on("SIGTERM", () => {
+			if (logPath) appendFileSync(logPath, "SIGTERM\n");
+		});
+		if (logPath) appendFileSync(logPath, "ready\n");
 		setInterval(() => {}, 60_000);
 		break;
+	}
 	case "bad-exit":
 		console.error("not-json garbage from fake herdr");
 		process.exitCode = 3;

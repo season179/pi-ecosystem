@@ -302,7 +302,7 @@ export class WatchManager {
 			);
 			this.finish(entry, null);
 		});
-		child.once("close", (code) => this.finish(entry, code));
+		child.once("close", (code, signal) => this.finish(entry, code, signal));
 		if (spec.mode === "command") {
 			entry.timeoutTimer = setTimeout(
 				() => this.terminate(entry, "timeout"),
@@ -366,7 +366,11 @@ export class WatchManager {
 		}, this.killGraceMs);
 	}
 
-	private finish(entry: WatchEntry, exitCode: number | null): void {
+	private finish(
+		entry: WatchEntry,
+		exitCode: number | null,
+		signal?: NodeJS.Signals | null,
+	): void {
 		if (entry.closed) return;
 		entry.closed = true;
 		if (entry.timeoutTimer !== undefined) clearTimeout(entry.timeoutTimer);
@@ -380,6 +384,7 @@ export class WatchManager {
 		const outcome: WatchOutcome = {
 			kind: this.classify(entry, exitCode, stderr, errorJson),
 			exitCode,
+			...(signal == null ? {} : { signal }),
 			durationMs: Date.now() - entry.record.startedAt,
 			stdout,
 			stderr,
