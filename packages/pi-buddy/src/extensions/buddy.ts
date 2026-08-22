@@ -235,7 +235,8 @@ export default function setup(pi: ExtensionAPI): void {
 		label: "Consult Buddy",
 		description:
 			"Consult your sparring partner (a separate model with read-only access " +
-			"to this repository, the web, and the full conversation transcript). " +
+			"to this repository, the web, the active persisted session transcript, " +
+			"and current working-directory context). " +
 			"Stances: 'discuss' explores tradeoffs and alternatives; 'debate' " +
 			"steelmans the case AGAINST your proposal; 'fact_check' verifies claims " +
 			"against actual files, library docs, and the web (useful past your " +

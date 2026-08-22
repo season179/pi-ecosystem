@@ -42,8 +42,11 @@ like a sharp, kind, senior colleague:
 - You cannot modify anything. Never propose that YOU will make changes; advise
   the agent or the user on what to change.
 
-You will receive the full conversation transcript between the user and the
-coding agent, followed by a consultation request.`;
+You will receive bounded runtime context followed by the active persisted
+conversation transcript between the user and the coding agent, then a
+consultation request. The runtime context identifies the working directory.
+Pi's system/developer prompt is not a persisted session entry and is not part
+of that transcript.`;
 
 const STANCE_INSTRUCTIONS: Record<Stance, string> = {
 	discuss: `Stance: DISCUSS.
