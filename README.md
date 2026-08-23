@@ -7,7 +7,7 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-buddy`](./packages/pi-buddy) — Published. Read-only sparring partner for requested consultations and automatic review.
 - [`@season179/pi-herdr`](./packages/pi-herdr) — Pre-release. Non-blocking watch/wake bridge for a Pi orchestrator already operating through Herdr.
 - [`@season179/pi-guard`](./packages/pi-guard) — Pre-release. Intent reviewer that blocks unauthorized or unrelated tool actions.
-- [`@season179/pi-memory`](./packages/pi-memory) — Pre-release. Durable, agent-managed memory through explicit remember/recall tools.
+- [`@season179/pi-memory`](./packages/pi-memory) — Pre-release. Scoped project/legacy-global memory with explicit tools and mode-controlled transient catalogs.
 - [`@season179/pi-model-fallback`](./packages/pi-model-fallback) — Published. Automatic model failover driven by a standalone `fallback-models.json` config.
 - [`@season179/pi-worktree`](./packages/pi-worktree) — Published. Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.

@@ -1,7 +1,7 @@
 {
   "name": "@season179/pi-memory",
-  "version": "26.8.0",
-  "description": "Gives Pi durable, agent-managed memory through remember and recall tools.",
+  "version": "26.8.1",
+  "description": "Durable scoped project memory with explicit tools and mode-controlled automatic awareness for Pi.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",
@@ -23,6 +23,12 @@
     "README.md",
     "LICENSE"
   ],
+  "exports": {
+    "./extension": {
+      "types": "./dist/extensions/memory.d.ts",
+      "import": "./dist/extensions/memory.js"
+    }
+  },
   "pi": {
     "extensions": [
       "./dist/extensions/memory.js"
@@ -31,12 +37,13 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
     "test": "vitest run",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
