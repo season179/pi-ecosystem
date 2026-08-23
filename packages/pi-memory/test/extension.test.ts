@@ -7,7 +7,6 @@ import { loadMemoryConfig, memoryConfigPath, type MemoryMode } from "../src/conf
 import setup, {
 	appendMemoryPolicy,
 	createMemoryExtension,
-	isCatalogApiSupported,
 	parsePiMemoryCommand,
 } from "../src/extensions/memory.js";
 import {
@@ -323,14 +322,14 @@ describe("pi-memory extension registration", () => {
 		assert.match(JSON.stringify(contextResult), /<pi_memory advisory/u);
 	});
 
-	it("omits catalogs for unverified provider APIs and re-enables them after a safe model switch", async () => {
+	it("injects one catalog independently of the selected model API", async () => {
 		const rig = await createRig("read-only");
 		const paths = await pathsFor(rig);
 		await createMemory(
 			paths.project.directory,
 			"m_aaaaaaaaaa",
 			"2026-08-23T00:00:00.000Z",
-			"Provider gate",
+			"Provider-independent memory",
 			"body excluded",
 			{
 				containment: storeContainment(paths.root),
@@ -339,25 +338,33 @@ describe("pi-memory extension registration", () => {
 				},
 			},
 		);
-		const event = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		let messages: any[] = [{ role: "user", content: "hello", timestamp: 1 }];
+		for (const api of ["openai-codex-responses", "bedrock-converse-stream", "google-generative-ai", "future-api"]) {
+			rig.ctx.context.model = { api };
+			const [result] = await rig.harness.emit("context", { messages }, rig.ctx.context);
+			const serialized = JSON.stringify(result);
+			assert.equal(serialized.match(/<pi_memory advisory/gu)?.length, 1);
+			assert.match(serialized, /hello/u);
+			messages = (result as { messages: any[] }).messages;
+		}
+		assert.deepEqual(messages.map((message) => message.role), ["user"]);
+		assert.equal(rig.ctx.notifications.length, 0);
 
-		assert.equal(isCatalogApiSupported("bedrock-converse-stream"), false);
-		rig.ctx.context.model = { api: "bedrock-converse-stream" };
-		assert.deepEqual(await rig.harness.emit("context", event, rig.ctx.context), [undefined]);
-		assert.equal(rig.ctx.notifications.length, 1);
-		assert.match(rig.ctx.notifications[0].message, /omitted for bedrock-converse-stream/u);
-		await rig.harness.emit("context", event, rig.ctx.context);
-		assert.equal(rig.ctx.notifications.length, 1, "provider warning must be once per API per session");
-
-		assert.equal(isCatalogApiSupported("openai-completions"), true);
-		rig.ctx.context.model = { api: "openai-completions" };
-		const [safeResult] = await rig.harness.emit("context", event, rig.ctx.context);
-		assert.match(JSON.stringify(safeResult), /<pi_memory advisory/u);
-
-		rig.ctx.context.model = { api: "future-unknown-api" };
-		assert.deepEqual(await rig.harness.emit("context", event, rig.ctx.context), [undefined]);
-		assert.equal(rig.ctx.notifications.length, 2);
-		assert.equal(isCatalogApiSupported(undefined), true);
+		const quoted = '<pi_memory advisory="untrusted" scope="project" quoted="by-user">keep me</pi_memory>';
+		const [quotedResult] = await rig.harness.emit(
+			"context",
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: quoted }], timestamp: 1 },
+					{ role: "assistant", content: [{ type: "text", text: "reply" }], timestamp: 2 },
+					{ role: "user", content: "latest", timestamp: 3 },
+				],
+			},
+			rig.ctx.context,
+		);
+		const quotedMessages = (quotedResult as { messages: any[] }).messages;
+		assert.equal(quotedMessages[0].content[0].text, quoted, "earlier user text must not be rewritten");
+		assert.equal(JSON.stringify(quotedMessages[2]).match(/<pi_memory advisory/gu)?.length, 1);
 	});
 
 	it("implements off/read-only/read-write for project writes while preserving legacy writes", async () => {

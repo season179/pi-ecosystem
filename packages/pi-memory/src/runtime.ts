@@ -433,31 +433,59 @@ export function recallScoped(candidates: readonly ScopedMemory[], query: string,
 
 type AgentContextMessage = ContextEvent["messages"][number];
 
-function isPiMemoryCatalogMessage(message: AgentContextMessage): boolean {
+function isLegacyPiMemoryCatalogMessage(message: AgentContextMessage): boolean {
 	const candidate = message as { role?: unknown; customType?: unknown };
 	return candidate.role === "custom" && candidate.customType === PI_MEMORY_CATALOG_TYPE;
 }
 
+function isPiMemoryCatalogTextBlock(block: unknown): boolean {
+	if (typeof block !== "object" || block === null) return false;
+	const candidate = block as { type?: unknown; text?: unknown };
+	if (candidate.type !== "text" || typeof candidate.text !== "string") return false;
+	const text = candidate.text.trim();
+	return text.startsWith('<pi_memory advisory="untrusted" scope="project"') && text.endsWith("</pi_memory>");
+}
+
 /**
- * Build the context-event result: strip any previous pi-memory catalog block
- * (at-most-one guarantee even against re-fed histories), then append exactly
- * one trailing transient catalog message with the cached render timestamp.
- * Returns undefined (no modification) when there is nothing to inject.
+ * Merge one transient catalog text block into the most recent existing user
+ * turn. This preserves the user's original text as a separate block and avoids
+ * creating consecutive user turns on providers that enforce role alternation.
+ * Previous extension-owned catalog blocks are removed defensively.
  */
 export function buildContextResult(
 	messages: readonly AgentContextMessage[],
 	catalog: { content: string; renderedAtMs: number } | undefined,
 ): { messages: AgentContextMessage[] } | undefined {
 	if (catalog === undefined) return undefined;
-	const kept = messages.filter((message) => !isPiMemoryCatalogMessage(message));
-	const catalogMessage = {
-		role: "custom",
-		customType: PI_MEMORY_CATALOG_TYPE,
-		content: catalog.content,
-		display: false,
-		timestamp: catalog.renderedAtMs,
-	} as AgentContextMessage;
-	return { messages: [...kept, catalogMessage] };
+	const kept = messages.filter((message) => !isLegacyPiMemoryCatalogMessage(message));
+	let target = -1;
+	for (let index = kept.length - 1; index >= 0; index -= 1) {
+		if ((kept[index] as { role?: unknown }).role === "user") {
+			target = index;
+			break;
+		}
+	}
+	if (target === -1) return undefined;
+
+	const transformed = kept.map((message, index) => {
+		if ((message as { role?: unknown }).role !== "user") return message;
+		const user = message as AgentContextMessage & { content: unknown };
+		// Only the target turn can contain a catalog from a re-fed context result.
+		// Never inspect or rewrite earlier user turns: quoted marker-shaped user
+		// text must remain byte-for-byte intact.
+		if (index !== target) return message;
+		const originalBlocks =
+			typeof user.content === "string"
+				? [{ type: "text", text: user.content }]
+				: Array.isArray(user.content)
+					? user.content.filter((block) => !isPiMemoryCatalogTextBlock(block))
+					: [];
+		return {
+			...user,
+			content: [...originalBlocks, { type: "text", text: catalog.content }],
+		} as AgentContextMessage;
+	});
+	return { messages: transformed };
 }
 
 // ---------------------------------------------------------------------------

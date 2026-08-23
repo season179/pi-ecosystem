@@ -141,12 +141,17 @@ function catalogMessages(capture: ProviderCapture) {
 	return capture.context.messages.filter((message) => messageText(message).includes(CATALOG_MARKER));
 }
 
-function assertOneTrailingCatalog(capture: ProviderCapture): string {
+function assertOneCatalog(capture: ProviderCapture): string {
 	const catalogs = catalogMessages(capture);
 	assert.equal(catalogs.length, 1, `expected one catalog in ${JSON.stringify(capture.context.messages)}`);
-	assert.equal(capture.context.messages.at(-1), catalogs[0], "catalog must be the trailing provider message");
-	assert.equal(catalogs[0].role, "user", "custom catalog must convert to a provider user message");
-	return messageText(catalogs[0]);
+	assert.equal(catalogs[0].role, "user", "catalog must be merged into an existing user turn");
+	assert.equal(
+		messageText(catalogs[0]).split(CATALOG_MARKER).length - 1,
+		1,
+		"the user turn must contain exactly one catalog block",
+	);
+	const text = messageText(catalogs[0]);
+	return text.slice(text.indexOf(CATALOG_MARKER));
 }
 
 function assertNoCatalog(capture: ProviderCapture): void {
@@ -240,7 +245,7 @@ afterEach(async () => {
 });
 
 describe("Pi SDK automatic memory lifecycle", () => {
-	it("injects exactly one trailing catalog initially and refreshes it after a remember tool call", async () => {
+	it("injects exactly one merged catalog initially and refreshes it after a remember tool call", async () => {
 		const input = await sandbox();
 		await projectSetup(input, "read-write", [seedMemory()]);
 		const subject = await harness(input, {
@@ -265,14 +270,14 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Create one project memory, then finish.");
 
 		assert.equal(subject.captures.length, 2, "tool use must cause one post-tool provider call");
-		const initialCatalog = assertOneTrailingCatalog(subject.captures[0]);
-		const postToolCatalog = assertOneTrailingCatalog(subject.captures[1]);
+		const initialCatalog = assertOneCatalog(subject.captures[0]);
+		const postToolCatalog = assertOneCatalog(subject.captures[1]);
 		assert.match(initialCatalog, new RegExp(SEED_TITLE));
 		assert.doesNotMatch(initialCatalog, new RegExp(CREATED_TITLE));
 		assert.match(postToolCatalog, new RegExp(SEED_TITLE));
 		assert.match(postToolCatalog, new RegExp(CREATED_TITLE));
 		assert.notEqual(catalogGeneration(initialCatalog), catalogGeneration(postToolCatalog));
-		assert.equal(subject.captures[1].context.messages.at(-2)?.role, "toolResult");
+		assert.equal(subject.captures[1].context.messages.at(-1)?.role, "toolResult");
 		assert.doesNotMatch(initialCatalog, new RegExp(SEED_BODY_CANARY));
 		assert.doesNotMatch(postToolCatalog, /The mutation body remains out/u);
 		assertCatalogNotPersisted(subject);
@@ -289,7 +294,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		});
 
 		await subject.prompt("Read memory before another process disables it.");
-		assertOneTrailingCatalog(subject.captures[0]);
+		assertOneCatalog(subject.captures[0]);
 		const configPath = memoryConfigPath(setup.memoryRoot);
 		const config = JSON.parse(await readFile(configPath, "utf8")) as {
 			projects: Record<string, { mode: MemoryMode }>;
@@ -313,7 +318,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		});
 
 		await subject.prompt("Read the valid project catalog.");
-		assertOneTrailingCatalog(subject.captures[0]);
+		assertOneCatalog(subject.captures[0]);
 		const sidecarPath = join(setup.projectDirectory, "project.json");
 		const sidecar = JSON.parse(await readFile(sidecarPath, "utf8")) as Record<string, unknown>;
 		sidecar.identityHash = `sha256:${"0".repeat(64)}`;
@@ -334,7 +339,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 
 		await subject.prompt("Persist this ordinary user turn.");
 
-		assertOneTrailingCatalog(subject.captures[0]);
+		assertOneCatalog(subject.captures[0]);
 		assertCatalogNotPersisted(subject);
 		const jsonl = await subject.readJsonl();
 		assert.ok(jsonl);
@@ -401,7 +406,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		const before = await directorySnapshot(setup.projectDirectory);
 		const subject = await harness(input, { responses: [{ kind: "text", text: "read only" }] });
 		await subject.prompt("Read a filesystem-read-only store.");
-		assertOneTrailingCatalog(subject.captures[0]);
+		assertOneCatalog(subject.captures[0]);
 		assert.deepEqual(await directorySnapshot(setup.projectDirectory), before);
 	});
 
@@ -433,8 +438,8 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Retry this ordinary provider turn deterministically.");
 
 		assert.equal(subject.captures.length, 2, "one transient failure must produce exactly one retry");
-		const failedCatalog = assertOneTrailingCatalog(subject.captures[0]);
-		const retryCatalog = assertOneTrailingCatalog(subject.captures[1]);
+		const failedCatalog = assertOneCatalog(subject.captures[0]);
+		const retryCatalog = assertOneCatalog(subject.captures[1]);
 		assert.equal(retryCatalog, failedCatalog, "an unchanged store must stay current across retry");
 		assert.doesNotMatch(JSON.stringify(subject.captures[1].context), new RegExp(transientError));
 		assert.match(JSON.stringify(subject.entries()), new RegExp(transientError));
@@ -462,7 +467,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Continue after manual compaction.");
 
 		assert.equal(subject.captures.length, 5);
-		for (const index of [0, 1, 2, 4]) assertOneTrailingCatalog(subject.captures[index]);
+		for (const index of [0, 1, 2, 4]) assertOneCatalog(subject.captures[index]);
 		assertNoCatalog(subject.captures[3]);
 		assert.doesNotMatch(JSON.stringify(subject.captures[3].context), new RegExp(SEED_TITLE));
 		assertCatalogNotPersisted(subject);
@@ -487,7 +492,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		}
 
 		assert.equal(subject.captures.length, 4, "threshold crossing must run one automatic summary call");
-		for (const index of [0, 1, 2]) assertOneTrailingCatalog(subject.captures[index]);
+		for (const index of [0, 1, 2]) assertOneCatalog(subject.captures[index]);
 		assertNoCatalog(subject.captures[3]);
 		assert.doesNotMatch(JSON.stringify(subject.captures[3].context), new RegExp(SEED_TITLE));
 		assert.equal(subject.entries().filter((entry) => entry.type === "compaction").length, 1);
@@ -498,7 +503,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Continue with the current store after threshold compaction.");
 
 		assert.equal(subject.captures.length, 5);
-		const currentCatalog = assertOneTrailingCatalog(subject.captures[4]);
+		const currentCatalog = assertOneCatalog(subject.captures[4]);
 		assert.match(currentCatalog, new RegExp(THRESHOLD_TITLE));
 		assert.doesNotMatch(currentCatalog, new RegExp(SEED_TITLE));
 		await assertNoCatalogPersistence(subject, [SEED_TITLE, THRESHOLD_TITLE, SEED_BODY_CANARY]);
@@ -518,8 +523,8 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("After reload.");
 
 		assert.equal(subject.captures.length, 2);
-		const before = assertOneTrailingCatalog(subject.captures[0]);
-		const after = assertOneTrailingCatalog(subject.captures[1]);
+		const before = assertOneCatalog(subject.captures[0]);
+		const after = assertOneCatalog(subject.captures[1]);
 		assert.equal(after, before, "unchanged store must render byte-stably after reload");
 		assertCatalogNotPersisted(subject);
 	});
@@ -538,7 +543,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		const initialSession = subject.session;
 		const initialPath = subject.session.sessionFile;
 		assert.ok(initialPath);
-		const before = assertOneTrailingCatalog(subject.captures[0]);
+		const before = assertOneCatalog(subject.captures[0]);
 		assert.match(before, new RegExp(SEED_TITLE));
 
 		await replaceProjectMemories(setup, [
@@ -551,7 +556,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Prompt after public newSession replacement.");
 
 		assert.equal(subject.captures.length, 2);
-		const after = assertOneTrailingCatalog(subject.captures[1]);
+		const after = assertOneCatalog(subject.captures[1]);
 		assert.match(after, new RegExp(NEW_SESSION_TITLE));
 		assert.doesNotMatch(after, new RegExp(SEED_TITLE));
 		assert.notEqual(catalogGeneration(after), catalogGeneration(before));
@@ -578,7 +583,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 			.entries()
 			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
 		assert.ok(forkPoint);
-		const before = assertOneTrailingCatalog(subject.captures[0]);
+		const before = assertOneCatalog(subject.captures[0]);
 
 		await replaceProjectMemories(setup, [
 			seedMemory({ title: FORK_TITLE, updated: "2026-08-23T00:03:00.000Z" }),
@@ -590,7 +595,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Prompt after public fork replacement.");
 
 		assert.equal(subject.captures.length, 2);
-		const after = assertOneTrailingCatalog(subject.captures[1]);
+		const after = assertOneCatalog(subject.captures[1]);
 		assert.match(after, new RegExp(FORK_TITLE));
 		assert.doesNotMatch(after, new RegExp(SEED_TITLE));
 		assert.notEqual(catalogGeneration(after), catalogGeneration(before));
@@ -618,7 +623,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await source.prompt("Create the saved session in the replacement project.");
 		const sourcePath = source.session.sessionFile;
 		assert.ok(sourcePath);
-		assert.match(assertOneTrailingCatalog(source.captures[0]), new RegExp(RESUME_SOURCE_TITLE));
+		assert.match(assertOneCatalog(source.captures[0]), new RegExp(RESUME_SOURCE_TITLE));
 
 		const subject = await harness(input, {
 			persistSession: true,
@@ -631,7 +636,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		const initialSession = subject.session;
 		const initialPath = subject.session.sessionFile;
 		assert.ok(initialPath);
-		const before = assertOneTrailingCatalog(subject.captures[0]);
+		const before = assertOneCatalog(subject.captures[0]);
 		assert.match(before, new RegExp(RESUME_TARGET_TITLE));
 		assert.doesNotMatch(before, new RegExp(RESUME_SOURCE_TITLE));
 
@@ -642,7 +647,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt("Prompt after public resume replacement.");
 
 		assert.equal(subject.captures.length, 2);
-		const after = assertOneTrailingCatalog(subject.captures[1]);
+		const after = assertOneCatalog(subject.captures[1]);
 		assert.match(after, new RegExp(RESUME_SOURCE_TITLE));
 		assert.doesNotMatch(after, new RegExp(RESUME_TARGET_TITLE));
 		assert.notEqual(catalogGeneration(after), catalogGeneration(before));
@@ -675,7 +680,7 @@ describe("Pi SDK automatic memory lifecycle", () => {
 		await subject.prompt(`Overflow turn ${"context ".repeat(80)}`);
 
 		assert.equal(subject.captures.length, 5);
-		for (const index of [0, 1, 2, 4]) assertOneTrailingCatalog(subject.captures[index]);
+		for (const index of [0, 1, 2, 4]) assertOneCatalog(subject.captures[index]);
 		assertNoCatalog(subject.captures[3]);
 		assert.doesNotMatch(JSON.stringify(subject.captures[3].context), new RegExp(SEED_TITLE));
 		assert.doesNotMatch(JSON.stringify(subject.captures[4].context), new RegExp(overflowMessage));

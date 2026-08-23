@@ -35,20 +35,6 @@ export { appendMemoryPolicy, memoryPolicyBlock, PI_MEMORY_POLICY_MARKER } from "
 const SCOPE_DESCRIPTION =
 	"Store to act on. Use project unless the user explicitly asks for cross-project global memory; legacy-global is the pre-scope global store.";
 
-/** APIs verified to accept the trailing catalog's additional user turn. */
-const CATALOG_SAFE_APIS: ReadonlySet<string> = new Set([
-	"anthropic-messages",
-	"openai-completions",
-	"openai-responses",
-	"azure-openai-responses",
-	"openai-codex-responses",
-]);
-
-/** Unknown means no provider request can yet be serialized, so retain the catalog. */
-export function isCatalogApiSupported(api: string | undefined): boolean {
-	return api === undefined || CATALOG_SAFE_APIS.has(api);
-}
-
 const RememberParams = Type.Object({
 	action: StringEnum(["create", "update", "delete"] as const, {
 		description: "Create, update, or delete a persistent memory",
@@ -257,8 +243,9 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 		return appended === undefined ? undefined : { systemPrompt: appended };
 	});
 
-	// Transient trailing catalog on every ordinary provider request. Strictly
-	// read-only and fail-open: memory trouble may cost the catalog, never the task.
+	// Transient catalog merged into the current user turn on every ordinary
+	// provider request. Strictly read-only and fail-open: memory trouble may
+	// cost the catalog, never the task.
 	pi.on("context", async (event, ctx) => {
 		try {
 			const state = await runtime.state(ctx.cwd);
@@ -273,16 +260,6 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 			}
 			if (state.effectiveMode.mode === "off") return undefined;
 			if (state.identity.status !== "ok" || state.catalog === undefined) return undefined;
-			const api = typeof ctx.model?.api === "string" ? ctx.model.api : undefined;
-			if (!isCatalogApiSupported(api)) {
-				warnOnce(
-					state,
-					ctx,
-					`catalog-api-${api}`,
-					`pi-memory: catalog omitted for ${api} requests — this API is not verified to accept a trailing user turn.`,
-				);
-				return undefined;
-			}
 			const catalog = await state.catalog.get();
 			if (catalog.state === "error") {
 				warnOnce(state, ctx, "catalog-error", `pi-memory: catalog omitted for this request — ${catalog.message}`);

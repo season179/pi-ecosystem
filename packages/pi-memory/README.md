@@ -90,8 +90,9 @@ unreadable or malformed config safely selects `off` and is never overwritten.
 
 ## Automatic Catalog
 
-In `read-only` and `read-write`, each ordinary provider request can receive one
-trailing, transient catalog for the current project. It contains metadata only:
+In `read-only` and `read-write`, each ordinary provider request receives one
+transient catalog for the current project, merged into the existing user turn so
+it works independently of the selected model. It contains metadata only:
 ID, title, tags, retrieval cue, and update time. It contains no bodies, is not
 written to the Pi session JSONL, and is treated as untrusted advisory context.
 Use `recall` with `scope=project` for full bodies.
@@ -103,12 +104,8 @@ The whole catalog is capped at all three limits:
 - 200 entries
 
 Newest entries are retained first and an omission count directs the agent to
-`recall`. An empty or unreadable project store injects no catalog; memory errors
-fail open so they do not fail the user's task. Catalog injection is currently
-verified for Anthropic Messages and OpenAI Completions/Responses (including
-Azure and Codex Responses). It is omitted with a warning for other APIs because Bedrock
-and Gemini reject the resulting trailing user turn; switching to a verified API
-re-enables it for the next request.
+`recall`. An empty or unreadable project store injects no catalog; memory errors fail open
+so they do not fail the user's task.
 
 ## Tools
 

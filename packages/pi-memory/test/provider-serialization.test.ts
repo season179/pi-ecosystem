@@ -1,16 +1,16 @@
 /**
- * B7 provider-serialization gate: run the real pi-memory extension through the
- * Pi SDK to obtain the two trailing-catalog request shapes, then serialize the
- * captured agent-layer contexts through the pinned pi-ai 0.80.10 provider
- * serializers and assert the exact wire roles/grouping each provider receives.
+ * Provider-serialization gate: run the real pi-memory extension through the
+ * Pi SDK to obtain initial and post-tool contexts, then serialize them through
+ * the pinned pi-ai 0.80.10 provider serializers. The catalog must remain a
+ * text block in an existing user turn, never an extra conversation turn.
  *
  * No network: every serializer is intercepted at its public `onPayload` hook
  * (called after payload construction, before the HTTP request) and aborted with
  * a sentinel error; `globalThis.fetch` is additionally stubbed to fail loudly.
  *
- * Shapes under test (agent-message layer → provider layer):
- *   initial run   … user(prompt), custom(catalog)            → …user, user
- *   post-tool run … assistant(toolCall), toolResult, custom  → …toolResult, user
+ * Shapes under test (agent-message layer):
+ *   initial run   … user(prompt + catalog block)
+ *   post-tool run … user(prompt + catalog block), assistant(toolCall), toolResult
  */
 import { stream as anthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as bedrockConverseStream } from "@earendil-works/pi-ai/api/bedrock-converse-stream";
@@ -224,18 +224,15 @@ beforeAll(async () => {
 	assert.equal(postToolRun.harness.captures.length, 2);
 	const postTool = postToolRun.harness.captures[1].context;
 
-	// Anchor the preconditions this whole suite depends on: the agent layer
-	// really produced `user, user(catalog)` and `…toolResult, user(catalog)`.
-	assert.deepEqual(
-		initial.messages.map((message) => message.role),
-		["user", "user"],
-	);
-	assert.match(textOf(initial.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+	// Anchor the provider-independent shape: the catalog is a separate text
+	// block inside the existing user turn, never an additional conversation turn.
+	assert.deepEqual(initial.messages.map((message) => message.role), ["user"]);
+	assert.match(textOf(initial.messages[0]?.content), new RegExp(CATALOG_MARKER));
 	assert.deepEqual(
 		postTool.messages.map((message) => message.role),
-		["user", "assistant", "toolResult", "user"],
+		["user", "assistant", "toolResult"],
 	);
-	assert.match(textOf(postTool.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+	assert.match(textOf(postTool.messages[0]?.content), new RegExp(CATALOG_MARKER));
 
 	shapes = { initial, postTool };
 
@@ -250,228 +247,117 @@ afterAll(async () => {
 	for (const cleanup of cleanups.reverse()) await cleanup();
 });
 
-describe("anthropic-messages serialization of the trailing catalog", () => {
-	it("initial run ends in two consecutive user messages with the catalog last", async () => {
-		const payload = await serializePayload<AnthropicPayload>(
-			anthropicMessages,
-			MODELS["anthropic-messages"](),
-			shapes.initial,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["user", "user"],
-		);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+describe("anthropic-messages catalog serialization", () => {
+	it("keeps the initial catalog inside one user turn", async () => {
+		const payload = await serializePayload<AnthropicPayload>(anthropicMessages, MODELS["anthropic-messages"](), shapes.initial);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["user"]);
+		assert.match(textOf(payload.messages[0].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
-		// Anthropic documents that consecutive same-role turns are accepted
-		// (combined into a single turn), so this grouping is contract-safe.
 	});
 
-	it("post-tool run keeps tool_result first in its own user message and the catalog in a separate trailing user message", async () => {
-		const payload = await serializePayload<AnthropicPayload>(
-			anthropicMessages,
-			MODELS["anthropic-messages"](),
-			shapes.postTool,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["user", "assistant", "user", "user"],
-		);
+	it("preserves tool-use/result adjacency without adding a user turn", async () => {
+		const payload = await serializePayload<AnthropicPayload>(anthropicMessages, MODELS["anthropic-messages"](), shapes.postTool);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["user", "assistant", "user"]);
 		const assistant = payload.messages[1].content as { type: string; id?: string }[];
 		const toolUse = assistant.find((block) => block.type === "tool_use");
-		assert.ok(toolUse, "assistant turn must serialize the tool_use block");
-		const toolResultTurn = payload.messages[2].content as { type: string; tool_use_id?: string }[];
-		assert.equal(toolResultTurn[0]?.type, "tool_result");
-		assert.equal(toolResultTurn[0]?.tool_use_id, toolUse?.id);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
-		assert.doesNotMatch(
-			textOf(payload.messages.at(-1)?.content),
-			/tool_result/u,
-			"the catalog user turn must contain no tool_result blocks",
-		);
+		const toolResult = payload.messages[2].content as { type: string; tool_use_id?: string }[];
+		assert.equal(toolResult[0]?.tool_use_id, toolUse?.id);
+		assert.match(textOf(payload.messages[0].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
 
-describe("openai-completions serialization of the trailing catalog", () => {
-	it("initial run serializes system, user, user", async () => {
-		const payload = await serializePayload<CompletionsPayload>(
-			openaiCompletions,
-			MODELS["openai-completions"](),
-			shapes.initial,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["system", "user", "user"],
-		);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+describe("openai-completions catalog serialization", () => {
+	it("keeps the initial catalog inside one user turn", async () => {
+		const payload = await serializePayload<CompletionsPayload>(openaiCompletions, MODELS["openai-completions"](), shapes.initial);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["system", "user"]);
+		assert.match(textOf(payload.messages[1].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 
-	it("post-tool run serializes assistant tool_calls, a tool message, then the catalog user message", async () => {
-		const payload = await serializePayload<CompletionsPayload>(
-			openaiCompletions,
-			MODELS["openai-completions"](),
-			shapes.postTool,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["system", "user", "assistant", "tool", "user"],
-		);
-		const assistant = payload.messages[2];
-		assert.equal(assistant.tool_calls?.length, 1);
-		assert.equal(payload.messages[3].tool_call_id, assistant.tool_calls?.[0]?.id);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+	it("preserves tool-call/result adjacency without adding a user turn", async () => {
+		const payload = await serializePayload<CompletionsPayload>(openaiCompletions, MODELS["openai-completions"](), shapes.postTool);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["system", "user", "assistant", "tool"]);
+		assert.equal(payload.messages[3].tool_call_id, payload.messages[2].tool_calls?.[0]?.id);
+		assert.match(textOf(payload.messages[1].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 
-	it("bridges tool→user with a synthetic assistant message on compat-flagged providers", async () => {
-		// pi-ai already knows some OpenAI-compatible providers reject a user
-		// message directly after tool results and self-repairs via
-		// requiresAssistantAfterToolResult; the trailing catalog rides that fix.
+	it("needs no synthetic bridge on compat-flagged providers", async () => {
 		const flagged: Model<Api> = {
 			...MODELS["openai-completions"](),
 			compat: { requiresAssistantAfterToolResult: true },
 		} as Model<Api>;
 		const payload = await serializePayload<CompletionsPayload>(openaiCompletions, flagged, shapes.postTool);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["system", "user", "assistant", "tool", "assistant", "user"],
-		);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+		assert.deepEqual(payload.messages.map((message) => message.role), ["system", "user", "assistant", "tool"]);
+		assert.match(textOf(payload.messages[1].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
 
-describe("openai-responses serialization of the trailing catalog", () => {
-	it("initial run serializes system, user, user input items", async () => {
-		const payload = await serializePayload<ResponsesPayload>(
-			openaiResponses,
-			MODELS["openai-responses"](),
-			shapes.initial,
-		);
-		assert.deepEqual(
-			payload.input.map((item) => item.role ?? item.type),
-			["system", "user", "user"],
-		);
-		assert.match(textOf(payload.input.at(-1)?.content), new RegExp(CATALOG_MARKER));
+describe("openai-responses catalog serialization", () => {
+	it("keeps the initial catalog inside one user input item", async () => {
+		const payload = await serializePayload<ResponsesPayload>(openaiResponses, MODELS["openai-responses"](), shapes.initial);
+		assert.deepEqual(payload.input.map((item) => item.role ?? item.type), ["system", "user"]);
+		assert.match(textOf(payload.input[1].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 
-	it("post-tool run serializes function_call, function_call_output, then the catalog user item", async () => {
-		const payload = await serializePayload<ResponsesPayload>(
-			openaiResponses,
-			MODELS["openai-responses"](),
-			shapes.postTool,
-		);
-		assert.deepEqual(
-			payload.input.map((item) => item.role ?? item.type),
-			["system", "user", "function_call", "function_call_output", "user"],
-		);
-		const call = payload.input[2] as { call_id?: string };
-		const output = payload.input[3] as { call_id?: string };
-		assert.equal(output.call_id, call.call_id);
-		assert.match(textOf(payload.input.at(-1)?.content), new RegExp(CATALOG_MARKER));
+	it("preserves function call/output adjacency without adding a user item", async () => {
+		const payload = await serializePayload<ResponsesPayload>(openaiResponses, MODELS["openai-responses"](), shapes.postTool);
+		assert.deepEqual(payload.input.map((item) => item.role ?? item.type), ["system", "user", "function_call", "function_call_output"]);
+		assert.equal((payload.input[3] as { call_id?: string }).call_id, (payload.input[2] as { call_id?: string }).call_id);
+		assert.match(textOf(payload.input[1].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
 
-describe("openai-codex-responses serialization of the trailing catalog", () => {
-	it("uses the verified Responses converter for a post-tool trailing catalog", async () => {
+describe("openai-codex-responses catalog serialization", () => {
+	it("uses one user item around the shared Responses converter", async () => {
 		const payload = await serializePayload<ResponsesPayload>(
 			openaiCodexResponses,
 			MODELS["openai-codex-responses"](),
 			shapes.postTool,
 			CODEX_TEST_API_KEY,
 		);
-		assert.deepEqual(
-			payload.input.map((item) => item.role ?? item.type),
-			["user", "function_call", "function_call_output", "user"],
-		);
-		assert.match(textOf(payload.input.at(-1)?.content), new RegExp(CATALOG_MARKER));
+		assert.deepEqual(payload.input.map((item) => item.role ?? item.type), ["user", "function_call", "function_call_output"]);
+		assert.match(textOf(payload.input[0].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
 
-describe("google-generative-ai serialization of the trailing catalog", () => {
-	// Gemini's multiturn validator has rejected non-alternating contents with
-	// 400 "Please ensure that multiturn requests alternate between user and
-	// model", and tool flows enforce "function response turn comes immediately
-	// after a function call turn" ordering. Pi upstream issue #471 reproduces
-	// the post-tool user,user failure on Gemini. Both shapes below are
-	// therefore structurally unsafe, not merely undocumented.
-	it("initial run serializes two consecutive user contents (unreliable under Gemini's alternation validator)", async () => {
-		const payload = await serializePayload<GooglePayload>(
-			googleGenerativeAi,
-			MODELS["google-generative-ai"](),
-			shapes.initial,
-		);
-		assert.deepEqual(
-			payload.contents.map((content) => content.role),
-			["user", "user"],
-		);
-		assert.match(textOf(payload.contents.at(-1)?.parts), new RegExp(CATALOG_MARKER));
+describe("google-generative-ai catalog serialization", () => {
+	it("keeps the initial catalog inside one user content", async () => {
+		const payload = await serializePayload<GooglePayload>(googleGenerativeAi, MODELS["google-generative-ai"](), shapes.initial);
+		assert.deepEqual(payload.contents.map((content) => content.role), ["user"]);
+		assert.match(textOf(payload.contents[0].parts), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 
-	it("post-tool run serializes a catalog user turn directly after the functionResponse user turn (rejected by Gemini's tool-turn ordering)", async () => {
-		const payload = await serializePayload<GooglePayload>(
-			googleGenerativeAi,
-			MODELS["google-generative-ai"](),
-			shapes.postTool,
-		);
-		assert.deepEqual(
-			payload.contents.map((content) => content.role),
-			["user", "model", "user", "user"],
-		);
+	it("preserves function call/response ordering without consecutive user contents", async () => {
+		const payload = await serializePayload<GooglePayload>(googleGenerativeAi, MODELS["google-generative-ai"](), shapes.postTool);
+		assert.deepEqual(payload.contents.map((content) => content.role), ["user", "model", "user"]);
 		assert.ok(payload.contents[1].parts.some((part) => part.functionCall !== undefined));
 		assert.ok(payload.contents[2].parts.every((part) => part.functionResponse !== undefined));
-		assert.ok(
-			payload.contents[3].parts.every((part) => part.functionResponse === undefined),
-			"the catalog must not merge into the functionResponse turn",
-		);
-		assert.match(textOf(payload.contents.at(-1)?.parts), new RegExp(CATALOG_MARKER));
+		assert.match(textOf(payload.contents[0].parts), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
 
-describe("bedrock-converse-stream serialization of the trailing catalog", () => {
-	// AWS Bedrock Converse documents that conversation turns must alternate
-	// between user and assistant. The pinned serializer coalesces consecutive
-	// toolResult messages into one user turn but does NOT merge a trailing
-	// ordinary user message, so both catalog shapes serialize as consecutive
-	// user turns — a documented-constraint violation this suite pins down.
-	it("initial run serializes two consecutive user turns (violates Converse role alternation)", async () => {
-		const payload = await serializePayload<BedrockPayload>(
-			bedrockConverseStream,
-			MODELS["bedrock-converse-stream"](),
-			shapes.initial,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["user", "user"],
-		);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+describe("bedrock-converse-stream catalog serialization", () => {
+	it("keeps the initial catalog inside one user message", async () => {
+		const payload = await serializePayload<BedrockPayload>(bedrockConverseStream, MODELS["bedrock-converse-stream"](), shapes.initial);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["user"]);
+		assert.match(textOf(payload.messages[0].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 
-	it("post-tool run serializes toolResult user turn then a second consecutive user turn (violates Converse role alternation)", async () => {
-		const payload = await serializePayload<BedrockPayload>(
-			bedrockConverseStream,
-			MODELS["bedrock-converse-stream"](),
-			shapes.postTool,
-		);
-		assert.deepEqual(
-			payload.messages.map((message) => message.role),
-			["user", "assistant", "user", "user"],
-		);
+	it("preserves strict role alternation after tool results", async () => {
+		const payload = await serializePayload<BedrockPayload>(bedrockConverseStream, MODELS["bedrock-converse-stream"](), shapes.postTool);
+		assert.deepEqual(payload.messages.map((message) => message.role), ["user", "assistant", "user"]);
 		assert.ok(payload.messages[1].content.some((block) => block.toolUse !== undefined));
 		assert.ok(payload.messages[2].content.every((block) => block.toolResult !== undefined));
-		assert.ok(
-			payload.messages[3].content.every((block) => block.toolResult === undefined),
-			"the catalog must not merge into the toolResult turn",
-		);
-		assert.match(textOf(payload.messages.at(-1)?.content), new RegExp(CATALOG_MARKER));
+		assert.match(textOf(payload.messages[0].content), new RegExp(CATALOG_MARKER));
 		assert.equal(countMarkers(payload), 1);
 	});
 });
@@ -498,7 +384,7 @@ describe("cross-provider privacy invariants", () => {
 			const serialized = JSON.stringify(payload);
 			assert.doesNotMatch(serialized, new RegExp(BODY_CANARY));
 			const catalog = serialized.match(/<pi_memory advisory=[\s\S]*?<\/pi_memory>/u);
-			assert.ok(catalog, "the trailing catalog must be present");
+			assert.ok(catalog, "the merged catalog must be present");
 			assert.doesNotMatch(catalog[0], /This body must never reach a provider payload/u);
 		}
 	});
