@@ -20,12 +20,13 @@
   ],
   "files": [
     "dist",
+    "index.js",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./dist/extensions/herdr.js"
+      "./index.js"
     ]
   },
   "scripts": {
