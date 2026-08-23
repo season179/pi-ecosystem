@@ -10,7 +10,7 @@ A requested exchange in which Buddy examines the active transcript and answers f
 _Avoid_: Chat, query, completion
 
 **Stance**:
-The requested mode of engagement for a Consultation: discuss, debate, fact-check, or review.
+The requested mode of engagement for a Consultation: discuss, debate, fact-check (`fact_check` in the tool schema), or review.
 _Avoid_: Persona, mode
 
 **Automatic Review**:

@@ -109,7 +109,10 @@ describe("formatWatchCard", () => {
 	it("renders a fired output-mode card without note or tail", () => {
 		const card = formatWatchCard(
 			record({ id: 7, spec: { target: "w1:p3", mode: "output", match: "BUILD OK" } }),
-			outcome({ durationMs: 41000, json: { result: { text: "BUILD OK in 12ms" } } }),
+			outcome({
+				durationMs: 41000,
+				json: { result: { matched_line: "BUILD OK in 12ms" } },
+			}),
 		);
 		assert.equal(
 			card,
@@ -117,6 +120,14 @@ describe("formatWatchCard", () => {
 				"\n",
 			),
 		);
+	});
+
+	it("supports the legacy result.text matched-line shape", () => {
+		const card = formatWatchCard(
+			record({ id: 7, spec: { target: "w1:p3", mode: "output", match: "BUILD OK" } }),
+			outcome({ durationMs: 41000, json: { result: { text: "BUILD OK in 12ms" } } }),
+		);
+		assert.match(card, /match: BUILD OK in 12ms/u);
 	});
 
 	it("falls back to the raw stdout tail for the matched text", () => {

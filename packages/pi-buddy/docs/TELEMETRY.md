@@ -15,7 +15,7 @@ Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl
 - `rounds`, `toolCalls` — tool-loop depth and tool-call count
 - `answerChars`, `truncated` — answer length and whether it hit the output-token cap
 - `memoryChars` — injected durable-memory block size
-- `concernId` — ID of a delivered watchdog concern (concern outcomes only)
+- `concernId` — ID of the watchdog candidate/concern: present on initial-review rows with a `concern` outcome and on all revalidation rows, including `resolved` rows where the candidate was suppressed rather than delivered
 - `openConcerns`, `fixedConcerns`, `rebuttedConcerns` — session concern-history counts injected into the consultation
 - `concernHistoryChars` — size of the injected concern-history digest
 - `attempts`, `retried`, `modelsAttempted`, `failoverUsed`, `modelFailures` — retry/failover metadata

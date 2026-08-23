@@ -6,12 +6,14 @@ records a decision that still binds the code, and why it was made. Live
 behavior is documented in README.md, domain language in CONTEXT.md, and
 architecture boundaries in docs/adr/.
 
-## 2026-07-02 — Buddy model: glm-5.2 with a deliberate 300K context cap
+## 2026-07-02 — Buddy model: glm-5.2 and the historical 300K context cap
 
-The default buddy model is `zai/glm-5.2`. Its usable context window is
-deliberately capped at 300K in `~/.pi/agent/models.json`: the model degrades
-beyond that despite the advertised 1M. The cap is intentional — do not "fix"
-it back to 1M.
+The default buddy model is `zai/glm-5.2`. At the time of this decision, a
+local `~/.pi/agent/models.json` override capped its usable context at 300K
+because the model degraded beyond that despite the advertised 1M. That local
+override has since been removed. Requested consultations now derive their
+budget from the catalog window, while automatic reviews remain separately
+bounded; reinstate a local cap if long-context quality degradation returns.
 
 ## 2026-07-02 — Web access and the detached watchdog
 
@@ -84,8 +86,11 @@ rules that harden into false confidence.
 
 `~/.pi/agent/buddy.json` configures a priority-ordered failover chain, not a
 load-balancing pool. Every consultation starts fresh from priority 1, and
-Buddy never falls back to a provider unless the user explicitly listed that
-model in config — no transcript goes to an unlisted provider.
+Buddy never fails over mid-chain to an unlisted model. One exception exists:
+if a configured `models` list has no entries that resolve in Pi's registry,
+Buddy warns and falls back to `--buddy-model` or the built-in default rather
+than going silent; an entirely invalid config can therefore route the
+transcript to that default provider.
 
 Rejected for v1 (still binding unless re-decided):
 
@@ -155,8 +160,9 @@ Verified facts (2026-07-07, still binding):
   not a per-model fact. For the default zai/glm-5.2, `reasoningEffort` is
   undefined, so pi-ai emits `thinking: {type: "disabled"}` on the
   openai-completions path. `adjustMaxTokensForThinking` (the
-  `maxTokens + thinkingBudget` adjustment) lives only in pi-ai's
-  anthropic-messages API and does not apply here. A reasoning-always-on model
+  `maxTokens + thinkingBudget` adjustment) is used by pi-ai's
+  Anthropic-compatible APIs (Anthropic Messages and Bedrock) and does not
+  apply here. A reasoning-always-on model
   (o1/o3) would still reason — those cannot be forced off. Telemetry captures
   `reasoningTokens` separately; it is ~0 for opt-in-reasoning models.
 - Prompt caching is not applicable: each consult builds a fresh single-turn

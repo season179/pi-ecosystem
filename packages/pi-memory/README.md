@@ -16,8 +16,12 @@ This is a lean first version. It intentionally has no locking, duplicate detecti
 
 ## Installation
 
+This package is not yet published to npm. From a built `pi-ecosystem` checkout:
+
 ```bash
-pi install npm:@season179/pi-memory
+npm install
+npm run build --workspace @season179/pi-memory
+pi install /absolute/path/to/pi-ecosystem/packages/pi-memory
 ```
 
 ## Usage

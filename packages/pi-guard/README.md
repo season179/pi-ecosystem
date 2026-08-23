@@ -12,8 +12,12 @@ Pi Guard does **not** make a separate risk judgment. If the user requested an ac
 
 ## Install
 
+This package is not yet published to npm. From a built `pi-ecosystem` checkout:
+
 ```bash
-pi install npm:@season179/pi-guard
+npm install
+npm run build --workspace @season179/pi-guard
+pi install /absolute/path/to/pi-ecosystem/packages/pi-guard
 ```
 
 Restart Pi or run `/reload` after installation.

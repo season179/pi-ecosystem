@@ -16,7 +16,9 @@ Reference-only, same standing as `TROIKA.md`.
 > *visible, managed* agents (real panes, lifecycle detection, human can
 > watch and intervene) better than this extension's invisible headless
 > worker subprocesses ever could. The goal lives on; this mechanism lost.
-> Successor: `packages/pi-herdr` (see its `docs/DESIGN.md`).
+> Successor: the visible Herdr orchestration workflow. Herdr owns panes,
+> agents, lifecycle, and synchronous dispatch; `packages/pi-herdr` supplies
+> the non-blocking watch/wake component (see its `docs/DESIGN.md`).
 
 ## What it was
 
@@ -30,8 +32,9 @@ onto a flat-rate model, keep the orchestrator's context small.
 ## Lessons worth keeping
 
 - **Mechanical verification**: acceptance = harness-run command exit code,
-  never the worker's self-report. (Carried from troika; carried on to
-  pi-herdr's read-economy rule.)
+  never the worker's self-report. pi-herdr command watches preserve a bounded
+  exit-code completion signal where applicable; its separate read-economy
+  rule keeps delivered evidence compact.
 - **Anti-retry-spiral rail**: max 2 delegations per task, then take over
   yourself — without it, bad days cost more than no delegation.
 - **Context field is the classic delegation failure**: workers see no

@@ -159,8 +159,9 @@ primitives, but the stores stay separate.
   extensions (pi-guard audit, pi-memory store).
 - `input` event source is `"interactive" | "rpc" | "extension"`.
 - Precedents in-repo: pi-buddy telemetry + LESSON harvest, pi-guard
-  rotating JSONL audit, pi-herdr settled-state tracking, pi-memory
-  tmp-file+rename writes.
+  rotating JSONL audit, pi-herdr watch/outcome tracking and delivery,
+  pi-memory tmp-file+rename writes. Herdr itself owns agent lifecycle and
+  settled-state detection.
 
 ## Provenance
 

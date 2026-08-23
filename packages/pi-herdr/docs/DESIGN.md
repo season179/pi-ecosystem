@@ -1,9 +1,11 @@
 # pi-herdr design: Async Watches so Pi Can Orchestrate Inside Herdr
 
-Date: 2026-07-28 (condensed from the root-level HERDR.md draft after
-M1–M3 shipped; full original in git history at commit `f5b0d80`).
-Status: **implemented and live-smoked** (M1–M3). Pending: M4 dogfood,
-then decide the v2 `events.subscribe` transport.
+Created 2026-07-28 (condensed from the root-level HERDR.md draft after
+M1–M3 shipped; full original in git history at commit `f5b0d80`). Last
+source/package audit: 2026-08-23. This is design and decision history, not a
+current Herdr CLI reference. The v1 implementation exists and its automated
+suite passes 94 tests on macOS; retained live evidence covers selected paths,
+not the entire surface. See **Status and evidence** below.
 
 ## The idea
 
@@ -17,10 +19,11 @@ pi can already do every synchronous orchestration step through bash +
 that skill: split panes, `agent start`, `agent prompt`, `agent read`.
 The one missing primitive is what Claude Code gets from background
 shells: a **non-blocking wait**. A bash `herdr agent wait` or long-running
-CI command pins pi's whole turn — no parallelism across workers, no
-talking to Season meanwhile, a paid model idling on a sleep. pi-herdr
-adds exactly that missing half: watches on herdr events and bounded,
-model-initiated commands that **wake pi when they fire**, via
+CI command keeps Pi's turn open — no parallelism across workers and no
+conversation with Season until the child returns. The waiting child generates
+no model tokens, but orchestration remains blocked end to end. pi-herdr adds
+that missing half: watches on Herdr events and bounded, model-initiated
+commands that can request a new Pi turn via
 `pi.sendMessage(..., { triggerTurn })`.
 
 Division of labor, deliberately lopsided:
@@ -34,46 +37,54 @@ Division of labor, deliberately lopsided:
   nothing that already works; command mode exists only for work that must
   finish asynchronously and wake the orchestrator.
 
-Facts pi-herdr depends on (herdr 0.7.5; SKILL.md and the binary are the
-authority, herdr updates weekly): every managed pane gets `HERDR_ENV=1`,
-`HERDR_PANE_ID`, `HERDR_SOCKET_PATH` — identically, with no
-orchestrator/worker distinction. `agent wait` is server-owned,
-event-driven, pins the resolved occupant, and reports the settled state.
-`pane wait-output` matches against the existing snapshot first. The
-socket also offers `events.subscribe` (the v2 transport candidate). The
-herdr-managed outbound integration `~/.pi/agent/extensions/
-herdr-agent-state.ts` reports pi's state to herdr; pi-herdr is the
-inbound half and the two stay separate files (herdr overwrites its own
-on update).
+Current compatibility check (Herdr 0.8.2, protocol 20): managed pane
+processes receive `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`;
+`agent wait` is server-owned, event-driven, and pins the resolved occupant;
+`pane wait-output` searches the selected existing snapshot immediately; and
+the API still exposes `events.subscribe`. v1 gates registration only on
+`HERDR_ENV` plus `HERDR_PANE_ID`, invokes `herdr` from `PATH`, and depends on
+the CLI contracts for waits, reads, and notifications. It does not open
+`HERDR_SOCKET_PATH` directly; `events.subscribe` remains a v2 candidate.
+
+Herdr's current agent instructions are available dynamically through
+`herdr --skill`; no static Herdr skill was installed on the audited machine.
+The Herdr-managed Pi integration is the separate outbound half and reported
+`pi: current (v8)` during the 2026-08-23 audit.
 
 ## Decisions
 
-1. **Inbound bridge only; wrap nothing synchronous.** The herdr SKILL.md
-   is installed as a pi skill and carries all CLI knowledge; the
-   extension registers only watch-management tools. Smaller surface, no
-   drift when herdr's CLI evolves.
+1. **Inbound bridge only; wrap nothing synchronous.** Current Herdr
+   instructions come from the harness context or `herdr --skill`. The
+   extension does not wrap synchronous Herdr operations; its model-facing
+   surface is one promotion tool plus watch management. Smaller surface,
+   less drift when Herdr's CLI evolves.
 2. **v1 watch mechanism: one child per watch** — spawn
-   `herdr agent wait`/`pane wait-output` for herdr targets, or fixed
-   `/bin/sh -c` for a bounded command, then react to its exit. The CLI
-   owns target resolution, occupant pinning, stall detection, and
-   settled-state defaults. WatchManager owns command timeouts and the
-   shared SIGTERM→grace→SIGKILL lifecycle. Watches remain few (2–5).
-   v2 candidate for herdr-backed watches: one persistent
-   `events.subscribe` socket connection.
+   `herdr agent wait`/`pane wait-output` for Herdr targets, or fixed
+   `/bin/sh -c` for a bounded command, then react to its exit. The CLI owns
+   target resolution, occupant pinning, stall detection, and settled-state
+   defaults. WatchManager owns command timeouts and the shared
+   SIGTERM→grace→SIGKILL lifecycle. The design assumes few concurrent
+   children; the configurable default capacity is 8 armed watches, while
+   completed/stopped records remain in session history. A persistent
+   `events.subscribe` connection remains the v2 candidate for Herdr-backed
+   watches.
 3. **Wake-on-fire by default, with a consecutive unattended-wake
-   budget.** `steer` mid-turn, `triggerTurn` when idle. The default budget
-   is 20 attempted idle wakes; busy steering is free. It resets on
-   `interactive` or `rpc` input and on session start. One-shot watches and
-   explicit re-arming remain the primary anti-loop property. At positive-
-   budget exhaustion, cards stay visible but do not trigger an idle turn,
-   and the first suppressed idle wake in each attendance epoch sends a
-   desktop warning. The implementation continues using
-   `deliverAs: "steer"`; an idle, non-triggering custom card is appended
-   to session context without starting a model turn. Budget zero deliberately
-   disables auto-wake.
-4. **Watches survive Esc.** Each watch owns its own `AbortController`;
-   never capture the turn's `ctx.signal`. Cancel is explicit
-   (`herdr_unwatch`, `/orchestrate off`, shutdown).
+   budget.** Every card uses `deliverAs: "steer"`. For a wake-enabled
+   delivery with positive budget remaining, `triggerTurn` is requested; Pi
+   starts a turn when idle and treats the same delivery as steering when busy.
+   The counter increments only for granted deliveries decided while Pi is
+   idle; deliveries decided while Pi is busy do not increment it. The
+   default is 20 and resets at session start or the next `interactive`/`rpc`
+   input (an attendance epoch). One-shot watches and explicit re-arming are
+   the primary anti-loop property. At positive-budget exhaustion, cards stay
+   visible without starting an idle turn, and the first suppressed idle wake
+   in the epoch requests a best-effort Herdr notification. Budget zero
+   disables automatic idle wakes, not card delivery.
+4. **Watches survive Esc.** Watch children are not connected to the current
+   turn's `ctx.signal`. WatchManager owns timeout, stop, and close directly.
+   Explicit stop, orchestrator demotion, session replacement/shutdown, or a
+   command timeout sends SIGTERM to the process group and escalates to
+   SIGKILL after the grace period.
 5. **Dormant outside herdr — and dormant in workers until promoted.**
    Factory registers nothing without `HERDR_ENV=1` + `HERDR_PANE_ID`.
    Inside herdr the watch tools start **inactive**: pi also runs as
@@ -88,17 +99,25 @@ on update).
    - `PI_HERDR_ORCHESTRATOR=1` auto-promotes at launch (scripted
      starts); `/orchestrate` promotes by hand, `/orchestrate off`
      demotes and stops all armed watches.
-   Promotion is sticky for the process. Accepted residual risk: a
-   worker whose prompt suggests orchestration could self-promote —
-   "being asked" is precisely what defines the orchestrator here.
-6. **Event card is compact; evidence stays in herdr.** Target, settled
-   state (or matched line — `agent wait` doesn't report the prior
-   state), elapsed, the orchestrator's own `note`, and by default the
-   last ~20 lines via `agent read`. The read-economy rule: if the
-   orchestrator re-reads everything its workers produce, the
-   parallelism savings evaporate.
-7. **Tell Season too**: optional herdr toast on fire (default on for
-   `blocked` only).
+   Promotion persists across Pi session changes in the same process until
+   `/orchestrate off`; demotion stops armed watches and removes the watch
+   tools. Process exit also clears it. Accepted residual risk: a worker whose
+   prompt suggests orchestration could self-promote — "being asked" is
+   precisely what defines the orchestrator here.
+6. **Event card is compact; evidence stays in Herdr.** Cards contain a
+   bounded target/command summary, outcome, elapsed time, optional note, and
+   available evidence. Successful agent watches optionally fetch
+   `includeTailLines` through `agent read --source recent-unwrapped`, capped
+   at 20 rendered lines. Command outcomes always attach the last 10 combined
+   stdout/stderr lines. Command text/output is omitted from JSONL telemetry,
+   but a 60-character command summary and output tail appear in the persisted
+   session card; secrets do not belong there. Output-card parsing covers Herdr
+   0.8.2's `result.matched_line` field in unit tests, but remains unverified
+   against a live 0.8.2 process. The read-economy rule remains: re-reading
+   every worker transcript erases the context savings.
+7. **Tell the human too:** a successfully fired agent watch can request a
+   best-effort Herdr notification when its state appears in `toastOn`
+   (default `blocked`).
 8. **Anti-poll + anti-block steering** in the tool descriptions: never
    run `herdr agent wait` or `--wait` prompts through bash; prompt
    without `--wait`, then `herdr_watch`. Prefer command mode for CI,
@@ -129,28 +148,31 @@ Output watches remain appropriate for genuine pane-output conditions. When
 a sentinel is unavoidable, print `"$?"` inline and retain a `%s` placeholder
 in the typed command so the echoed command cannot match its own sentinel.
 
-## Status and durable findings
+## Status and evidence
 
-- **M1 (skill + manual smoke)** ✅ 2026-07-28. SKILL.md installed at
-  `~/.pi/agent/skills/herdr/` (manual copy; refresh on herdr updates).
-  Findings: herdr 0.7.5 ignores the `HERDR_SESSION` env var — use the
-  global `--session` flag; pi's TUI renders in the main buffer so
-  `recent-unwrapped` reads capture full transcripts; SKILL.md's
-  bare-group discovery step exits code 2 by design (cosmetic); the
-  blocking gap confirmed — bash waits pinned the turn end-to-end.
-- **M2 (watch layer) + M3 (wake + UX)** ✅ 2026-07-28. Unit tests
-  against a fake-herdr fixture (`PI_HERDR_COMMAND` seam); kill path
-  keyed on the close event with a shutdown latch; each attempted idle wake
-  is accounted immediately before fire-and-forget delivery. Live smokes:
-  fire on settle, tail-
-  carrying wake card, `triggerTurn` waking an idle orchestrator,
-  telemetry record; conversational promotion verified (plain "you are
-  the orchestrator" → `herdr_orchestrate` + `herdr_watch` in the same
-  turn). Not yet exercised live: `/watches` interactive UI, toasts,
-  output-mode watches, wake-budget degradation.
-- **M4 (dogfood)** — pending: a week of real orchestration, judged with
-  telemetry + feel (wake usefulness, poll incidence, blocked-handling
-  quality). Then decide on the v2 transport.
+- **Automated status (2026-08-23):** 94 tests pass in 7 files on macOS;
+  TypeScript checks pass; the stable package `index.js` imports successfully.
+  Tests use a fake-Herdr executable, and POSIX process/signal cases are skipped
+  on Windows, so this is not a live Herdr or Windows smoke.
+- **Retained live evidence:** the contemporaneous 2026-07-28 record describes
+  one agent watch firing after 48.8 seconds, tail retrieval, a `triggerTurn`
+  request, and a telemetry write. Current local telemetry also contains agent
+  and command outcomes, so dogfooding has started. Telemetry proves requested
+  delivery decisions, not that a UI rendered or Pi actually began a turn.
+- **Still unverified live:** `/watches` interaction, state-triggered
+  notifications, output mode, current budget-exhaustion UX, and
+  SIGTERM→SIGKILL escalation. The 0.8.2 `matched_line` response shape is
+  unit-tested but not live-smoked.
+- **M4 (dogfood):** in progress. Existing usage does not prove the planned
+  week-long evaluation or a final v2 transport decision.
+
+Historical 2026-07-28 smoke notes used Herdr 0.7.5 and a manually copied
+SKILL.md. That version ignored `HERDR_SESSION`, and its bare command-group help
+exited 2. Those are historical observations, not current requirements: Herdr
+0.8.2 documents `HERDR_SESSION` socket resolution and supplies instructions
+through `herdr --skill`. A regular Pi TUI transcript was readable through
+`recent-unwrapped` in that smoke, but this is not guaranteed for every TUI
+mode.
 
 ## Non-goals (v1)
 
@@ -167,20 +189,22 @@ not a general process supervisor.
    wait` via bash out of habit (it's in SKILL.md); steering redirects.
    Possible future rail: a `tool_call` guard on `agent wait|--wait` in
    bash (pi-guard shows the hook pattern).
-2. **Stale-session publication**: session identity captured at watch
-   registration; wakes from a previous session's watches are dropped.
+2. **Stale-session publication:** each session's manager captures a
+   generation token. Session replacement/shutdown increments it; old outcomes
+   skip card delivery but still receive a best-effort telemetry record.
 3. **Occupant replacement**: herdr pins waits to the resolved occupant —
    the wait fails rather than lying; the card surfaces that verbatim.
 4. **`unknown` state** "does not prove completion" — passed through
    as-is; steering says read before judging.
 5. **Wake loops**: bounded by one-shot watches + wake budget.
-6. **CLI drift**: parse only documented JSON fields; on parse failure
-   deliver raw CLI output in the card instead of guessing.
-7. **Bare model names resolve wrong** (learned 2026-07-28): `--model
-   gpt-5.6-sol` pattern-matched an unauthenticated provider and the
-   worker sat at a login prompt while looking "started". Always use
-   qualified ids (`openai-codex/gpt-5.6-sol`, `zai/glm-5.2`,
-   `kimi-coding/k3`) and verify the first prompt gets processed.
+6. **CLI drift:** tolerate unknown fields, but test the exact response fields
+   used for rendered values. An unrecognized yet valid JSON shape can omit a
+   state or display truncated JSON; it is not equivalent to parse failure.
+7. **Bare model patterns can select an unintended provider** (historical
+   2026-07-28 incident): one unqualified pattern matched an unauthenticated
+   provider and left the worker at a login prompt. For reproducible work, use
+   a provider-qualified ID from the current Pi catalog and verify that the
+   first prompt is processed.
 8. **Arm-after-prompt race** (learned 2026-07-28): after `agent prompt`
    returns there's a window where the worker still reads `idle`; a wait
    armed there satisfies `--until idle` on the *pre-work* idle. Atomic

@@ -117,6 +117,7 @@ export function formatWatchCard(
 				lines.push(`${header} fired: output matched after ${duration}`);
 				const matched =
 					digString(outcome.json, [
+						["result", "matched_line"],
 						["result", "text"],
 						["result", "matched"],
 						["text"],
