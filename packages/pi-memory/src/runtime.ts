@@ -13,6 +13,20 @@ import {
 } from "./config.js";
 import { formatMemoryError, MemoryError } from "./errors.js";
 import {
+	getInjectionBlockTag,
+	getInjectionMessageTag,
+	MEMORY_INJECTION_BUDGETS,
+	PI_MEMORY_OWNER,
+	PI_MEMORY_TAG_KEY,
+	renderAlwaysBlock,
+	tagInjectionBlock,
+	type AlwaysRender,
+	type InjectionBlockTag,
+	type InjectionMessageTag,
+	type InjectionScope,
+	type TaggedTextBlock,
+} from "./injection.js";
+import {
 	initializeProjectSidecar,
 	resolveProjectIdentity,
 	verifyProjectSidecar,
@@ -31,9 +45,11 @@ import {
 	type StorePaths,
 } from "./paths.js";
 import {
+	memoryInjectionOf,
 	readMemorySnapshot,
 	searchMemories,
 	type Memory,
+	type MemoryGeneration,
 	type MemorySnapshot,
 	type StoreGuard,
 } from "./store.js";
@@ -50,45 +66,65 @@ export interface ScopedMemory {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog cache: read-only, stat-signature keyed, synchronously invalidated
-// after this process's own project writes. Never serves stale content.
+// Injection cache (one per scope): read-only, stat-signature + mode keyed,
+// synchronously invalidated after this process's own writes to that scope.
+// Never serves stale content. The project cache renders the always block and
+// the on-demand catalog; the legacy-global cache renders always bodies only
+// (no unselected global metadata is ever injected).
 // ---------------------------------------------------------------------------
 
-export type CatalogState =
-	| { state: "ready"; render: CatalogRenderResult; renderedAtMs: number }
+/** One scope's current render: always block (full bodies) and, for project, the on-demand catalog. */
+export interface InjectionRender {
+	scope: InjectionScope;
+	generation: MemoryGeneration;
+	always: AlwaysRender | undefined;
+	catalog: CatalogRenderResult | undefined;
+}
+
+export type InjectionState =
+	| { state: "ready"; render: InjectionRender; renderedAtMs: number }
 	| { state: "empty" }
 	| { state: "error"; message: string };
 
-export interface CatalogCacheStatus {
+export interface InjectionCacheStatus {
 	cached: boolean;
-	state: CatalogState["state"] | "stale";
-	render?: CatalogRenderResult;
+	state: InjectionState["state"] | "stale";
+	render?: InjectionRender;
 }
 
-interface CatalogCacheEntry {
+interface InjectionCacheEntry {
 	signature: string;
-	render: CatalogRenderResult | undefined;
+	mode: MemoryMode;
+	render: InjectionRender | undefined;
 	renderedAtMs: number;
 }
 
-export class ProjectCatalogCache {
+export class InjectionCache {
+	readonly scope: InjectionScope;
 	readonly #directory: string;
 	readonly #detailsPath: string;
+	readonly #indexPath: string;
 	readonly #containment: StoreContainment;
-	readonly #identity: AvailableProjectIdentity;
+	readonly #identity: AvailableProjectIdentity | undefined;
 	readonly #now: () => number;
-	#entry: CatalogCacheEntry | undefined;
+	#entry: InjectionCacheEntry | undefined;
 	#dirty = true;
 	#epoch = 0;
 
 	constructor(
+		scope: InjectionScope,
 		store: StorePaths,
 		containment: StoreContainment,
-		identity: AvailableProjectIdentity,
+		identity: AvailableProjectIdentity | undefined,
 		now: () => number = () => Date.now(),
 	) {
+		if (scope === "project" && identity === undefined) {
+			throw new Error("project injection cache requires an available project identity");
+		}
+		this.scope = scope;
 		this.#directory = store.directory;
 		this.#detailsPath = store.details;
+		this.#indexPath = store.index;
 		this.#containment = containment;
 		this.#identity = identity;
 		this.#now = now;
@@ -100,7 +136,7 @@ export class ProjectCatalogCache {
 		this.#epoch += 1;
 	}
 
-	status(): CatalogCacheStatus {
+	status(): InjectionCacheStatus {
 		if (this.#entry === undefined) return { cached: false, state: this.#dirty ? "stale" : "empty" };
 		return {
 			cached: true,
@@ -121,27 +157,46 @@ export class ProjectCatalogCache {
 		}
 	}
 
-	/** Strictly read-only: verifies the sidecar and reads a snapshot; writes nothing. */
-	async get(): Promise<CatalogState> {
+	#render(snapshot: MemorySnapshot, mode: MemoryMode): InjectionRender | undefined {
+		const always = renderAlwaysBlock(snapshot, { scope: this.scope, mode });
+		const catalog = this.scope === "project" ? renderMemoryCatalog(snapshot, { mode }) : undefined;
+		if (always === undefined && catalog === undefined) return undefined;
+		return { scope: this.scope, generation: snapshot.generation, always, catalog };
+	}
+
+	/**
+	 * Strictly read-only: verifies containment (and, for project, the sidecar)
+	 * and reads a snapshot; writes nothing. `mode` is part of the cache key
+	 * because the rendered advisory states the current mode.
+	 */
+	async get(mode: MemoryMode): Promise<InjectionState> {
 		try {
 			for (let attempt = 0; attempt < 3; attempt += 1) {
 				const epoch = this.#epoch;
-				// Containment and identity are checked before every cache hit. A
-				// sidecar change must fail closed even when details.md is unchanged.
+				// Containment (root, directory, details, index; lstat-based, so a
+				// symlink swapped in under an unchanged stat signature is rejected)
+				// is checked for BOTH scopes before every cache hit; project also
+				// re-verifies the sidecar so a sidecar change fails closed even when
+				// details.md is unchanged.
 				await assertContainedRegularPath(this.#containment.root, this.#directory, "directory", "read");
-				await assertContainedRegularPath(
-					this.#containment.root,
-					join(this.#directory, "project.json"),
-					"file",
-					"read",
-				);
-				await verifyProjectSidecar(this.#directory, this.#identity, "read");
+				await assertContainedRegularPath(this.#containment.root, this.#detailsPath, "file", "read");
+				await assertContainedRegularPath(this.#containment.root, this.#indexPath, "file", "read");
+				if (this.#identity !== undefined) {
+					await assertContainedRegularPath(
+						this.#containment.root,
+						join(this.#directory, "project.json"),
+						"file",
+						"read",
+					);
+					await verifyProjectSidecar(this.#directory, this.#identity, "read");
+				}
 				const signature = await this.#signature();
 				if (
 					epoch === this.#epoch &&
 					!this.#dirty &&
 					this.#entry !== undefined &&
-					this.#entry.signature === signature
+					this.#entry.signature === signature &&
+					this.#entry.mode === mode
 				) {
 					return this.#entry.render === undefined
 						? { state: "empty" }
@@ -152,15 +207,13 @@ export class ProjectCatalogCache {
 				const finalSignature = await this.#signature();
 				if (epoch !== this.#epoch || signature !== finalSignature) continue;
 
-				const render = renderMemoryCatalog(snapshot);
+				const render = this.#render(snapshot, mode);
 				const renderedAtMs = this.#now();
-				this.#entry = { signature, render, renderedAtMs };
+				this.#entry = { signature, mode, render, renderedAtMs };
 				this.#dirty = false;
-				return render === undefined
-					? { state: "empty" }
-					: { state: "ready", render, renderedAtMs };
+				return render === undefined ? { state: "empty" } : { state: "ready", render, renderedAtMs };
 			}
-			throw new Error("project memory changed repeatedly while refreshing the catalog");
+			throw new Error(`${this.scope} memory changed repeatedly while refreshing the injection`);
 		} catch (error) {
 			// Never serve a stale render after containment, identity, or refresh failure.
 			this.#entry = undefined;
@@ -169,6 +222,7 @@ export class ProjectCatalogCache {
 		}
 	}
 }
+
 
 // ---------------------------------------------------------------------------
 // Session runtime state
@@ -186,7 +240,12 @@ export interface MemorySessionState {
 	projectStore: StorePaths | undefined;
 	config: LoadedMemoryConfig;
 	effectiveMode: EffectiveMemoryMode;
-	catalog: ProjectCatalogCache | undefined;
+	/** Project always block + on-demand catalog; undefined without identity/root. */
+	projectInjection: InjectionCache | undefined;
+	/** Legacy-global always bodies; independent of project identity. */
+	legacyInjection: InjectionCache | undefined;
+	/** What the most recent context hook actually assembled (historical record, not refreshed by status). */
+	lastAssembled: AssembledInjection | undefined;
 	commits: { used: number; limit: number };
 	/** Once-per-session diagnostic keys already emitted. */
 	emittedDiagnostics: Set<string>;
@@ -247,7 +306,10 @@ export class MemoryRuntime {
 
 	/**
 	 * Re-resolve config and effective mode after an enable/disable, without a
-	 * /reload; invalidates the catalog so the next injection reflects the mode.
+	 * /reload. Called before every context hook, every remember, and status, so
+	 * tools enforce the current mode even though the system-prompt policy is
+	 * fixed per run. Mode is part of the injection cache key, so no explicit
+	 * invalidation is needed; the invalidate below only drops a stale entry early.
 	 */
 	async refreshMode(state: MemorySessionState): Promise<EffectiveMemoryMode> {
 		const previousMode = state.effectiveMode.mode;
@@ -270,7 +332,10 @@ export class MemoryRuntime {
 			state.identity.status === "ok" ? state.identity.identityHash : undefined,
 			this.#options.env ?? process.env,
 		);
-		if (state.effectiveMode.mode !== previousMode) state.catalog?.invalidate();
+		if (state.effectiveMode.mode !== previousMode) {
+			state.projectInjection?.invalidate();
+			state.legacyInjection?.invalidate();
+		}
 		return state.effectiveMode;
 	}
 
@@ -331,9 +396,14 @@ export class MemoryRuntime {
 			this.#options.env ?? process.env,
 		);
 
-		const catalog =
+		const projectInjection =
 			projectStore !== undefined && containment !== undefined && identity.status === "ok"
-				? new ProjectCatalogCache(projectStore, containment, identity, this.#options.now)
+				? new InjectionCache("project", projectStore, containment, identity, this.#options.now)
+				: undefined;
+		// Legacy-global always bodies are injected even when project identity fails.
+		const legacyInjection =
+			legacyStore !== undefined && containment !== undefined
+				? new InjectionCache("legacy-global", legacyStore, containment, undefined, this.#options.now)
 				: undefined;
 
 		return {
@@ -347,7 +417,9 @@ export class MemoryRuntime {
 			projectStore,
 			config,
 			effectiveMode,
-			catalog,
+			projectInjection,
+			legacyInjection,
+			lastAssembled: undefined,
 			commits: { used: 0, limit: MEMORY_RUN_COMMIT_LIMIT },
 			emittedDiagnostics: new Set(),
 		};
@@ -433,59 +505,221 @@ export function recallScoped(candidates: readonly ScopedMemory[], query: string,
 
 type AgentContextMessage = ContextEvent["messages"][number];
 
+/** Where the transient blocks were placed in the most recent context result. */
+export type InjectionTarget = "user" | `converted:${string}` | "synthetic" | "none";
+
+export interface AssembledBlock {
+	kind: InjectionBlockTag["kind"];
+	scope: InjectionScope;
+	generation: MemoryGeneration;
+	/** always: ids whose full bodies are in the block; catalog: ids whose metadata line is in the block. */
+	ids: string[];
+	/** always: ids excluded by an overflow notice; catalog: ids omitted by the catalog's own limits. */
+	excluded: string[];
+	state: "ready" | "overflow";
+	/** Size of the emitted block (an overflow notice's own size, not the excluded set's). */
+	bytes: number;
+	estimatedTokens: number;
+}
+
+/** Why one scope contributed no block (or fewer blocks) to a request. */
+export interface AssembledExclusion {
+	scope: InjectionScope;
+	reason: "off" | "unavailable" | "error" | "empty";
+	/** Diagnostic text for unavailable/error; absent for off/empty. */
+	message?: string;
+}
+
+/** Historical record of what one context hook actually assembled. */
+export interface AssembledInjection {
+	atMs: number;
+	mode: MemoryMode;
+	target: InjectionTarget;
+	blocks: AssembledBlock[];
+	/** Scopes that contributed nothing, with the reason; never claims success for a failed read. */
+	exclusions: AssembledExclusion[];
+	/** Extension-owned blocks/messages removed from a re-fed context before assembly. */
+	stripped: number;
+}
+
+export interface ContextResultOptions {
+	/**
+	 * Pi's exported convertToLlm. When the context has no literal user message
+	 * (split-turn compaction), the most recent message it converts to a user
+	 * message (compaction/branch summary, custom, bash execution) is replaced in
+	 * place by that conversion plus the blocks. Without it, or when nothing
+	 * converts, a tagged synthetic user message is PREPENDED.
+	 */
+	convertToLlm?: (messages: AgentContextMessage[]) => ReadonlyArray<{ role: string; content: unknown }>;
+	now?: () => number;
+}
+
+export interface ContextResult {
+	messages: AgentContextMessage[];
+	target: InjectionTarget;
+	stripped: number;
+}
+
 function isLegacyPiMemoryCatalogMessage(message: AgentContextMessage): boolean {
+	// The only text-free historical form: 26.8.0 persisted custom messages.
 	const candidate = message as { role?: unknown; customType?: unknown };
 	return candidate.role === "custom" && candidate.customType === PI_MEMORY_CATALOG_TYPE;
 }
 
-function isPiMemoryCatalogTextBlock(block: unknown): boolean {
-	if (typeof block !== "object" || block === null) return false;
-	const candidate = block as { type?: unknown; text?: unknown };
-	if (candidate.type !== "text" || typeof candidate.text !== "string") return false;
-	const text = candidate.text.trim();
-	return text.startsWith('<pi_memory advisory="untrusted" scope="project"') && text.endsWith("</pi_memory>");
+function normalizeContent(content: unknown): unknown[] {
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	return Array.isArray(content) ? [...content] : [];
+}
+
+function tagMessage<T extends object>(message: T, tag: InjectionMessageTag): T {
+	return { ...message, [PI_MEMORY_TAG_KEY]: tag };
 }
 
 /**
- * Merge one transient catalog text block into the most recent existing user
- * turn. This preserves the user's original text as a separate block and avoids
- * creating consecutive user turns on providers that enforce role alternation.
- * Previous extension-owned catalog blocks are removed defensively.
+ * Remove every extension-owned block and message from a re-fed context, by
+ * structural ownership tag only. User-authored text is never inspected or
+ * rewritten, even when it quotes a marker-shaped block verbatim. Earlier
+ * turns are included because a new user turn moves our blocks out of the
+ * target position without removing them from the re-fed messages.
+ */
+function stripOwnedContent(messages: readonly AgentContextMessage[]): { messages: AgentContextMessage[]; stripped: number } {
+	let stripped = 0;
+	const result: AgentContextMessage[] = [];
+	for (const message of messages) {
+		if (isLegacyPiMemoryCatalogMessage(message)) {
+			stripped += 1;
+			continue;
+		}
+		const messageTag = getInjectionMessageTag(message);
+		if ((message as { role?: unknown }).role !== "user") {
+			result.push(message);
+			continue;
+		}
+		const user = message as AgentContextMessage & { content: unknown };
+		if (!Array.isArray(user.content)) {
+			// A string body is user-authored by construction: we always emit arrays.
+			if (messageTag?.origin === "synthetic") {
+				stripped += 1;
+				continue;
+			}
+			result.push(message);
+			continue;
+		}
+		const remaining = user.content.filter((block) => getInjectionBlockTag(block) === undefined);
+		const removed = user.content.length - remaining.length;
+		if (messageTag?.origin === "synthetic" && remaining.length === 0) {
+			// The whole synthetic message goes; count it once.
+			stripped += 1;
+			continue;
+		}
+		stripped += removed;
+		result.push(removed === 0 ? message : ({ ...user, content: remaining } as AgentContextMessage));
+	}
+	return { messages: result, stripped };
+}
+
+/**
+ * Assemble the transient context: strip our previous blocks everywhere, then
+ * attach the new tagged blocks to the most recent literal user turn (kept as
+ * separate blocks after the user's own content, preserving role alternation).
+ * Fallbacks for split-turn compaction: convert the newest convertible message
+ * in place, else prepend a tagged synthetic user message. Returns undefined
+ * when nothing changed. `blocks` may be empty (mode off: strip only).
  */
 export function buildContextResult(
 	messages: readonly AgentContextMessage[],
-	catalog: { content: string; renderedAtMs: number } | undefined,
-): { messages: AgentContextMessage[] } | undefined {
-	if (catalog === undefined) return undefined;
-	const kept = messages.filter((message) => !isLegacyPiMemoryCatalogMessage(message));
-	let target = -1;
+	blocks: readonly TaggedTextBlock[] | { content: string; renderedAtMs: number } | undefined,
+	options: ContextResultOptions = {},
+): ContextResult | undefined {
+	// 26.8.x public shape: one untagged project catalog string. Tag it so the
+	// new ownership tracking applies; the generation is unknown to that caller.
+	if (blocks === undefined) return undefined;
+	if (!Array.isArray(blocks)) {
+		const legacy = blocks as { content: string; renderedAtMs: number };
+		return buildContextResult(
+			messages,
+			[
+				tagInjectionBlock(legacy.content, {
+					owner: PI_MEMORY_OWNER,
+					kind: "catalog",
+					scope: "project",
+					generation: "sha256:unknown",
+				}),
+			],
+			options,
+		);
+	}
+	const { messages: kept, stripped } = stripOwnedContent(messages);
+	if (blocks.length === 0) return stripped === 0 ? undefined : { messages: kept, target: "none", stripped };
+
+	const isUser = (message: AgentContextMessage | undefined): boolean =>
+		(message as { role?: unknown } | undefined)?.role === "user";
+
 	for (let index = kept.length - 1; index >= 0; index -= 1) {
-		if ((kept[index] as { role?: unknown }).role === "user") {
-			target = index;
-			break;
+		const message = kept[index] as AgentContextMessage & { content: unknown };
+		if (!isUser(message)) continue;
+		const transformed = [...kept];
+		transformed[index] = { ...message, content: [...normalizeContent(message.content), ...blocks] } as AgentContextMessage;
+		return { messages: transformed, target: "user", stripped };
+	}
+
+	if (options.convertToLlm !== undefined) {
+		for (let index = kept.length - 1; index >= 0; index -= 1) {
+			const original = kept[index] as AgentContextMessage;
+			const originalRole = String((original as { role?: unknown }).role);
+			let converted: ReadonlyArray<{ role: string; content: unknown }>;
+			try {
+				converted = options.convertToLlm([original]);
+			} catch {
+				continue;
+			}
+			const [candidate] = converted;
+			if (converted.length !== 1 || candidate === undefined || candidate.role !== "user") continue;
+			const transformed = [...kept];
+			transformed[index] = tagMessage(
+				{ ...(candidate as object), content: [...normalizeContent(candidate.content), ...blocks] },
+				{ owner: PI_MEMORY_OWNER, origin: "converted", convertedFrom: originalRole },
+			) as unknown as AgentContextMessage;
+			return { messages: transformed, target: `converted:${originalRole}`, stripped };
 		}
 	}
-	if (target === -1) return undefined;
 
-	const transformed = kept.map((message, index) => {
-		if ((message as { role?: unknown }).role !== "user") return message;
-		const user = message as AgentContextMessage & { content: unknown };
-		// Only the target turn can contain a catalog from a re-fed context result.
-		// Never inspect or rewrite earlier user turns: quoted marker-shaped user
-		// text must remain byte-for-byte intact.
-		if (index !== target) return message;
-		const originalBlocks =
-			typeof user.content === "string"
-				? [{ type: "text", text: user.content }]
-				: Array.isArray(user.content)
-					? user.content.filter((block) => !isPiMemoryCatalogTextBlock(block))
-					: [];
-		return {
-			...user,
-			content: [...originalBlocks, { type: "text", text: catalog.content }],
-		} as AgentContextMessage;
-	});
-	return { messages: transformed };
+	const synthetic = tagMessage(
+		{ role: "user", content: [...blocks], timestamp: (options.now ?? Date.now)() },
+		{ owner: PI_MEMORY_OWNER, origin: "synthetic" },
+	) as unknown as AgentContextMessage;
+	return { messages: [synthetic, ...kept], target: "synthetic", stripped };
+}
+
+/** Summarize a rendered scope for the assembled record and status output. */
+export function describeAssembledBlocks(render: InjectionRender): AssembledBlock[] {
+	const blocks: AssembledBlock[] = [];
+	if (render.always !== undefined) {
+		const always = render.always;
+		blocks.push({
+			kind: "always",
+			scope: render.scope,
+			generation: always.generation,
+			ids: always.state === "ready" ? [...always.ids] : [],
+			excluded: always.state === "overflow" ? [...always.ids] : [],
+			state: always.state,
+			bytes: always.bytes,
+			estimatedTokens: always.estimatedTokens,
+		});
+	}
+	if (render.catalog !== undefined) {
+		blocks.push({
+			kind: "catalog",
+			scope: render.scope,
+			generation: render.catalog.generation,
+			ids: [...render.catalog.includedIds],
+			excluded: [...render.catalog.omittedIds],
+			state: "ready",
+			bytes: render.catalog.bytes,
+			estimatedTokens: render.catalog.estimatedTokens,
+		});
+	}
+	return blocks;
 }
 
 // ---------------------------------------------------------------------------
@@ -611,13 +845,21 @@ export async function collectStoreStatus(state: MemorySessionState, scope: Memor
 	}
 }
 
+/** Current (eligible) render for one scope, as the next request would inject it. */
+export type ScopeInjectionStatus = InjectionState | { state: "off" } | { state: "unavailable"; reason: string };
+
 export interface MemoryStatusData {
 	mode: EffectiveMemoryMode;
 	envShadowing: boolean;
 	identity: ProjectIdentity;
 	project: StoreStatusData;
 	legacy: StoreStatusData;
-	catalog: CatalogState | { state: "off" } | { state: "unavailable" };
+	/** Current eligibility per scope (re-rendered now). */
+	injection: { project: ScopeInjectionStatus; legacy: ScopeInjectionStatus };
+	/** @deprecated alias of injection.project (26.8.x field). */
+	catalog: ScopeInjectionStatus;
+	/** What the last context hook actually sent (may lag the current render). */
+	lastAssembled: AssembledInjection | undefined;
 	configWarnings: string[];
 }
 
@@ -626,10 +868,25 @@ export async function gatherMemoryStatus(state: MemorySessionState): Promise<Mem
 		collectStoreStatus(state, "project"),
 		collectStoreStatus(state, "legacy-global"),
 	]);
-	let catalog: MemoryStatusData["catalog"];
-	if (state.effectiveMode.mode === "off") catalog = { state: "off" };
-	else if (state.catalog === undefined) catalog = { state: "unavailable" };
-	else catalog = await state.catalog.get();
+	const mode = state.effectiveMode.mode;
+	let projectInjection: ScopeInjectionStatus;
+	let legacyInjection: ScopeInjectionStatus;
+	if (mode === "off") {
+		projectInjection = { state: "off" };
+		legacyInjection = { state: "off" };
+	} else {
+		projectInjection =
+			state.projectInjection === undefined
+				? {
+						state: "unavailable",
+						reason: state.identity.status === "ok" ? (state.rootError ?? "memory root unavailable") : state.identity.error,
+					}
+				: await state.projectInjection.get(mode);
+		legacyInjection =
+			state.legacyInjection === undefined
+				? { state: "unavailable", reason: state.rootError ?? "memory root unavailable" }
+				: await state.legacyInjection.get(mode);
+	}
 	return {
 		mode: state.effectiveMode,
 		envShadowing:
@@ -638,7 +895,9 @@ export async function gatherMemoryStatus(state: MemorySessionState): Promise<Mem
 		identity: state.identity,
 		project,
 		legacy,
-		catalog,
+		injection: { project: projectInjection, legacy: legacyInjection },
+		catalog: projectInjection,
+		lastAssembled: state.lastAssembled,
 		configWarnings: [...state.config.warnings, ...state.effectiveMode.warnings],
 	};
 }
@@ -667,25 +926,99 @@ export function renderMemoryStatus(data: MemoryStatusData): string {
 	}
 	lines.push(`Project store: ${storeStatusLine(data.project)}`);
 	lines.push(`Legacy-global store: ${storeStatusLine(data.legacy)}`);
-	if (data.catalog.state === "ready") {
-		const render = data.catalog.render;
-		lines.push(
-			`Catalog: injecting ${render.included} entries (${render.bytes} bytes, ~${render.estimatedTokens} tokens, ${render.omitted} omitted, ${render.generation})`,
-		);
-	} else if (data.catalog.state === "empty") {
-		lines.push("Catalog: nothing to inject (empty project store)");
-	} else if (data.catalog.state === "off") {
-		lines.push("Catalog: not injected (mode off)");
-	} else if (data.catalog.state === "unavailable") {
-		lines.push("Catalog: not injected (project identity unavailable)");
-	} else {
-		lines.push(`Catalog: not injected — ${data.catalog.message}`);
-	}
+	lines.push("Eligible now (what the next request would carry):");
+	lines.push(...scopeInjectionLines("Project", data.injection.project, true).map((line) => `  ${line}`));
+	lines.push(...scopeInjectionLines("Legacy-global", data.injection.legacy, false).map((line) => `  ${line}`));
+	lines.push(...lastAssembledLines(data.lastAssembled));
 	for (const warning of data.configWarnings) lines.push(`Warning: ${warning}`);
 	lines.push(
-		"Note: while enabled, the catalog metadata is sent to the model provider on every request; memory bodies are sent only after recall.",
+		"Note: while enabled, the project catalog metadata and the full bodies of memories marked always are sent to the model provider on every request; other bodies are sent only after recall.",
 	);
 	return lines.join("\n");
+}
+
+function usageText(bytes: number, estimatedTokens: number): string {
+	return `${bytes} bytes, ~${estimatedTokens} tokens`;
+}
+
+function scopeInjectionLines(label: string, status: ScopeInjectionStatus, hasCatalog: boolean): string[] {
+	const alwaysLabel = `${label} always:`;
+	const catalogLabel = `${label} catalog:`;
+	if (status.state === "off") {
+		return [`${alwaysLabel} not eligible (mode off)`, ...(hasCatalog ? [`${catalogLabel} not eligible (mode off)`] : [])];
+	}
+	if (status.state === "unavailable") {
+		return [
+			`${alwaysLabel} not eligible (${status.reason})`,
+			...(hasCatalog ? [`${catalogLabel} not eligible (${status.reason})`] : []),
+		];
+	}
+	if (status.state === "error") {
+		return [
+			`${alwaysLabel} not eligible — read failed: ${status.message}`,
+			...(hasCatalog ? [`${catalogLabel} not eligible — read failed: ${status.message}`] : []),
+		];
+	}
+	if (status.state === "empty") {
+		return [
+			`${alwaysLabel} none (no memories marked always)`,
+			...(hasCatalog ? [`${catalogLabel} none (no on-demand memories)`] : []),
+		];
+	}
+	const lines: string[] = [];
+	const always = status.render.always;
+	if (always === undefined) {
+		lines.push(`${alwaysLabel} none (no memories marked always)`);
+	} else if (always.state === "ready") {
+		lines.push(
+			`${alwaysLabel} ready for the next request, ${always.ids.length} full bodies (${usageText(always.bytes, always.estimatedTokens)} of ${MEMORY_INJECTION_BUDGETS[always.scope].maxBytes} bytes / ${MEMORY_INJECTION_BUDGETS[always.scope].maxEstimatedTokens} tokens, ${always.generation})`,
+		);
+		lines.push(`  ids: ${always.ids.join(", ")}`);
+	} else {
+		const { usage } = always;
+		lines.push(
+			`${alwaysLabel} OVER BUDGET — all ${always.ids.length} always bodies excluded; set needs ${usageText(usage.bytes, usage.estimatedTokens)}, budget ${usage.budget.maxBytes} bytes / ${usage.budget.maxEstimatedTokens} tokens (${usage.budget.reservedBytes} bytes / ${usage.budget.reservedEstimatedTokens} tokens reserved); a ${usageText(always.bytes, always.estimatedTokens)} notice is sent instead; ${always.generation}`,
+		);
+		lines.push(`  excluded ids: ${always.ids.join(", ")}`);
+		lines.push(
+			"  recovery: shrink or delete them, or demote with remember update injection=on-demand (only strictly shrinking updates are accepted while over budget)",
+		);
+	}
+	if (hasCatalog) {
+		const catalog = status.render.catalog;
+		if (catalog === undefined) {
+			lines.push(`${catalogLabel} none (no on-demand memories)`);
+		} else {
+			lines.push(
+				`${catalogLabel} ready for the next request, ${catalog.included} metadata entries (${usageText(catalog.bytes, catalog.estimatedTokens)}, ${catalog.omitted} omitted by catalog limits, ${catalog.generation})`,
+			);
+			if (catalog.omittedIds.length > 0) lines.push(`  omitted ids: ${catalog.omittedIds.join(", ")}`);
+		}
+	}
+	return lines;
+}
+
+function lastAssembledLines(assembled: AssembledInjection | undefined): string[] {
+	if (assembled === undefined) return ["Last assembled request: none yet this session"];
+	const lines = [
+		`Last assembled request: ${new Date(assembled.atMs).toISOString()}, mode ${assembled.mode}, placement ${assembled.target}, ${assembled.stripped} prior block(s) stripped`,
+	];
+	if (assembled.blocks.length === 0) lines.push("  blocks: none");
+	for (const block of assembled.blocks) {
+		const detail =
+			block.kind === "catalog"
+				? `catalog metadata for ${block.ids.length} ids${block.excluded.length > 0 ? `, omitted ${block.excluded.join(", ")}` : ""}`
+				: block.state === "ready"
+					? `always bodies ${block.ids.join(", ")}`
+					: `always OVERFLOW notice, excluded ${block.excluded.join(", ")}`;
+		lines.push(`  ${block.scope} ${block.kind}: ${detail} (${usageText(block.bytes, block.estimatedTokens)}, ${block.generation})`);
+	}
+	for (const exclusion of assembled.exclusions) {
+		lines.push(
+			`  ${exclusion.scope}: nothing assembled — ${exclusion.reason}${exclusion.message === undefined ? "" : `: ${exclusion.message}`}`,
+		);
+	}
+	return lines;
 }
 
 const SHOW_DETAILS_WARNING =
@@ -717,6 +1050,7 @@ export function renderMemoryShow(
 		lines.push(`  Updated: ${memory.updated}`);
 		lines.push(`  Tags: ${memory.tags.length > 0 ? memory.tags.map(inlineField).join(", ") : "(none)"}`);
 		lines.push(`  Cue: ${inlineField(memory.cue)}`);
+		lines.push(`  Injection: ${memoryInjectionOf(memory)}`);
 		if (details) lines.push(`  Body:`, ...memory.body.split("\n").map((line) => `    ${line}`));
 	}
 	if (selected.length === 0) lines.push("", "(no memories)");

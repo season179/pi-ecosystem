@@ -124,8 +124,8 @@ function errno(code: string, message = code): NodeJS.ErrnoException {
 
 describe("memory store", () => {
 	it("round-trips the details and index formats", () => {
-		assert.deepEqual(parseDetails(serializeDetails(memories)), memories);
-		assert.deepEqual(parseIndex(serializeIndex(memories)), memories.map(({ body: _body, ...memory }) => memory));
+		assert.deepEqual(parseDetails(serializeDetails(memories)), memories.map((memory) => ({ ...memory, injection: memory.injection ?? "on-demand" })));
+		assert.deepEqual(parseIndex(serializeIndex(memories)), memories.map(({ body: _body, injection: _injection, ...memory }) => memory));
 	});
 
 	it("ranks exact matches, word overlap, and recency", () => {
@@ -196,7 +196,7 @@ describe("immutable v1 fixtures", () => {
 			const parsed = parseDetails(details);
 			assert.equal(serializeDetails(parsed), details);
 			assert.equal(serializeIndex(parsed), index);
-			assert.deepEqual(parseIndex(index), parsed.map(({ body: _body, ...memory }) => memory));
+			assert.deepEqual(parseIndex(index), parsed.map(({ body: _body, injection: _injection, ...memory }) => memory));
 		},
 	);
 

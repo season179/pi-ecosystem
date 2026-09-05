@@ -1,10 +1,19 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { formatMemoryError, isMemoryError } from "../errors.js";
+import {
+	formatBudgetUsage,
+	MEMORY_INJECTION_BUDGETS,
+	PI_MEMORY_OWNER,
+	tagInjectionBlock,
+	type InjectionScope,
+	type TaggedTextBlock,
+} from "../injection.js";
 import { appendMemoryPolicy } from "../policy.js";
 import {
 	buildContextResult,
+	describeAssembledBlocks,
 	gatherMemoryStatus,
 	MemoryRuntime,
 	parsePiMemoryCommand,
@@ -15,14 +24,27 @@ import {
 	renderMemoryStatus,
 	setProjectMode,
 	PI_MEMORY_USAGE,
+	type AssembledBlock,
+	type AssembledExclusion,
+	type InjectionState,
 	type MemoryScope,
 	type MemorySessionState,
 	type ScopedMemory,
 } from "../runtime.js";
-import { type Memory, type MemoryMutation, type MutateMemoryStoreOptions, mutateMemoryStore } from "../store.js";
+import {
+	MEMORY_INJECTION_VALUES,
+	memoryInjectionOf,
+	mutateMemoryStore,
+	type Memory,
+	type MemoryInjection,
+	type MemoryMutation,
+	type MutateMemoryStoreOptions,
+} from "../store.js";
 
 export {
 	buildContextResult,
+	describeAssembledBlocks,
+	InjectionCache,
 	parsePiMemoryCommand,
 	recallScoped,
 	renderMemoryShow,
@@ -30,10 +52,27 @@ export {
 	MemoryRuntime,
 	PI_MEMORY_CATALOG_TYPE,
 } from "../runtime.js";
+export {
+	escapeInjectionText,
+	getInjectionBlockTag,
+	getInjectionMessageTag,
+	measureAlwaysBlock,
+	MEMORY_INJECTION_BUDGETS,
+	MEMORY_INJECTION_COMBINED_MAX_BYTES,
+	MEMORY_INJECTION_COMBINED_MAX_ESTIMATED_TOKENS,
+	PI_MEMORY_OWNER,
+	PI_MEMORY_TAG_KEY,
+	renderAlwaysBlock,
+	tagInjectionBlock,
+	unescapeInjectionText,
+} from "../injection.js";
 export { appendMemoryPolicy, memoryPolicyBlock, PI_MEMORY_POLICY_MARKER } from "../policy.js";
 
 const SCOPE_DESCRIPTION =
 	"Store to act on. Use project unless the user explicitly asks for cross-project global memory; legacy-global is the pre-scope global store.";
+
+const INJECTION_DESCRIPTION =
+	"Injection policy. Omitted on create = on-demand; omitted on update = PRESERVES the current policy; not allowed on delete. on-demand: project memories appear as catalog metadata only and legacy-global memories are recall-only; the body is sent after recall (research notes, history, one-off findings). always: the full body is injected into every ordinary enabled request of this scope (user preferences, recurring corrections, workflow constraints), within a small per-scope budget (project 8192 bytes/2000 est. tokens; legacy-global 4096/1000, part reserved). Writes that would exceed the budget are rejected. The id never changes when the policy changes.";
 
 const RememberParams = Type.Object({
 	action: StringEnum(["create", "update", "delete"] as const, {
@@ -45,6 +84,7 @@ const RememberParams = Type.Object({
 	cue: Type.Optional(Type.String({ description: "When this memory is useful" })),
 	body: Type.Optional(Type.String({ description: "Full memory details" })),
 	tags: Type.Optional(Type.Array(Type.String(), { description: "Searchable tags" })),
+	injection: Type.Optional(StringEnum(MEMORY_INJECTION_VALUES as readonly ["always", "on-demand"], { description: INJECTION_DESCRIPTION })),
 });
 
 const RecallParams = Type.Object({
@@ -82,14 +122,25 @@ function toMutation(params: {
 	cue?: string;
 	body?: string;
 	tags?: string[];
+	injection?: MemoryInjection;
 }): MemoryMutation {
 	if (params.action === "create") {
 		if (params.title === undefined || params.cue === undefined || params.body === undefined) {
 			throw new Error("create requires title, cue, and body");
 		}
-		return { action: "create", title: params.title, cue: params.cue, body: params.body, tags: params.tags };
+		return {
+			action: "create",
+			title: params.title,
+			cue: params.cue,
+			body: params.body,
+			tags: params.tags,
+			...(params.injection !== undefined ? { injection: params.injection } : {}),
+		};
 	}
-	if (params.action === "delete") return { action: "delete", id: requireId(params.id, "delete") };
+	if (params.action === "delete") {
+		if (params.injection !== undefined) throw new Error("delete does not take injection");
+		return { action: "delete", id: requireId(params.id, "delete") };
+	}
 	return {
 		action: "update",
 		id: requireId(params.id, "update"),
@@ -97,6 +148,7 @@ function toMutation(params: {
 		cue: params.cue,
 		body: params.body,
 		tags: params.tags,
+		...(params.injection !== undefined ? { injection: params.injection } : {}),
 	};
 }
 
@@ -112,6 +164,7 @@ function renderMemory(scoped: ScopedMemory, includeDetails: boolean): string {
 		`Updated: ${memory.updated}`,
 		`Tags: ${memory.tags.length > 0 ? memory.tags.map(inline).join(", ") : "(none)"}`,
 		`Cue: ${inline(memory.cue)}`,
+		`Injection: ${memoryInjectionOf(memory)}`,
 	];
 	if (includeDetails) metadata.push("", memory.body);
 	return metadata.join("\n");
@@ -129,6 +182,7 @@ function structuredMemory(
 		updated: memory.updated,
 		tags: [...memory.tags],
 		cue: memory.cue,
+		injection: memoryInjectionOf(memory),
 	};
 	return includeDetails ? { ...summary, body: memory.body } : summary;
 }
@@ -200,6 +254,92 @@ function warnOnce(state: MemorySessionState, ctx: ExtensionContext, key: string,
 	emitCommandOutput(ctx, message, "warning");
 }
 
+/**
+ * Capacity/injection diagnostics must reach the user in every mode: notify
+ * with a UI, otherwise stderr in print AND json mode (stdout belongs to Pi).
+ */
+function emitDiagnostic(ctx: ExtensionContext, text: string, type: "warning" | "error"): void {
+	// Best effort: a failing notify must never cost otherwise valid blocks.
+	if (ctx.hasUI) {
+		try {
+			ctx.ui.notify(text, type);
+			return;
+		} catch {
+			// fall through to stderr
+		}
+	}
+	try {
+		process.stderr.write(`${text}\n`);
+	} catch {
+		// nothing else to do
+	}
+}
+
+function diagnoseOnce(state: MemorySessionState, ctx: ExtensionContext, key: string, message: string, type: "warning" | "error" = "warning"): void {
+	if (state.emittedDiagnostics.has(key)) return;
+	state.emittedDiagnostics.add(key);
+	emitDiagnostic(ctx, message, type);
+}
+
+function invalidateInjection(state: MemorySessionState, scope: MemoryScope): void {
+	if (scope === "project") state.projectInjection?.invalidate();
+	else state.legacyInjection?.invalidate();
+}
+
+/**
+ * Collect one scope's transient blocks for this request and surface its
+ * diagnostics. An error or overflow in one scope never removes the other
+ * scope's blocks. Overflow renders a bounded notice (all always bodies of that
+ * scope excluded, never a subset); the catalog stays because it is bounded
+ * independently.
+ */
+function collectScopeBlocks(
+	state: MemorySessionState,
+	ctx: ExtensionContext,
+	scope: InjectionScope,
+	injection: InjectionState,
+): { blocks: TaggedTextBlock[]; assembled: AssembledBlock[]; exclusions: AssembledExclusion[] } {
+	if (injection.state === "error") {
+		diagnoseOnce(
+			state,
+			ctx,
+			`injection-error:${scope}`,
+			`pi-memory: ${scope} memory injection omitted for this request — ${injection.message}`,
+		);
+		return { blocks: [], assembled: [], exclusions: [{ scope, reason: "error", message: injection.message }] };
+	}
+	if (injection.state !== "ready") return { blocks: [], assembled: [], exclusions: [{ scope, reason: "empty" }] };
+	const { render } = injection;
+	const blocks: TaggedTextBlock[] = [];
+	if (render.always !== undefined) {
+		const always = render.always;
+		blocks.push(
+			tagInjectionBlock(always.content, { owner: PI_MEMORY_OWNER, kind: "always", scope, generation: always.generation }),
+		);
+		if (always.state === "overflow") {
+			const { usage } = always;
+			diagnoseOnce(
+				state,
+				ctx,
+				`injection-overflow:${scope}:${always.generation}`,
+				`pi-memory: ${scope} always memories exceed their injection budget (${formatBudgetUsage(usage)}); all ${always.ids.length} always bodies are excluded from requests: ${always.ids.join(", ")}. Shrink, delete, or demote them with remember update injection=on-demand (only strictly shrinking updates are accepted while over budget); /pi-memory status shows the current usage.`,
+				"error",
+			);
+		}
+	}
+	if (render.catalog !== undefined) {
+		blocks.push(
+			tagInjectionBlock(render.catalog.content, {
+				owner: PI_MEMORY_OWNER,
+				kind: "catalog",
+				scope,
+				generation: render.catalog.generation,
+			}),
+		);
+	}
+	return { blocks, assembled: describeAssembledBlocks(render), exclusions: [] };
+}
+
 function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 	const runtime = new MemoryRuntime({ agentDir });
 
@@ -238,14 +378,27 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 		}
 		// New user run: reset the committed-mutation cap.
 		state.commits.used = 0;
-		if (state.identity.status !== "ok" || state.projectStore === undefined) return undefined;
-		const appended = appendMemoryPolicy(event.systemPrompt, state.effectiveMode.mode);
+		const mode = state.effectiveMode.mode;
+		if (mode === "off") return undefined;
+		// The policy is fixed for this run (documented limitation: a mid-run mode
+		// change is reflected by the transient blocks and enforced by the tools).
+		// Without project identity it is still appended when legacy-global always
+		// bodies are being injected, so the model has the advisory framing.
+		let eligible = state.identity.status === "ok" && state.projectStore !== undefined;
+		if (!eligible && state.legacyInjection !== undefined) {
+			const legacy = await state.legacyInjection.get(mode);
+			eligible = legacy.state === "ready" && legacy.render.always !== undefined;
+		}
+		if (!eligible) return undefined;
+		const appended = appendMemoryPolicy(event.systemPrompt, mode);
 		return appended === undefined ? undefined : { systemPrompt: appended };
 	});
 
-	// Transient catalog merged into the current user turn on every ordinary
-	// provider request. Strictly read-only and fail-open: memory trouble may
-	// cost the catalog, never the task.
+	// Transient injection on every ordinary provider request: project always
+	// bodies + on-demand catalog (identity required), legacy-global always bodies
+	// (identity independent), each a separately tagged block. Strictly read-only
+	// and fail-open: memory trouble may cost the injection, never the task. Mode
+	// off still strips our own blocks from a re-fed context.
 	pi.on("context", async (event, ctx) => {
 		try {
 			const state = await runtime.state(ctx.cwd);
@@ -258,20 +411,57 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 					`pi-memory: ${[...new Set(state.effectiveMode.warnings)].join(" ")}`,
 				);
 			}
-			if (state.effectiveMode.mode === "off") return undefined;
-			if (state.identity.status !== "ok" || state.catalog === undefined) return undefined;
-			const catalog = await state.catalog.get();
-			if (catalog.state === "error") {
-				warnOnce(state, ctx, "catalog-error", `pi-memory: catalog omitted for this request — ${catalog.message}`);
+			const mode = state.effectiveMode.mode;
+			const blocks: TaggedTextBlock[] = [];
+			const assembled: AssembledBlock[] = [];
+			const exclusions: AssembledExclusion[] = [];
+			if (mode === "off") {
+				exclusions.push({ scope: "project", reason: "off" }, { scope: "legacy-global", reason: "off" });
+			} else {
+				if (state.identity.status === "ok" && state.projectInjection !== undefined) {
+					const project = collectScopeBlocks(state, ctx, "project", await state.projectInjection.get(mode));
+					blocks.push(...project.blocks);
+					assembled.push(...project.assembled);
+					exclusions.push(...project.exclusions);
+				} else {
+					exclusions.push({
+						scope: "project",
+						reason: "unavailable",
+						message: state.identity.status === "ok" ? (state.rootError ?? "memory root unavailable") : state.identity.error,
+					});
+				}
+				if (state.legacyInjection !== undefined) {
+					const legacy = collectScopeBlocks(state, ctx, "legacy-global", await state.legacyInjection.get(mode));
+					blocks.push(...legacy.blocks);
+					assembled.push(...legacy.assembled);
+					exclusions.push(...legacy.exclusions);
+				} else {
+					exclusions.push({
+						scope: "legacy-global",
+						reason: "unavailable",
+						message: state.rootError ?? "memory root unavailable",
+					});
+				}
+			}
+			const result = buildContextResult(event.messages, blocks, { convertToLlm });
+			state.lastAssembled = {
+				atMs: Date.now(),
+				mode,
+				target: result?.target ?? "none",
+				blocks: assembled,
+				exclusions,
+				stripped: result?.stripped ?? 0,
+			};
+			return result === undefined ? undefined : { messages: result.messages };
+		} catch {
+			// Fail open, but never re-feed our own stale blocks: strip owned
+			// content only (user text is untouched); no new blocks this request.
+			try {
+				const stripped = buildContextResult(event.messages, []);
+				return stripped === undefined ? undefined : { messages: stripped.messages };
+			} catch {
 				return undefined;
 			}
-			if (catalog.state !== "ready") return undefined;
-			return buildContextResult(event.messages, {
-				content: catalog.render.content,
-				renderedAtMs: catalog.renderedAtMs,
-			});
-		} catch {
-			return undefined;
 		}
 	});
 
@@ -279,7 +469,7 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 		name: "remember",
 		label: "Remember",
 		description:
-			"Create, update, or delete a durable memory shared across Pi sessions. scope selects the store: project (this repository) or legacy-global (explicit cross-project). Use recall first when an existing memory id is needed; update and delete act only on the named scope. IDs are generated on create and never change. Storage is capped at an estimated 4,000 tokens per rendered file; at most 3 committed mutations per run.",
+			"Create, update, or delete a durable memory shared across Pi sessions. scope selects the store: project (this repository) or legacy-global (explicit cross-project). Use recall first when an existing memory id is needed; update and delete act only on the named scope. IDs are generated on create and never change, including when injection changes. injection=on-demand (default) means project catalog metadata only and legacy-global recall-only; injection=always injects the full body into every ordinary enabled request within a small per-scope budget and is rejected when it would exceed it. Storage is capped at an estimated 4,000 tokens per rendered file; at most 3 committed mutations per run.",
 		promptSnippet: "Create, update, or delete durable memories across Pi sessions",
 		parameters: RememberParams,
 		executionMode: "sequential",
@@ -289,6 +479,9 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 			try {
 				const state = await runtime.state(ctx.cwd);
 				const mutation = toMutation(params);
+				// Enforce the CURRENT mode: the system-prompt policy is fixed per run,
+				// but a mid-run switch to read-only must reject project writes now.
+				await runtime.refreshMode(state);
 				const target = resolveMutationTarget(state, scope);
 				// Cap check strictly before any I/O; never thrown after a commit.
 				if (state.commits.used >= state.commits.limit) {
@@ -298,6 +491,7 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 				}
 				const options: MutateMemoryStoreOptions = {
 					containment: state.containment,
+					injectionBudget: MEMORY_INJECTION_BUDGETS[scope],
 					...(signal !== undefined ? { signal } : {}),
 					...target.guardOptions,
 				};
@@ -308,30 +502,34 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 					// COMMIT_STATE_UNKNOWN may have committed: count it and refresh.
 					if (isMemoryError(error) && error.committed !== false) {
 						state.commits.used += 1;
-						if (scope === "project") state.catalog?.invalidate();
+						invalidateInjection(state, scope);
 					}
 					throw error;
 				}
 				state.commits.used += 1;
 				// Synchronous invalidation before the result returns.
-				if (scope === "project") state.catalog?.invalidate();
+				invalidateInjection(state, scope);
 
 				const subject = result.memory ?? result.deleted;
 				const verb = params.action === "create" ? "Created" : params.action === "update" ? "Updated" : "Deleted";
+				const injectionNote =
+					result.injection.alwaysIds.length === 0
+						? `${scopeLabel(scope)} always block: none`
+						: `${scopeLabel(scope)} always block: ${result.injection.alwaysIds.length} memories, ${formatBudgetUsage(result.injection)}${result.injection.overBudget ? ", OVER BUDGET" : ""}`;
+				const summary =
+					subject === undefined
+						? `${verb} memory in ${scopeLabel(scope)} memory (${injectionNote}).`
+						: `${verb} memory ${subject.id} in ${scopeLabel(scope)} memory (injection: ${memoryInjectionOf(subject)}; ${injectionNote}).`;
 				const warningLines = result.warnings.map((warning) => `Warning [${warning.code}]: ${warning.message}`);
 				return {
-					content: [
-						{
-							type: "text",
-							text: [`${verb} memory ${subject?.id} in ${scopeLabel(scope)} memory.`, ...warningLines].join("\n"),
-						},
-					],
+					content: [{ type: "text", text: [summary, ...warningLines].join("\n") }],
 					details: {
 						action: params.action,
 						scope,
 						memory: subject,
 						tokens: result.tokens,
 						generation: result.generation,
+						injection: result.injection,
 						warnings: result.warnings,
 					},
 				};
@@ -425,8 +623,8 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 			if (subcommand === "enable") {
 				return complete(
 					[
-						{ value: "read-only", description: "Inject the catalog; reject project writes" },
-						{ value: "read-write", description: "Inject the catalog; allow project writes" },
+						{ value: "read-only", description: "Inject catalog and always bodies; reject project writes" },
+						{ value: "read-write", description: "Inject catalog and always bodies; allow project writes" },
 					],
 					partial,
 				);
@@ -444,6 +642,9 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 				const state = await runtime.state(ctx.cwd);
 
 				if (command.kind === "status") {
+					// Current eligibility must reflect the current mode; lastAssembled
+					// stays the historical record of the previous request.
+					await runtime.refreshMode(state);
 					emitCommandOutput(ctx, renderMemoryStatus(await gatherMemoryStatus(state)));
 					return;
 				}

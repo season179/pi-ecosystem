@@ -2,6 +2,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { MemoryError, type MemoryOperation } from "./errors.js";
+import {
+	formatBudgetUsage,
+	measureAlwaysBlock,
+	MEMORY_INJECTION_BUDGETS,
+	type InjectionBudget,
+	type InjectionBudgetUsage,
+} from "./injection.js";
 import { storeLockPath, withDirLock, type DirLockHandle, type DirLockOptions } from "./lock.js";
 import {
 	assertCanonicalContainmentRoot,
@@ -18,6 +25,15 @@ const INDEX_FILE = "index.md";
 const ID_GENERATION_ATTEMPTS = 32;
 const TRANSIENT_RENAME_MS = 1_000;
 
+/** Injection policy: `always` injects the full body every request; `on-demand` (default) is catalog + recall. */
+export type MemoryInjection = "always" | "on-demand";
+export const MEMORY_INJECTION_VALUES: readonly MemoryInjection[] = Object.freeze(["always", "on-demand"]);
+export const DEFAULT_MEMORY_INJECTION: MemoryInjection = "on-demand";
+
+export function isMemoryInjection(value: unknown): value is MemoryInjection {
+	return value === "always" || value === "on-demand";
+}
+
 export interface Memory {
 	id: string;
 	title: string;
@@ -25,6 +41,19 @@ export interface Memory {
 	tags: string[];
 	cue: string;
 	body: string;
+	/**
+	 * Injection policy. Optional on the public type so 26.8.x object literals
+	 * still type-check; every parsed snapshot, mutation result, and tool output
+	 * carries it explicitly. Absent reads as on-demand.
+	 */
+	injection?: MemoryInjection;
+}
+
+/** A memory whose injection policy has been normalized (all parsed/returned memories). */
+export type StoredMemory = Memory & { injection: MemoryInjection };
+
+export function memoryInjectionOf(memory: Pick<Memory, "injection">): MemoryInjection {
+	return memory.injection ?? DEFAULT_MEMORY_INJECTION;
 }
 
 export interface IndexEntry {
@@ -36,14 +65,28 @@ export interface IndexEntry {
 }
 
 export type MemoryMutation =
-	| { action: "create"; title: string; cue: string; body: string; tags?: string[] }
-	| { action: "update"; id: string; title?: string; cue?: string; body?: string; tags?: string[] }
+	| { action: "create"; title: string; cue: string; body: string; tags?: string[]; injection?: MemoryInjection }
+	| {
+			action: "update";
+			id: string;
+			title?: string;
+			cue?: string;
+			body?: string;
+			tags?: string[];
+			injection?: MemoryInjection;
+	  }
 	| { action: "delete"; id: string };
 
 export type MemoryGeneration = `sha256:${string}`;
 
+export type MutationWarningCode =
+	| "INDEX_REPAIR_NEEDED"
+	| "OVER_CAP_REMAINS"
+	| "LOCK_UNSAFE"
+	| "INJECTION_OVER_BUDGET_REMAINS";
+
 export interface MutationWarning {
-	code: "INDEX_REPAIR_NEEDED" | "OVER_CAP_REMAINS" | "LOCK_UNSAFE";
+	code: MutationWarningCode;
 	message: string;
 }
 
@@ -66,6 +109,8 @@ export interface MutationResult {
 export interface HardenedMutationResult extends MutationResult {
 	generation: MemoryGeneration;
 	warnings: MutationWarning[];
+	/** Post-commit measurement of this store's always block against its scope budget. */
+	injection: InjectionBudgetUsage;
 }
 
 export type IndexState = "current" | "missing" | "stale" | "malformed";
@@ -134,6 +179,11 @@ export interface MutateMemoryStoreOptions {
 	/** Canonical containment contract; see StoreContainment in paths.ts. */
 	containment?: StoreContainment;
 	guard?: StoreGuard;
+	/**
+	 * Always-injection budget for this store's scope. Defaults to the project
+	 * budget; the extension always passes the budget of the scope it mutates.
+	 */
+	injectionBudget?: InjectionBudget;
 }
 
 export interface RepairMemoryIndexOptions {
@@ -217,6 +267,10 @@ function assertTimestamp(value: string, id: string): void {
 function assertMemory(memory: Memory): void {
 	if (!MEMORY_ID_PATTERN.test(memory.id)) throw new Error(`Invalid memory id: ${memory.id}`);
 	assertTimestamp(memory.updated, memory.id);
+	// 26.8.x callers may pass literals without the field; absent reads as on-demand.
+	if (memory.injection !== undefined && !isMemoryInjection(memory.injection)) {
+		throw new Error(`Invalid injection policy for memory ${memory.id}: ${String(memory.injection)}`);
+	}
 }
 
 function serializeSection(memory: Memory): string {
@@ -226,6 +280,8 @@ function serializeSection(memory: Memory): string {
 		`Updated: ${memory.updated}`,
 		`Tags: ${serializeTags(memory.tags)}`,
 		`Cue: ${escapeInline(memory.cue)}`,
+		// Written only for `always`, so on-demand stores stay byte-identical to 26.8.1.
+		...(memory.injection === "always" ? [`Injection: always`] : []),
 		"",
 		escapeBody(memory.body),
 	].join("\n");
@@ -253,12 +309,23 @@ export function parseDetails(markdown: string): Memory[] {
 		else if (!nextHeading && section.endsWith("\n")) section = section.slice(0, -1);
 
 		const lines = section.split("\n");
-		if (
-			!lines[0]?.startsWith("Updated: ") ||
-			!lines[1]?.startsWith("Tags: ") ||
-			!lines[2]?.startsWith("Cue: ") ||
-			lines[3] !== ""
-		) {
+		if (!lines[0]?.startsWith("Updated: ") || !lines[1]?.startsWith("Tags: ") || !lines[2]?.startsWith("Cue: ")) {
+			throw new Error(`details.md is unparseable: invalid metadata for memory ${id}`);
+		}
+		// Line 4 is blank (legacy, on-demand) or an optional `Injection:` line followed by a blank line.
+		let injection: MemoryInjection = DEFAULT_MEMORY_INJECTION;
+		let bodyStart = 4;
+		if (lines[3] === "") {
+			// legacy layout
+		} else if (lines[3]?.startsWith("Injection: ")) {
+			const value = lines[3].slice("Injection: ".length);
+			if (!isMemoryInjection(value)) {
+				throw new Error(`details.md is unparseable: unknown injection policy ${JSON.stringify(value)} for memory ${id}`);
+			}
+			if (lines[4] !== "") throw new Error(`details.md is unparseable: invalid metadata for memory ${id}`);
+			injection = value;
+			bodyStart = 5;
+		} else {
 			throw new Error(`details.md is unparseable: invalid metadata for memory ${id}`);
 		}
 
@@ -268,7 +335,8 @@ export function parseDetails(markdown: string): Memory[] {
 			updated: lines[0].slice("Updated: ".length),
 			tags: parseTags(lines[1].slice("Tags: ".length)),
 			cue: unescapeInline(lines[2].slice("Cue: ".length)),
-			body: unescapeBody(lines.slice(4).join("\n")),
+			body: unescapeBody(lines.slice(bodyStart).join("\n")),
+			injection,
 		};
 		assertMemory(memory);
 		return memory;
@@ -379,16 +447,25 @@ export function applyMemoryMutation(
 	idFactory: () => string = generateMemoryId,
 ): Omit<MutationResult, "tokens"> {
 	assertTimestamp(now, "mutation");
-	const next = memories.map((memory) => ({ ...memory, tags: [...memory.tags] }));
+	// Only an omitted policy defaults; null or any other value is rejected.
+	if (mutation.action !== "delete" && mutation.injection !== undefined && !isMemoryInjection(mutation.injection)) {
+		throw new Error(`Unknown injection policy: ${String(mutation.injection)}`);
+	}
+	const next: StoredMemory[] = memories.map((memory) => ({
+		...memory,
+		tags: [...memory.tags],
+		injection: memoryInjectionOf(memory),
+	}));
 
 	if (mutation.action === "create") {
-		const memory: Memory = {
+		const memory: StoredMemory = {
 			id: idFactory(),
 			title: mutation.title,
 			updated: now,
 			tags: [...(mutation.tags ?? [])],
 			cue: mutation.cue,
 			body: mutation.body,
+			injection: mutation.injection ?? DEFAULT_MEMORY_INJECTION,
 		};
 		assertMemory(memory);
 		next.push(memory);
@@ -404,20 +481,32 @@ export function applyMemoryMutation(
 		return { memories: next, deleted };
 	}
 
-	if (mutation.title === undefined && mutation.cue === undefined && mutation.body === undefined && mutation.tags === undefined) {
-		throw new Error("Update requires at least one of title, cue, body, or tags");
+	if (isEmptyUpdate(mutation)) {
+		throw new Error("Update requires at least one of title, cue, body, tags, or injection");
 	}
 	const current = next[memoryIndex];
-	const memory: Memory = {
+	const memory: StoredMemory = {
 		...current,
 		title: mutation.title ?? current.title,
 		cue: mutation.cue ?? current.cue,
 		body: mutation.body ?? current.body,
 		tags: mutation.tags === undefined ? current.tags : [...mutation.tags],
+		injection: mutation.injection ?? current.injection,
 		updated: now,
 	};
+	assertMemory(memory);
 	next[memoryIndex] = memory;
 	return { memories: next, memory };
+}
+
+function isEmptyUpdate(mutation: Extract<MemoryMutation, { action: "update" }>): boolean {
+	return (
+		mutation.title === undefined &&
+		mutation.cue === undefined &&
+		mutation.body === undefined &&
+		mutation.tags === undefined &&
+		mutation.injection === undefined
+	);
 }
 
 export function assertWithinTokenCaps(current: readonly Memory[], projected: readonly Memory[]): void {
@@ -823,6 +912,12 @@ function selectCreateId(existing: ReadonlySet<string>, idFactory: () => string):
 }
 
 function validateMutationTarget(mutation: MemoryMutation, memories: readonly Memory[], detailsPath: string): void {
+	if (mutation.action !== "delete" && mutation.injection !== undefined && !isMemoryInjection(mutation.injection)) {
+		throw new MemoryError("INVALID_ARGUMENT", `Unknown injection policy: ${String(mutation.injection)}`, {
+			operation: "mutate",
+			path: detailsPath,
+		});
+	}
 	if (mutation.action === "create") return;
 	if (!MEMORY_ID_PATTERN.test(mutation.id)) {
 		throw new MemoryError("INVALID_ARGUMENT", `Invalid memory id: ${mutation.id}`, {
@@ -836,18 +931,59 @@ function validateMutationTarget(mutation: MemoryMutation, memories: readonly Mem
 			path: detailsPath,
 		});
 	}
-	if (
-		mutation.action === "update" &&
-		mutation.title === undefined &&
-		mutation.cue === undefined &&
-		mutation.body === undefined &&
-		mutation.tags === undefined
-	) {
-		throw new MemoryError("INVALID_ARGUMENT", "Update requires at least one of title, cue, body, or tags", {
+	if (mutation.action === "update" && isEmptyUpdate(mutation)) {
+		throw new MemoryError("INVALID_ARGUMENT", "Update requires at least one of title, cue, body, tags, or injection", {
 			operation: "mutate",
 			path: detailsPath,
 		});
 	}
+}
+
+/**
+ * Always-injection budget for the store's scope, checked after the storage
+ * caps. Over budget, only recovery moves commit: a delete, or an update that
+ * strictly shrinks the projected always block (no dimension grows, at least
+ * one shrinks — demotion always qualifies). Unrelated edits are rejected so
+ * an externally over-budget always set is repaired before the store grows.
+ */
+function enforceInjectionBudget(
+	mutation: MemoryMutation,
+	current: readonly Memory[],
+	projected: readonly Memory[],
+	budget: InjectionBudget,
+	detailsPath: string,
+): { usage: InjectionBudgetUsage; warnings: MutationWarning[] } {
+	const usage = measureAlwaysBlock(projected, budget);
+	if (!usage.overBudget) return { usage, warnings: [] };
+
+	const before = measureAlwaysBlock(current, budget);
+	const strictShrink =
+		usage.bytes <= before.bytes &&
+		usage.estimatedTokens <= before.estimatedTokens &&
+		(usage.bytes < before.bytes || usage.estimatedTokens < before.estimatedTokens);
+	const allowed = mutation.action === "delete" || (mutation.action === "update" && strictShrink);
+	if (!allowed) {
+		const sizes = usage.alwaysIds
+			.map((id) => {
+				const memory = projected.find((candidate) => candidate.id === id);
+				return `${id}(${memory === undefined ? "?" : Buffer.byteLength(memory.body, "utf8")}B body)`;
+			})
+			.join(", ");
+		throw new MemoryError(
+			"INJECTION_BUDGET_EXCEEDED",
+			`always block for ${budget.scope} would be ${formatBudgetUsage(usage)}; always ids: ${sizes || "none"}`,
+			{ operation: "mutate", path: detailsPath },
+		);
+	}
+	return {
+		usage,
+		warnings: [
+			{
+				code: "INJECTION_OVER_BUDGET_REMAINS",
+				message: `${budget.scope} always block remains over budget after this recovery mutation (${formatBudgetUsage(usage)}); keep demoting, shrinking, or deleting always memories`,
+			},
+		],
+	};
 }
 
 function enforceCaps(
@@ -954,6 +1090,14 @@ async function performMutation(
 		nextIndex,
 		detailsPath,
 	);
+	const injection = enforceInjectionBudget(
+		mutation,
+		before.memories,
+		applied.memories,
+		options.injectionBudget ?? MEMORY_INJECTION_BUDGETS.project,
+		detailsPath,
+	);
+	warnings.push(...injection.warnings);
 	const oldGeneration = before.generation;
 	const newGeneration = sha256Generation(nextDetails);
 
@@ -1047,6 +1191,7 @@ async function performMutation(
 			tokens: { details: estimateTokens(nextDetails), index: estimateTokens(nextIndex) },
 			generation: newGeneration,
 			warnings,
+			injection: injection.usage,
 		};
 	} finally {
 		// Clean only this transaction's temps; renamed temps are gone already.

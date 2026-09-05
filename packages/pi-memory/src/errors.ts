@@ -5,6 +5,7 @@ export type MemoryErrorCode =
 	| "DUPLICATE_ID"
 	| "ID_EXHAUSTED"
 	| "CAP_EXCEEDED"
+	| "INJECTION_BUDGET_EXCEEDED"
 	| "NOT_FOUND"
 	| "INVALID_ARGUMENT"
 	| "READ_ONLY"
@@ -54,6 +55,8 @@ const NEXT_STEPS: Record<MemoryErrorCode, string> = {
 	DUPLICATE_ID: "Edit details.md so every memory id appears exactly once, then retry",
 	ID_EXHAUSTED: "Retry the create; if it persists, check the id factory or randomness source",
 	CAP_EXCEEDED: "Delete or consolidate existing memories, then retry",
+	INJECTION_BUDGET_EXCEEDED:
+		"Demote memories with remember update injection=on-demand, shrink their bodies, or delete them; run /pi-memory status to see the always block usage",
 	NOT_FOUND: "Use recall to list current memory ids in this store",
 	INVALID_ARGUMENT: "Fix the arguments and retry",
 	READ_ONLY: "Project memory is read-only in this mode; switch to read-write to mutate it",

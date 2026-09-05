@@ -1,4 +1,5 @@
-import { estimateTokens, serializeIndex } from "./store.js";
+import type { MemoryMode } from "./config.js";
+import { estimateTokens, serializeIndex, type MemoryInjection } from "./store.js";
 
 export const MEMORY_CATALOG_MAX_BYTES = 4_096;
 export const MEMORY_CATALOG_MAX_ESTIMATED_TOKENS = 1_000;
@@ -17,6 +18,8 @@ export interface CatalogEntry {
 	tags: readonly string[];
 	cue: string;
 	updated: string;
+	/** `always` entries are excluded from the catalog: their full bodies are injected separately. */
+	injection?: MemoryInjection;
 }
 
 /** Structurally compatible with a validated readMemorySnapshot result. */
@@ -30,6 +33,10 @@ export interface CatalogRenderResult {
 	generation: `sha256:${string}`;
 	included: number;
 	omitted: number;
+	/** Ids whose metadata line is in the block (newest first). */
+	includedIds: string[];
+	/** Ids omitted by the catalog's own byte/token/entry limits. */
+	omittedIds: string[];
 	bytes: number;
 	estimatedTokens: number;
 }
@@ -47,6 +54,13 @@ const ADVISORY_LINES = [
 	"Use recall (scope=project) for full bodies. Project writes are allowed only in",
 	"read-write mode; do not attempt them when the current mode is read-only.",
 ] as const;
+
+/** Current effective mode, refreshed per request; the system-prompt policy is fixed per run. */
+const MODE_LINES: Record<MemoryMode, string> = {
+	off: "Current project memory mode: off.",
+	"read-only": "Current project memory mode: read-only (project writes are rejected now).",
+	"read-write": "Current project memory mode: read-write.",
+};
 
 const ASCII_CONTROLS = /[\u0000-\u001f\u007f]/g;
 const CLOSING_TAG = /<\/pi_memory/gi;
@@ -74,6 +88,7 @@ function renderEntry(entry: CatalogEntry): string {
 			cue: entry.cue,
 			updated: entry.updated,
 			body: "",
+			injection: "on-demand",
 		},
 	]).slice(0, -1);
 
@@ -104,10 +119,12 @@ function buildContent(
 	generation: CatalogSnapshot["generation"],
 	entryLines: readonly string[],
 	omitted: number,
+	mode: MemoryMode | undefined,
 ): string {
 	const lines = [
 		`<pi_memory advisory="untrusted" scope="project" generation="${generation}">`,
 		...ADVISORY_LINES,
+		...(mode === undefined ? [] : [MODE_LINES[mode]]),
 		...entryLines,
 	];
 	if (omitted > 0) lines.push(`… ${omitted} entries omitted; use recall to search.`);
@@ -115,24 +132,36 @@ function buildContent(
 	return lines.join("\n");
 }
 
+export interface CatalogRenderOptions {
+	limits?: Partial<CatalogLimits>;
+	/** When given, one line states the current effective mode. */
+	mode?: MemoryMode;
+}
+
 /**
- * Renders a deterministic, metadata-only project catalog. Optional limits may
- * tighten, but never raise, the fixed whole-block ceilings.
+ * Renders a deterministic, metadata-only project catalog of ON-DEMAND entries
+ * (always entries are injected in full elsewhere). Optional limits may tighten,
+ * but never raise, the fixed whole-block ceilings.
  */
 export function renderMemoryCatalog(
 	snapshot: CatalogSnapshot,
-	limits?: Partial<CatalogLimits>,
+	limitsOrOptions?: Partial<CatalogLimits> | CatalogRenderOptions,
 ): CatalogRenderResult | undefined {
-	if (snapshot.memories.length === 0) return undefined;
+	const options: CatalogRenderOptions =
+		limitsOrOptions !== undefined && ("limits" in limitsOrOptions || "mode" in limitsOrOptions)
+			? (limitsOrOptions as CatalogRenderOptions)
+			: { limits: limitsOrOptions as Partial<CatalogLimits> | undefined };
+	const onDemand = snapshot.memories.filter((entry) => entry.injection !== "always");
+	if (onDemand.length === 0) return undefined;
 
-	const effectiveLimits = resolveLimits(limits);
-	const entries = [...snapshot.memories].sort(compareEntries);
+	const effectiveLimits = resolveLimits(options.limits);
+	const entries = [...onDemand].sort(compareEntries);
 	const entryLines = entries.map(renderEntry);
 	const maximumIncluded = Math.min(entries.length, effectiveLimits.maxEntries);
 
 	for (let included = maximumIncluded; included >= 0; included -= 1) {
 		const omitted = entries.length - included;
-		const content = buildContent(snapshot.generation, entryLines.slice(0, included), omitted);
+		const content = buildContent(snapshot.generation, entryLines.slice(0, included), omitted, options.mode);
 		const bytes = Buffer.byteLength(content, "utf8");
 		const estimatedTokenCount = estimateTokens(content);
 		if (bytes > effectiveLimits.maxBytes || estimatedTokenCount > effectiveLimits.maxEstimatedTokens) continue;
@@ -142,6 +171,8 @@ export function renderMemoryCatalog(
 			generation: snapshot.generation,
 			included,
 			omitted,
+			includedIds: entries.slice(0, included).map((entry) => entry.id),
+			omittedIds: entries.slice(included).map((entry) => entry.id),
 			bytes,
 			estimatedTokens: estimatedTokenCount,
 		};

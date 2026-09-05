@@ -24,6 +24,8 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import memoryExtension from "../../src/extensions/memory.js";
 
+type AgentMessage = AgentSession["messages"][number];
+
 const PROVIDER_ID = "pi-memory-sdk-fake";
 const MODEL_ID = "lifecycle-test";
 const API = "openai-completions" as const;
@@ -71,8 +73,10 @@ export interface SdkHarness {
 	readonly sessionManager: SessionManager;
 	readonly cwd: string;
 	captures: ProviderCapture[];
+	contextInputs: Array<{ captureIndex: number; messages: AgentMessage[] }>;
 	readonly baseSystemPrompt: string;
 	prompt(text: string): Promise<void>;
+	enqueueResponses(...responses: FakeResponse[]): void;
 	reload(): Promise<void>;
 	newSession(): Promise<void>;
 	resume(sessionPath: string, cwdOverride?: string): Promise<void>;
@@ -218,6 +222,12 @@ async function withAgentDir<T>(agentDir: string, run: () => Promise<T>): Promise
 export async function createSdkHarness(options: SdkHarnessOptions): Promise<SdkHarness> {
 	await mkdir(options.agentDir, { recursive: true, mode: 0o700 });
 	const captures: ProviderCapture[] = [];
+	const contextInputs: SdkHarness["contextInputs"] = [];
+	const observeContext = (pi: ExtensionAPI): void => {
+		pi.on("context", (event) => {
+			contextInputs.push({ captureIndex: captures.length, messages: structuredClone(event.messages) });
+		});
+	};
 	const responses = options.responses.slice();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
@@ -253,7 +263,7 @@ export async function createSdkHarness(options: SdkHarnessOptions): Promise<SdkH
 				settingsManager,
 				modelRuntime,
 				resourceLoaderOptions: {
-					extensionFactories: [memoryExtension, fakeProviderExtension(responses, captures)],
+					extensionFactories: [observeContext, memoryExtension, fakeProviderExtension(responses, captures)],
 					noContextFiles: true,
 					noSkills: true,
 					noPromptTemplates: true,
@@ -304,10 +314,12 @@ export async function createSdkHarness(options: SdkHarnessOptions): Promise<SdkH
 			return runtime.cwd;
 		},
 		captures,
+		contextInputs,
 		get baseSystemPrompt() {
 			return baseSystemPrompt;
 		},
 		prompt: (text) => withAgentDir(options.agentDir, () => runtime.session.prompt(text)),
+		enqueueResponses: (...queued) => { responses.push(...queued); },
 		reload: () => withAgentDir(options.agentDir, () => runtime.session.reload()),
 		async newSession() {
 			await withAgentDir(options.agentDir, () => runtime.newSession());
