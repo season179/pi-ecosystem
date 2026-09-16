@@ -1,4 +1,5 @@
 import {
+	advisoryLevelForCadence,
 	applyBuddyFeedback,
 	buildBuddyCalibrationBlock,
 	watchdogThresholdForLevel,
@@ -31,6 +32,7 @@ const DEFAULT_ADVISORY_LEVEL: AdvisoryLevel = 0;
 export class BuddySession {
 	readonly memory: BuddyMemory;
 	private advisoryLevel: AdvisoryLevel = DEFAULT_ADVISORY_LEVEL;
+	private initialCadenceValue = watchdogThresholdForLevel(DEFAULT_ADVISORY_LEVEL);
 	private calibrationNote?: BuddyCalibrationNote;
 	private memoryCurated = false;
 	private enabledValue = true;
@@ -75,6 +77,11 @@ export class BuddySession {
 		);
 		if (enabled) this.consultToolWasActiveWhenDisabled = undefined;
 		return next;
+	}
+
+	/** Starting cadence for telemetry; feedback changes only the effective threshold. */
+	initialCadence(): number {
+		return this.initialCadenceValue;
 	}
 
 	watchdogThreshold(): number {
@@ -149,10 +156,14 @@ export class BuddySession {
 		this.browserUsed = false;
 	}
 
-	resetForSession(): void {
+	/** Apply configuration only at session start/reload, never on consultation or feedback. */
+	resetForSession(initialCadence?: number): void {
 		this.memoryCurated = false;
 		this.configWarningsShown.clear();
-		this.advisoryLevel = DEFAULT_ADVISORY_LEVEL;
+		this.advisoryLevel = initialCadence === undefined
+			? DEFAULT_ADVISORY_LEVEL
+			: advisoryLevelForCadence(initialCadence) ?? DEFAULT_ADVISORY_LEVEL;
+		this.initialCadenceValue = this.watchdogThreshold();
 		this.calibrationNote = undefined;
 	}
 

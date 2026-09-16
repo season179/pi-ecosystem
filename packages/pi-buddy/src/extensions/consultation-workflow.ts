@@ -36,6 +36,7 @@ import {
 } from "./retry.js";
 import {
 	recordConsultation,
+	type BuddyTelemetryContext,
 } from "./telemetry.js";
 
 export type { ConsultationInjection } from "./buddy-context.js";
@@ -73,12 +74,17 @@ export interface ConsultationWorkflowRequest {
 	extraTools?: readonly BuddyTool[];
 	statusKey?: string;
 	trigger?: BuddyTrigger;
-	/** Maps a successful answer to a telemetry outcome (watchdog: pass/concern). */
+	/** Explicit invocation snapshot; replaces the default context callback. */
+	telemetryContext?: BuddyTelemetryContext;
+	/** Validates/maps a successful answer to an outcome; throws fail the consultation. */
 	outcomeOf?: (result: ConsultResult) => BuddyOutcome;
 	/** Extra telemetry computed at record time (e.g. commit revisions). */
 	extraTelemetry?: () => {
 		turnsElapsed?: number;
 		concernId?: string;
+		originRunId?: string;
+		deliveryRunId?: string;
+		windowRunId?: string;
 		reviewPhase?: "review" | "revalidation";
 		reviewRevision?: number;
 		revalidationRevision?: number;
@@ -110,6 +116,7 @@ export interface ConsultationWorkflowOptions {
 	loadConfig?: LoadBuddyConfig;
 	consult?: ConsultBuddy;
 	record?: RecordConsultation;
+	getTelemetryContext?: () => BuddyTelemetryContext;
 	now?: () => number;
 	retryDelay?: () => number;
 	delay?: typeof delayWithAbort;
@@ -189,8 +196,13 @@ export class ConsultationWorkflow {
 	}
 
 	async run(args: ConsultationWorkflowRequest): Promise<RunConsultationResult> {
+		// Clone before any await (including config resolution). Detached work must
+		// retain its invocation's run even if the callback returns a mutable object.
+		const telemetryContext = telemetryValue(() => ({
+			...(args.telemetryContext ?? this.options.getTelemetryContext?.()),
+		}));
 		const statusKey = args.statusKey ?? "buddy";
-		const startedAt = this.now();
+		const startedAt = telemetryValue(() => this.now()) ?? Date.now();
 		args.ctx.ui.setStatus(statusKey, "buddy: consulting...");
 		const signal = args.signal ?? args.ctx.signal;
 		let attempts = 0;
@@ -318,14 +330,18 @@ export class ConsultationWorkflow {
 				const notice = harvestNotice(applied);
 				if (notice && args.ctx.hasUI) args.ctx.ui.notify(notice, "info");
 			}
-			await this.record({
+			// outcomeOf also validates source-specific protocols. Its failure must
+			// follow the consultation error path, unlike optional telemetry metadata.
+			const outcome = args.outcomeOf?.(result) ?? "ok";
+			await this.recordBestEffort(() => ({
+				...telemetryContext,
 				source: args.source,
 				stance: args.stance,
-				outcome: args.outcomeOf?.(result) ?? "ok",
+				outcome,
 				model: result.model,
 				totalMs: this.now() - startedAt,
 				trigger: args.trigger,
-				...args.extraTelemetry?.(),
+				...telemetryValue(() => ({ ...args.extraTelemetry?.() })),
 				rounds: result.rounds,
 				toolCalls: result.activity.length,
 				transcriptTokens: result.transcriptTokens,
@@ -345,10 +361,12 @@ export class ConsultationWorkflow {
 				modelsAttempted,
 				failoverUsed: result.failoverUsed,
 				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
-			});
+			}));
 			return result;
 		} catch (error) {
-			await this.record({
+			await this.recordBestEffort(() => ({
+				...telemetryContext,
+				...telemetryValue(() => ({ ...args.extraTelemetry?.() })),
 				source: args.source,
 				stance: args.stance,
 				outcome:
@@ -362,10 +380,21 @@ export class ConsultationWorkflow {
 				failoverUsed: modelsAttempted.length > 1,
 				modelFailures: modelFailures.length > 0 ? modelFailures : undefined,
 				error: errorToString(error),
-			});
+			}));
 			throw error;
 		} finally {
 			args.ctx.ui.setStatus(statusKey, undefined);
+		}
+	}
+
+	private async recordBestEffort(
+		buildRecord: () => Parameters<RecordConsultation>[0],
+	): Promise<void> {
+		try {
+			await this.record(buildRecord());
+		} catch {
+			// Includes injected writers and record construction: never change the
+			// consultation result or replace its original failure with telemetry.
 		}
 	}
 
@@ -392,6 +421,14 @@ export function formatFailoverLine(
 export function formatFailoverNotice(result: RunConsultationResult): string {
 	const line = formatFailoverLine(result);
 	return line ? `${line}\n\n${result.answer}` : result.answer;
+}
+
+function telemetryValue<T>(read: () => T): T | undefined {
+	try {
+		return read();
+	} catch {
+		return undefined;
+	}
 }
 
 function errorToString(error: unknown): string {

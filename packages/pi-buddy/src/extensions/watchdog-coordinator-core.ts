@@ -48,10 +48,35 @@ export class WatchdogCoordinator<
 	private revision = 0;
 	private pending?: PendingCandidate<T, TEntry>;
 	private readonly inFlightTools = new Set<string>();
-	private committing = false;
+	/**
+	 * Identity of the commit attempt that currently owns publication, if any.
+	 * Scoped ownership lets `invalidate()` release the slot immediately even when
+	 * an aborted provider call never resolves; the old attempt's continuation can
+	 * then neither publish nor clear a newer attempt's ownership.
+	 */
+	private commitOwner?: number;
+	private commitSequence = 0;
 
 	get hasPending(): boolean {
 		return this.pending !== undefined;
+	}
+
+	/** Read-only view of the single staged candidate; never a second queue. */
+	peekPending(): T | undefined {
+		return this.pending?.candidate;
+	}
+
+	/**
+	 * Release the slot without changing the generation (expiry/suppression).
+	 * Commit ownership is disowned too, so a hung revalidation for the discarded
+	 * candidate cannot block fresh staging; its continuation is treated as
+	 * activity. Unrelated tool-in-flight accounting is untouched.
+	 */
+	discardPending(): T | undefined {
+		const candidate = this.pending?.candidate;
+		this.pending = undefined;
+		this.commitOwner = undefined;
+		return candidate;
 	}
 
 	capture(entries: readonly TEntry[]): WatchdogSnapshot<TEntry> {
@@ -67,7 +92,7 @@ export class WatchdogCoordinator<
 		if (
 			snapshot.generation !== this.generation ||
 			this.pending !== undefined ||
-			this.committing
+			this.commitOwner !== undefined
 		) {
 			return false;
 		}
@@ -94,6 +119,7 @@ export class WatchdogCoordinator<
 		this.revision += 1;
 		this.pending = undefined;
 		this.inFlightTools.clear();
+		this.commitOwner = undefined;
 	}
 
 	async commit(
@@ -108,10 +134,15 @@ export class WatchdogCoordinator<
 			snapshot: WatchdogSnapshot<TEntry>,
 			revalidationCount: number,
 		) => void,
+		/**
+		 * Final eligibility recheck, evaluated in the same synchronous
+		 * continuation as the revision check (e.g. "is a run still active?").
+		 */
+		canPublish?: () => boolean,
 	): Promise<WatchdogCommitResult<T, TEntry>> {
 		const pending = this.pending;
 		if (!pending) return { status: "none" };
-		if (this.committing) {
+		if (this.commitOwner !== undefined) {
 			return { status: "deferred", reason: "commit_in_flight" };
 		}
 		if (this.inFlightTools.size > 0) {
@@ -121,14 +152,19 @@ export class WatchdogCoordinator<
 		const snapshot = this.capture(entries);
 		pending.revalidationCount += 1;
 		const revalidationCount = pending.revalidationCount;
-		this.committing = true;
+		const attempt = ++this.commitSequence;
+		this.commitOwner = attempt;
 		try {
 			const verdict = await revalidate(
 				pending.candidate,
 				snapshot,
 				revalidationCount,
 			);
+			// Ownership, generation, revision and the candidate itself must all be
+			// unchanged across the await; otherwise this attempt has been superseded.
 			if (
+				this.commitOwner !== attempt ||
+				this.pending !== pending ||
 				this.generation !== snapshot.generation ||
 				this.revision !== snapshot.revision
 			) {
@@ -143,6 +179,9 @@ export class WatchdogCoordinator<
 					revalidationCount,
 				};
 			}
+			if (canPublish && !canPublish()) {
+				return { status: "deferred", reason: "activity" };
+			}
 			// Publication runs in the same synchronous continuation as the final
 			// revision check. Callers must not await before their send boundary.
 			publish?.(verdict.candidate, snapshot, revalidationCount);
@@ -154,7 +193,7 @@ export class WatchdogCoordinator<
 				revalidationCount,
 			};
 		} finally {
-			this.committing = false;
+			if (this.commitOwner === attempt) this.commitOwner = undefined;
 		}
 	}
 }

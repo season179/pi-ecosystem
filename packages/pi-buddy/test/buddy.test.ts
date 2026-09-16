@@ -295,9 +295,23 @@ describe("WatchdogCoordinator", () => {
 			return { decision: "confirm", candidate: "obsolete candidate" };
 		});
 		coordinator.invalidate();
+		const fresh = coordinator.capture([messageEntry({ role: "user", content: "new" })]);
+		assert.equal(coordinator.stage(fresh, "fresh candidate"), true);
+		let releaseFresh!: () => void;
+		const freshGate = new Promise<void>((resolve) => { releaseFresh = resolve; });
+		const newCommit = coordinator.commit(fresh.entries, async () => {
+			await freshGate;
+			return { decision: "confirm", candidate: "fresh candidate" };
+		});
+		// The old provider ignored cancellation and returns during a newer commit.
 		release();
-
 		assert.deepEqual(await committing, { status: "deferred", reason: "activity" });
+		assert.equal(coordinator.hasPending, true);
+		assert.deepEqual(await coordinator.commit(fresh.entries, async () =>
+			assert.fail("old settlement must not release the newer commit")),
+			{ status: "deferred", reason: "commit_in_flight" });
+		releaseFresh();
+		assert.equal((await newCommit).status, "deliver");
 		assert.equal(coordinator.hasPending, false);
 	});
 });
@@ -1426,11 +1440,11 @@ describe("BuddyRunTracker", () => {
 		t.onTurnEnd();
 		t.onTurnEnd();
 		assert.equal(t.onTurnEnd(), true);
-		t.launchBackground("turns");
+		const launch = t.launchBackground("turns");
 		assert.equal(t.onTurnEnd(), false);
 		assert.equal(t.onTurnEnd(), false);
 		assert.equal(t.onTurnEnd(), false);
-		t.settleBackground();
+		t.settleBackground(launch);
 		t.onTurnEnd();
 		t.onTurnEnd();
 		assert.equal(t.onTurnEnd(), true);
@@ -1471,8 +1485,8 @@ describe("BuddyRunTracker", () => {
 		t.onTurnEnd();
 		t.onTurnEnd();
 		assert.equal(t.onTurnEnd(), true);
-		t.launchBackground("turns");
-		t.settleBackground();
+		const launch = t.launchBackground("turns");
+		t.settleBackground(launch);
 		assert.equal(t.onAgentEnd(), false);
 	});
 
@@ -1503,6 +1517,12 @@ describe("BuddyRunTracker", () => {
 		assert.equal(t.turnsElapsedSince(launch), 2);
 		t.invalidate();
 		assert.equal(t.isCurrent(launch), false);
+		assert.equal(t.isBackgroundInFlight, false);
+		const fresh = t.launchBackground("turns");
+		t.settleBackground(launch);
+		assert.equal(t.isBackgroundInFlight, true);
+		t.settleBackground(fresh);
+		assert.equal(t.isBackgroundInFlight, false);
 	});
 });
 

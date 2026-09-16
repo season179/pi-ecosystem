@@ -39,7 +39,13 @@ Stances for `consult_buddy`:
 | `fact_check` | Verifies claims against real files; cites VERIFIED / CONTRADICTED / UNVERIFIABLE |
 | `review` | Quality review of recent work, ordered by severity |
 
-Automatic reviews are designed to be quiet. Buddy submits a structured verdict instead of relying on prose `PASS` parsing. Passes are suppressed entirely; concerns remain private candidates until Buddy revalidates them against an exact, stable current transcript snapshot. If the agent or user produces another message, starts or finishes a tool, or runs a shell command during that check, publication is deferred and retried at the next stable boundary. Navigating the session tree or switching sessions discards the pending candidate instead. Only a currently confirmed or replaced recommendation is delivered; a resolved candidate disappears. If the run already ended, a confirmed concern is queued for your next prompt — the agent is never auto-woken.
+Automatic reviews are designed to be quiet. Buddy submits a structured verdict; passes disappear and concerns remain private until revalidated against a stable current transcript snapshot during an active run. Concurrent input, messages, tools, shell activity, or model changes invalidate that snapshot. Only a currently confirmed or revised recommendation is steered into the active run; a suppressed candidate disappears.
+
+**When idle, Buddy does not revalidate or queue a concern into your next prompt.** It holds one unvalidated candidate in memory and shows a provisional widget: “Buddy: unvalidated candidate pending — …”. At the next actual agent run's first eligible turn boundary, it checks the new prompt and current work before deciding whether to interrupt. A held candidate has one delivery window through that run's settled completion, with at most three revalidation calls; it then expires if still pending. Retries/follow-ups do not renew that window, and aborts/errors close it. No next run means no further model call. Disabling Buddy, tree navigation, session replacement, reload, or exit clears pending work. There is no durable candidate queue and no automatic wake-up.
+
+The single pending slot can temporarily block fresh reviews, and a candidate can expire without delivery. Automatic Review is advisory—not a per-tool safety barrier. Holding avoids stale next-prompt insertion; it does not eliminate consultation cost or guarantee every defect is caught.
+
+Both automatic prompts ask Buddy to interrupt for defects actionable within the current request, or evidence-backed ongoing/imminent material correctness or security risks—not unfinished chores. An acknowledged issue with a credible assigned or in-progress fix should not generate another reminder without new contrary evidence. Working on a file is not blanket immunity: novel defects, missed requirements, contradicted completion claims, and dangerous next actions still warrant attention. Revalidation must stay with the same underlying defect, not replace a disproved finding with “run tests/write the report/commit now.” A `resolved` candidate is suppressed, not necessarily fixed. These are model instructions, not deterministic guarantees; requested consultations are unchanged.
 
 Each delivered concern has a short ID. The main agent can use `give_buddy_feedback` to mark it `fixed` or `rebutted` with a reason; use cadence feedback `same` when only recording the disposition. Future watchdog checks receive a compact, branch-aware concern history so they do not repeat settled concerns without new evidence. This adds no extra Buddy call and survives reload, resume, fork, tree navigation, and compaction within the session.
 
@@ -53,7 +59,7 @@ Each delivered concern has a short ID. The main agent can use `give_buddy_feedba
 
 ## Configuration
 
-Optional. Lives in `~/.pi/agent/buddy.json`, re-read at the start of every consultation — edits take effect on the next Buddy call, no restart needed:
+Optional. Lives in `~/.pi/agent/buddy.json`. Models, retries, and output caps are re-read at each consultation. Starting cadence is read only at session start/reload, so editing it does not overwrite feedback in the current session:
 
 ```json
 {
@@ -62,12 +68,14 @@ Optional. Lives in `~/.pi/agent/buddy.json`, re-read at the start of every consu
     { "id": "anthropic/claude-sonnet-4-5", "label": "fallback", "priority": 2 }
   ],
   "retry": { "perModelRetries": 1 },
-  "outputMaxTokens": { "watchdog": 2048, "consult": 4096 }
+  "outputMaxTokens": { "watchdog": 2048, "consult": 4096 },
+  "watchdog": { "initialCadence": 3 }
 }
 ```
 
 - **Models** — a priority failover chain (ascending). Buddy retries the current model on transient failures, then falls back to the next. `perModelRetries: 0` means immediate failover. A configured `models` chain takes precedence over `--buddy-model`; when no usable chain exists, `pi --buddy-model provider/id` applies for that Pi process before the built-in default.
 - **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Automatic reviews must finish with the structured verdict tool; an incomplete prose answer is an error and is never published. Buddy never requests extended thinking, so the cap bounds the answer directly.
+- **Starting cadence** — `watchdog.initialCadence` accepts only 2, 3, 6, 12, or 24; absent means 3, invalid values warn and fall back to 3. This seeds the existing advisory level on startup/new/resume/fork/reload, without fabricating feedback. Starting at 6, `more` goes to 3 then 2; `less` goes to 12 then 24. Run-end and requested reviews are unchanged. Default remains 3; changing cadence is a separate opt-in experiment.
 
 ## Enable / Disable
 
@@ -80,7 +88,7 @@ When off, automatic reviews are skipped and `consult_buddy` refuses model calls.
 
 ## Telemetry
 
-Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. `watchdog_commit` rows record whether a private candidate was delivered, resolved, or deferred by concurrent activity or failed revalidation. Feedback rows record concern IDs and `fixed`/`rebutted` dispositions when supplied.
+Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. `watchdog_commit` rows record handoff, suppression, or deferral—not proof of insertion. Separate candidate rows record holds/expiry, insertion rows observe the live message stream, and low-level run summaries supply turn denominators. Session/run IDs, policy revision, and starting/effective cadence support comparisons over real usage. Feedback rows retain `fixed`/`rebutted` dispositions; these are agent reports, not accuracy scores. Older records without correlation fields remain legacy/unknown.
 
 ```bash
 jq -r '[.type // .source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c

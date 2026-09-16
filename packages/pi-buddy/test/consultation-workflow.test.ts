@@ -56,6 +56,11 @@ describe("ConsultationWorkflow", () => {
 		const records: any[] = [];
 		const modelStatuses: Array<[string | undefined, boolean | undefined]> = [];
 		let now = 1_000;
+		const launchContext = {
+			sessionId: "session-origin", runId: "run-origin",
+			policyRevision: "held-candidate-v1", initialCadence: 3, effectiveCadence: 6,
+		};
+		const expectedContext = { ...launchContext };
 		const workflow = new ConsultationWorkflow({
 			defaultModelSpec: () => "zai/glm-5.2",
 			buildInjection: () => injection,
@@ -64,12 +69,13 @@ describe("ConsultationWorkflow", () => {
 			setModelStatus: (_ctx, spec, options) =>
 				modelStatuses.push([spec, options?.failover]),
 			notifyConfigWarnings: () => undefined,
-			loadConfig: async () => ({
-				path: "buddy.json",
-				found: false,
-				models: [],
-				warnings: [],
-			}),
+			getTelemetryContext: () => launchContext,
+			loadConfig: async () => {
+				// Config is the first async boundary: attribution is already captured.
+				launchContext.runId = "run-later";
+				launchContext.effectiveCadence = 12;
+				return { path: "buddy.json", found: false, models: [], warnings: [] };
+			},
 			consult: async (request) => {
 				assert.equal(request.model, primary);
 				assert.equal(request.memoryBlock, injection.block);
@@ -113,6 +119,9 @@ describe("ConsultationWorkflow", () => {
 			["zai/glm-5.2", false],
 		]);
 		assert.equal(records.length, 1);
+		for (const [key, value] of Object.entries(expectedContext)) {
+			assert.equal(records[0][key], value, key);
+		}
 		assert.deepEqual(
 			{
 				outcome: records[0].outcome,
@@ -143,7 +152,13 @@ describe("ConsultationWorkflow", () => {
 		});
 		const records: any[] = [];
 		const attempted: string[] = [];
+		const explicitContext = { runId: "delivery-run", effectiveCadence: 6 };
+		let defaultContextCalls = 0;
 		const workflow = new ConsultationWorkflow({
+			getTelemetryContext: () => {
+				defaultContextCalls++;
+				return { sessionId: "must-not-merge", runId: "wrong-run" };
+			},
 			defaultModelSpec: () => "zai/glm-5.2",
 			buildInjection: () => injection,
 			memoryStore: new MemoryStore(
@@ -163,6 +178,7 @@ describe("ConsultationWorkflow", () => {
 				warnings: [],
 			}),
 			consult: async (request) => {
+				explicitContext.runId = "next-run";
 				attempted.push(`${request.model.provider}/${request.model.id}`);
 				if (request.model === primary) throw new Error("HTTP 429 rate limit");
 				return {
@@ -183,6 +199,7 @@ describe("ConsultationWorkflow", () => {
 			requestText: "Check this.",
 			source: "command",
 			stance: "discuss",
+			telemetryContext: explicitContext,
 		});
 
 		assert.deepEqual(attempted, [
@@ -194,6 +211,10 @@ describe("ConsultationWorkflow", () => {
 		assert.deepEqual(result.modelsAttempted, attempted);
 		assert.equal(records[0].modelFailures[0].errorKind, "rate_limit");
 		assert.equal(records[0].failoverUsed, true);
+		assert.equal(records[0].runId, "delivery-run");
+		assert.equal(records[0].sessionId, undefined);
+		assert.equal(records[0].effectiveCadence, 6);
+		assert.equal(defaultContextCalls, 0);
 	});
 
 	it("retries a transient failure on the same model before failover", async () => {
@@ -252,5 +273,124 @@ describe("ConsultationWorkflow", () => {
 		assert.equal(records[0].attempts, 2);
 		assert.equal(records[0].retried, true);
 		assert.equal(records[0].modelFailures, undefined);
+	});
+
+	it.each([false, true])("records invocation context and late metadata on failure (aborted=%s)", async (aborted) => {
+		const { ctx } = context({ "zai/glm-5.2": model("zai", "glm-5.2") });
+		const records: any[] = [];
+		const failure = new Error("provider unavailable");
+		const controller = new AbortController();
+		const launch = { sessionId: "session-a", runId: "run-a", initialCadence: 3, effectiveCadence: 6 };
+		let revision = 1;
+		const workflow = new ConsultationWorkflow({
+			defaultModelSpec: () => "zai/glm-5.2",
+			buildInjection: () => injection,
+			memoryStore: {} as any,
+			webTools: [],
+			setModelStatus: () => undefined,
+			notifyConfigWarnings: () => undefined,
+			getTelemetryContext: () => launch,
+			loadConfig: async () => ({ path: "buddy.json", found: false, models: [], warnings: [], perModelRetries: 0 }),
+			consult: async () => {
+				launch.runId = "run-b";
+				revision = 2;
+				if (aborted) controller.abort();
+				throw failure;
+			},
+			record: async (record) => { records.push(record); },
+		});
+		await assert.rejects(workflow.run({
+			ctx, systemPrompt: "Review.", requestText: "Check.", source: "watchdog", stance: "watchdog-revalidation",
+			signal: controller.signal,
+			extraTelemetry: () => ({
+				concernId: "candidate-a", reviewPhase: "revalidation", revalidationRevision: revision,
+				originRunId: "origin-run", windowRunId: "window-run", deliveryRunId: "run-a",
+			}),
+		}), (error) => error === failure);
+		assert.equal(records.length, 1);
+		assert.equal(records[0].outcome, aborted ? "discarded" : "error");
+		assert.equal(records[0].runId, "run-a");
+		assert.equal(records[0].sessionId, "session-a");
+		assert.equal(records[0].effectiveCadence, 6);
+		assert.equal(records[0].concernId, "candidate-a");
+		assert.equal(records[0].reviewPhase, "revalidation");
+		assert.equal(records[0].revalidationRevision, 2);
+		assert.equal(records[0].originRunId, "origin-run");
+		assert.equal(records[0].windowRunId, "window-run");
+		assert.equal(records[0].deliveryRunId, "run-a");
+		assert.equal(records[0].error, failure.message);
+	});
+
+	it("preserves outcome validation failures with invocation metadata and the original error", async () => {
+		const { ctx } = context({ "zai/glm-5.2": model("zai", "glm-5.2") });
+		const failure = new Error("Missing required watchdog verdict");
+		const records: any[] = [];
+		const workflow = new ConsultationWorkflow({
+			defaultModelSpec: () => "zai/glm-5.2",
+			buildInjection: () => injection,
+			memoryStore: {} as any,
+			webTools: [],
+			setModelStatus: () => undefined,
+			notifyConfigWarnings: () => undefined,
+			getTelemetryContext: () => ({ sessionId: "session-a", runId: "origin-run" }),
+			loadConfig: async () => ({ path: "buddy.json", found: false, models: [], warnings: [] }),
+			consult: async () => ({ answer: "No structured verdict", activity: [], rounds: 1, transcriptTokens: 10 }),
+			record: async (record) => {
+				records.push(record);
+				throw new Error("writer must not replace protocol failure");
+			},
+		});
+		await assert.rejects(workflow.run({
+			ctx, systemPrompt: "Review.", requestText: "Check.", source: "watchdog", stance: "watchdog",
+			outcomeOf: () => { throw failure; },
+			extraTelemetry: () => ({ reviewPhase: "review", originRunId: "origin-run" }),
+		}), (error) => error === failure);
+		assert.equal(records.length, 1);
+		assert.equal(records[0].outcome, "error");
+		assert.equal(records[0].runId, "origin-run");
+		assert.equal(records[0].sessionId, "session-a");
+		assert.equal(records[0].reviewPhase, "review");
+		assert.equal(records[0].originRunId, "origin-run");
+		assert.equal(records[0].error, failure.message);
+	});
+
+	it("isolates telemetry callback and writer failures from success and the original error", async () => {
+		const { ctx } = context({ "zai/glm-5.2": model("zai", "glm-5.2") });
+		const failure = new Error("original consultation failure");
+		const brokenTelemetry = () => { throw new Error("telemetry failure"); };
+		for (const writerThrows of [false, true]) {
+			let failConsultation = false;
+			const records: any[] = [];
+			const workflow = new ConsultationWorkflow({
+				defaultModelSpec: () => "zai/glm-5.2",
+				buildInjection: () => injection,
+				memoryStore: {} as any,
+				webTools: [],
+				setModelStatus: () => undefined,
+				notifyConfigWarnings: () => undefined,
+				getTelemetryContext: brokenTelemetry,
+				loadConfig: async () => ({ path: "buddy.json", found: false, models: [], warnings: [], perModelRetries: 0 }),
+				consult: async () => {
+					if (failConsultation) throw failure;
+					return { answer: "Preserved answer", activity: [], rounds: 1, transcriptTokens: 10 };
+				},
+				record: async (record) => {
+					records.push(record);
+					if (writerThrows) brokenTelemetry();
+				},
+			});
+			const request = {
+				ctx, systemPrompt: "Review.", requestText: "Check.", source: "tool" as const, stance: "review",
+				extraTelemetry: brokenTelemetry,
+			};
+			assert.equal((await workflow.run(request)).answer, "Preserved answer");
+			failConsultation = true;
+			await assert.rejects(workflow.run(request), (error) => error === failure);
+			assert.equal(records.length, 2);
+			assert.equal(records[0].outcome, "ok");
+			assert.equal(records[0].runId, undefined);
+			assert.equal(records[1].outcome, "error");
+			assert.equal(records[1].error, failure.message);
+		}
 	});
 });

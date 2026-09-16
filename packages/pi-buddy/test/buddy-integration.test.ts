@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import setupBuddy from "../src/extensions/buddy.js";
 import { __setTelemetryPathForTests } from "../src/extensions/telemetry.js";
+
+vi.mock("../src/extensions/buddy-config.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/extensions/buddy-config.js")>();
+	return { ...actual, loadBuddyConfig: async () => actual.parseBuddyConfig({}) };
+});
 
 function createHarness(branch: unknown[]) {
 	let currentBranch = branch;
@@ -41,7 +46,11 @@ function createHarness(branch: unknown[]) {
 	const ctx: any = {
 		hasUI: false,
 		cwd: "/tmp/project",
-		sessionManager: { getBranch: () => currentBranch },
+		sessionManager: {
+			getBranch: () => currentBranch,
+			getSessionId: () => "session-integration",
+		},
+		isIdle: () => true,
 		ui: {},
 	};
 	return {
@@ -56,6 +65,49 @@ function createHarness(branch: unknown[]) {
 
 afterEach(() => {
 	__setTelemetryPathForTests(undefined);
+});
+
+describe("Buddy run telemetry integration", () => {
+	it("counts low-level runs once and attributes feedback without counting raw input as a run", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "buddy-runs-")), "telemetry.jsonl");
+		__setTelemetryPathForTests(path);
+		const harness = createHarness([]);
+		const emit = async (name: string) => {
+			for (const handler of harness.handlers.get(name) ?? []) {
+				await handler({}, harness.ctx);
+			}
+		};
+		await emit("session_start");
+		await emit("agent_start");
+		await emit("turn_end");
+		await emit("input");
+		await emit("user_bash");
+		await harness.tools.get("give_buddy_feedback").execute(
+			"feedback-1", { feedback: "less" }, undefined, undefined, harness.ctx,
+		);
+		await emit("turn_end");
+		await emit("agent_end");
+		// A retry/follow-up is another low-level run, not another user task.
+		await emit("agent_start");
+		await emit("turn_end");
+		await emit("agent_end");
+		await emit("agent_settled");
+		await emit("session_shutdown");
+		const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		const runs = records.filter((record) => record.type === "buddy_run");
+		assert.equal(runs.length, 2);
+		assert.notEqual(runs[0].runId, runs[1].runId);
+		assert.deepEqual(runs.map((run) => run.turns), [2, 1]);
+		assert.deepEqual(runs.map((run) => run.initialCadence), [3, 3]);
+		assert.deepEqual(runs.map((run) => run.effectiveCadence), [3, 6]);
+		assert.deepEqual(runs.map((run) => run.finalCadence), [6, 6]);
+		assert.ok(runs.every((run) => run.sessionId === "session-integration" && run.outcome === "ended"));
+		const feedback = records.find((record) => record.type === "feedback");
+		assert.equal(feedback.runId, runs[0].runId);
+		assert.equal(feedback.sessionId, "session-integration");
+		assert.equal(feedback.policyRevision, runs[0].policyRevision);
+		assert.equal(feedback.effectiveCadence, 6);
+	});
 });
 
 describe("Buddy concern disposition integration", () => {

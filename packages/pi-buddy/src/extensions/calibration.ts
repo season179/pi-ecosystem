@@ -32,6 +32,14 @@ export function watchdogThresholdForLevel(level: AdvisoryLevel): number {
 	return WATCHDOG_THRESHOLDS[level];
 }
 
+/** Invert the existing table; unsupported starting cadences have no level. */
+export function advisoryLevelForCadence(cadence: number): AdvisoryLevel | undefined {
+	for (const [level, threshold] of Object.entries(WATCHDOG_THRESHOLDS)) {
+		if (threshold === cadence) return Number(level) as AdvisoryLevel;
+	}
+	return undefined;
+}
+
 export function applyBuddyFeedback(
 	current: AdvisoryLevel,
 	feedback: BuddyFeedback,

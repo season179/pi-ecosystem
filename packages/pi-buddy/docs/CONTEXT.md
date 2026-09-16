@@ -22,11 +22,15 @@ The exact session branch and activity revision examined by an Automatic Review.
 _Avoid_: Transcript copy, context
 
 **Verdict**:
-Buddy's structured decision that an Automatic Review passed, found a Concern, resolved it, confirmed it, or replaced it.
+Buddy's structured decision that an Automatic Review passed, found a Concern, suppressed its candidate (`resolved`), confirmed it, or revised the same underlying defect (`replace`). Suppression includes irrelevant or already-in-progress advice; it does not establish a fixed Concern Disposition.
 _Avoid_: Result, response
 
+**Pending Candidate**:
+A private, unvalidated recommendation in the single Automatic Review slot. An idle candidate is held in memory for one subsequent delivery window; it is not yet a delivered/open Concern.
+_Avoid_: Queued warning, delivered concern
+
 **Concern**:
-An actionable problem found by Automatic Review and identified for later disposition.
+An actionable problem delivered by Automatic Review and identified for later disposition.
 _Avoid_: Finding, warning, issue
 
 **Concern Disposition**:
@@ -57,7 +61,9 @@ _Avoid_: Config, model list
 
 - A **Consultation** has exactly one **Stance** and uses one **Model Plan**.
 - An **Automatic Review** examines one **Review Snapshot** and produces one **Verdict**.
-- A **Verdict** may stage one **Concern** for revalidation against a newer **Review Snapshot**.
+- A **Verdict** may stage one **Pending Candidate** for revalidation against a newer **Review Snapshot**.
+- A held **Pending Candidate** gets one subsequent run window through settled completion and at most three revalidation invocations; low-level retries do not renew it.
+- Confirmed active-run publication turns a **Pending Candidate** into a delivered **Concern**. A handoff and its observed message-stream insertion are measured separately.
 - A delivered **Concern** may later receive one terminal **Concern Disposition**.
 - **Advisory Cadence** determines when a turn-triggered **Automatic Review** may begin.
 - A requested **Consultation** may harvest **Memory Lessons** and **Retractions**.

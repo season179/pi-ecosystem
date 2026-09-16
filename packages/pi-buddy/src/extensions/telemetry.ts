@@ -2,7 +2,8 @@
  * Lightweight JSONL telemetry for buddy consultations, following the
  * pi-moa precedent (~/.pi/agent/moa-timings.jsonl).
  *
- * One line per consultation to ~/.pi/agent/buddy-telemetry.jsonl:
+ * Consultation, feedback, candidate, handoff, insertion and run records to
+ * ~/.pi/agent/buddy-telemetry.jsonl:
  * source (tool/command/watchdog), stance, outcome (ok/pass/concern/resolved/error),
  * rounds, tool activity count, transcript size, provider-reported token usage,
  * retry attempts, and wall-clock duration.
@@ -11,7 +12,7 @@
  * - watchdog pass/concern/resolved ratio and review-to-commit revisions
  * - consult frequency by stance (is the agent actually consulting?)
  * - rounds/activity (is the buddy verifying with tools, or armchair-guessing?)
- * - durations (is the buddy slowing turns down?)
+ * - consultation durations (not measured user waiting)
  * - errors (auth/model failures that pass suppression would otherwise hide)
  *
  * Best-effort: telemetry failures never break a consultation.
@@ -30,6 +31,17 @@ import type { ConcernDisposition } from "./concern-history.js";
 export type { BuddyOutcome, BuddySource, BuddyTrigger } from "./buddy-context.js";
 export type BuddyFeedback = "more" | "same" | "less";
 
+export const BUDDY_POLICY_REVISION = "held-candidate-v1";
+
+/** Captured at invocation, never inferred from the current run at completion. */
+export interface BuddyTelemetryContext {
+	sessionId?: string;
+	runId?: string;
+	policyRevision?: string;
+	initialCadence?: number;
+	effectiveCadence?: number;
+}
+
 export interface BuddyModelFailureTelemetry {
 	model: string;
 	label?: string;
@@ -39,7 +51,7 @@ export interface BuddyModelFailureTelemetry {
 	error?: string;
 }
 
-export interface BuddyTelemetryRecord {
+export interface BuddyTelemetryRecord extends BuddyTelemetryContext {
 	v: 1;
 	ts: string;
 	source: BuddySource;
@@ -52,6 +64,9 @@ export interface BuddyTelemetryRecord {
 	trigger?: BuddyTrigger;
 	/** Turns the agent completed between launch and verdict (staleness). */
 	turnsElapsed?: number;
+	originRunId?: string;
+	deliveryRunId?: string;
+	windowRunId?: string;
 	/** Initial detached review or current-state commit check. */
 	reviewPhase?: "review" | "revalidation";
 	/** Activity revision tied to the private candidate. */
@@ -116,7 +131,7 @@ export interface BuddyTelemetryRecord {
 	error?: string;
 }
 
-export interface BuddyFeedbackTelemetryRecord {
+export interface BuddyFeedbackTelemetryRecord extends BuddyTelemetryContext {
 	v: 1;
 	ts: string;
 	type: "feedback";
@@ -130,18 +145,70 @@ export interface BuddyFeedbackTelemetryRecord {
 	concernDisposition?: ConcernDisposition;
 }
 
-export interface BuddyWatchdogCommitTelemetryRecord {
+export interface BuddyWatchdogCommitTelemetryRecord extends BuddyTelemetryContext {
 	v: 1;
 	ts: string;
 	type: "watchdog_commit";
 	trigger: BuddyTrigger;
 	concernId: string;
+	originRunId?: string;
+	deliveryRunId?: string;
+	windowRunId?: string;
 	outcome: "delivered" | "resolved" | "deferred";
 	reason?: "activity" | "error";
 	reviewRevision: number;
 	commitRevision: number;
 	revalidationCount: number;
 }
+
+interface BuddyWatchdogCandidateTelemetryBase extends BuddyTelemetryContext {
+	v: 1;
+	ts: string;
+	type: "watchdog_candidate";
+	trigger: BuddyTrigger;
+	concernId: string;
+	ageMs: number;
+	originRunId?: string;
+	windowRunId?: string;
+}
+
+type BuddyWatchdogCandidateEvent =
+	| { event: "held" }
+	| {
+			event: "expired";
+			reason: "window_closed" | "attempts_exhausted" | "session_reset" | "shutdown" | "disabled";
+		};
+
+export type BuddyWatchdogCandidateTelemetryRecord =
+	BuddyWatchdogCandidateTelemetryBase & BuddyWatchdogCandidateEvent;
+
+export interface BuddyWatchdogInsertedTelemetryRecord extends BuddyTelemetryContext {
+	v: 1;
+	ts: string;
+	/** Observed custom message_end, not proof the model/user read the concern. */
+	type: "watchdog_inserted";
+	trigger: BuddyTrigger;
+	concernId: string;
+	originRunId?: string;
+	deliveryRunId?: string;
+	handedOffAt?: string;
+}
+
+export interface BuddyRunTelemetryRecord extends BuddyTelemetryContext {
+	v: 1;
+	ts: string;
+	type: "buddy_run";
+	runId: string;
+	turns: number;
+	startedAt: string;
+	endedAt: string;
+	outcome: "ended" | "incomplete";
+	/** effectiveCadence is captured at run start; finalCadence at run end. */
+	finalCadence: number;
+}
+
+// Distribute over candidate events so an expired input still requires a reason.
+type TelemetryInput<T> = T extends unknown ? Omit<T, "v" | "ts" | "type"> : never;
 
 const TELEMETRY_FILE = join(homedir(), ".pi", "agent", "buddy-telemetry.jsonl");
 
@@ -173,10 +240,31 @@ export async function recordWatchdogCommit(
 	await appendTelemetry({ type: "watchdog_commit", ...record });
 }
 
+export async function recordWatchdogCandidate(
+	record: TelemetryInput<BuddyWatchdogCandidateTelemetryRecord>,
+): Promise<void> {
+	await appendTelemetry({ type: "watchdog_candidate", ...record });
+}
+
+export async function recordWatchdogInserted(
+	record: Omit<BuddyWatchdogInsertedTelemetryRecord, "v" | "ts" | "type">,
+): Promise<void> {
+	await appendTelemetry({ type: "watchdog_inserted", ...record });
+}
+
+export async function recordBuddyRun(
+	record: Omit<BuddyRunTelemetryRecord, "v" | "ts" | "type">,
+): Promise<void> {
+	await appendTelemetry({ type: "buddy_run", ...record });
+}
+
 async function appendTelemetry(
 	record: Omit<BuddyTelemetryRecord, "v" | "ts"> |
 		Omit<BuddyFeedbackTelemetryRecord, "v" | "ts"> |
-		Omit<BuddyWatchdogCommitTelemetryRecord, "v" | "ts">,
+		Omit<BuddyWatchdogCommitTelemetryRecord, "v" | "ts"> |
+		(Omit<BuddyWatchdogCandidateTelemetryBase, "v" | "ts"> & BuddyWatchdogCandidateEvent) |
+		Omit<BuddyWatchdogInsertedTelemetryRecord, "v" | "ts"> |
+		Omit<BuddyRunTelemetryRecord, "v" | "ts">,
 ): Promise<void> {
 	try {
 		const path = telemetryPath();

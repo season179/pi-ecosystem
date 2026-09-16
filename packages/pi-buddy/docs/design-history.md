@@ -26,8 +26,9 @@ Motivation:
   `read_webpage` via agent-browser, read verbs only).
 - The colleague analogy reframed the watchdog: a suspicious colleague
   investigates WHILE you keep working and interjects when ready — he does not
-  freeze the office. Late steering is still worth it, even if the agent has
-  moved on. Hence background reviews instead of pausing the agent.
+  freeze the office. Hence background reviews instead of pausing the agent.
+  The original blanket endorsement of late steering even after work moved on
+  is qualified by the 2026-09-15 intervention policy below.
 - Goal: a buddy smart and automatic enough that `/buddy` is never needed.
 
 Accepted risk: prompt injection from fetched web content, explicitly accepted
@@ -178,3 +179,62 @@ Decided, do not implement:
 - A "reconcile-call" guideline telling the agent how to weigh buddy advice
   against its own evidence: the advisor doc measured that class of process
   instruction as net-negative on strong executor models.
+
+## 2026-09-15 — Automatic intervention policy, not task-order reminders
+
+Initial review and revalidation share one automatic-only policy: interrupt for
+an actionable defect in the current request or an evidence-backed ongoing or
+imminent material correctness/security risk. Suppress reminders about the same
+concrete issue when a credible fix is already assigned or in progress, absent
+new contrary evidence. This does not shield active work from novel defects,
+missed requirements, contradicted completion, or dangerous next actions.
+
+Unfinished tests, reports, and commits alone are normal task ordering, not an
+automatic finding. Repeated concerns need new relevant evidence; agent feedback
+is context, not proof. Do not bundle unrelated process reminders with a real
+finding or salvage a disproved candidate by replacing it with chores.
+Revalidation `replace` stays with the same underlying defect; `resolved` means
+candidate suppression, not proof of a fix or a Concern Disposition.
+
+This is a prompt-policy change only. Requested stances, structured verdict
+fields, cadence, and the existing delivery lifecycle remain unchanged. Prompt
+contract tests check inclusion and isolation of these rules, not whether a
+model reliably follows them; behavioral sampling remains a separate gate.
+
+## 2026-09-16 — Hold idle candidates; measure real usage
+
+Automatic candidates must not enter Pi's next-prompt queue. An idle candidate
+stays in the existing single pending slot with a provisional widget, not in
+model context or delivered Concern history. Its next actual agent run opens
+one delivery window through settled completion; retries/follow-ups do not
+renew it. Revalidation begins only at eligible active turn boundaries, after
+the new prompt and current results exist. Three actual workflow invocations
+maximum; a stable third confirmation may publish, otherwise expire. No idle
+model call, timer, durable hold, or second-window fallback.
+
+Reset/disable releases tracker and commit ownership immediately, even when a
+provider ignores cancellation. Old continuations cannot publish or release a
+newer attempt's ownership. Expiry does not clear unrelated in-flight tool accounting.
+Actual carried revalidation counts as consultation (including failure), so it
+resets scheduling and avoids an immediate redundant automatic review; a
+protocol-only deferral does not. Ordinary mid-run checks keep their behavior.
+
+Telemetry separates handoff from observed insertion and records held/expired
+transitions. Invocation-time session/run IDs survive detached completion;
+low-level run summaries supply turn denominators. Runs are not user tasks,
+inserted does not mean read/accepted, and feedback is not an accuracy score.
+Legacy rows without correlation remain unknown, not reconstructed.
+
+Optional `watchdog.initialCadence` seeds the existing table on session start;
+default 3 and relative feedback behavior remain unchanged. Changing cadence
+is a separate opt-in experiment, not part of the freshness fix.
+
+Accepted limits: a held candidate occupies the only slot, may expire without
+delivery, and can require a model call on the next request. Provider deadlines
+remain out of scope. This is advisory, not a per-tool safety barrier.
+
+Verification stays deliberately lean: build and the existing package suite,
+with affected lifecycle/telemetry regressions updated. No new SDK harness or
+cross-version execution matrix. Usefulness, missed defects, interruption cost,
+and model adherence are evaluated through actual usage and later telemetry
+review—not inferred from passing prompt tests or fewer alerts.

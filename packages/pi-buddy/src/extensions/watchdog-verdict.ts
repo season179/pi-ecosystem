@@ -42,12 +42,24 @@ const CONCERN_FIELD_DECISIONS: readonly string[] = [
 
 const PHASE_GUIDANCE: Record<WatchdogPhase, string> = {
 	review:
-		'Use "pass" when there is no real unresolved problem, or "concern" ' +
-		"with headline, advisory, and evidence when there is.",
+		'Use "pass" when no problem warrants intervention under the automatic ' +
+		'intervention policy, or "concern" with headline, advisory, and evidence ' +
+		"for an evidence-backed defect actionable within the current request, " +
+		"or an evidence-backed ongoing/imminent material correctness or security risk. " +
+		"Apply the policy's suppression rules; unfinished chores alone do not qualify.",
 	revalidation:
-		'Use "resolved" when the candidate no longer applies, or ' +
-		'"confirm"/"replace" with headline, advisory, and evidence when it ' +
-		"still does.",
+		'Use "resolved" when the candidate should be suppressed under the automatic ' +
+		"intervention policy, including fixed, superseded, disproved, irrelevant, " +
+		"or acknowledged with a credible assigned or in-progress fix, subject to " +
+		"the policy's contrary-evidence and uncovered-harm or harm-before-fix " +
+		"exceptions. A credible assigned or in-progress fix need not be completed. This means " +
+		'suppressed, not proven fixed. Use "confirm" with headline, advisory, and ' +
+		"evidence when it still warrants intervention without a material change; " +
+		'use "replace" with those fields only for the SAME underlying defect ' +
+		"when its recommendation or evidence must change. Never salvage a " +
+		"disproved issue with tests, report, or commit chores. A different newly " +
+		"discovered defect cannot replace this candidate; if the original is " +
+		'disproved, submit "resolved" regardless of other problems.',
 };
 
 /**

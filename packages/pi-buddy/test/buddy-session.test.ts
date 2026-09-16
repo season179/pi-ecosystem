@@ -41,9 +41,11 @@ describe("BuddySession", () => {
 
 	it("owns calibration, injection context, warning locality, and resource flags", () => {
 		const session = createSession();
+		assert.equal(session.initialCadence(), 3);
 		const feedback = session.applyFeedback("less", "Wait for material concerns");
 		assert.equal(feedback.newLevel, -1);
 		assert.equal(session.watchdogThreshold(), 6);
+		assert.equal(session.initialCadence(), 3);
 		const injection = session.buildInjection("project", false, {
 			...emptyReview,
 			verdictDigest: "# Recent verdicts\nPASS",
@@ -66,11 +68,44 @@ describe("BuddySession", () => {
 
 		session.resetForSession();
 		assert.equal(session.watchdogThreshold(), 3);
+		assert.equal(session.initialCadence(), 3);
 		assert.equal(
 			session.buildInjection("project", false, emptyReview).block,
 			undefined,
 		);
 		assert.deepEqual(session.configWarningsToShow(["bad config"]), ["bad config"]);
+	});
+
+	it("seeds the existing cadence table without inventing feedback and keeps feedback relative", () => {
+		const session = createSession();
+		for (const [cadence, level] of [[2, 1], [3, 0], [6, -1], [12, -2], [24, -3]]) {
+			session.applyFeedback("less", "Previous session feedback");
+			session.resetForSession(cadence);
+			assert.equal(session.initialCadence(), cadence);
+			assert.equal(session.watchdogThreshold(), cadence);
+			assert.equal(session.applyFeedback("same").newLevel, level);
+			assert.equal(session.buildInjection("project", false, emptyReview).block, undefined);
+		}
+
+		session.resetForSession(6);
+		for (const cadence of [3, 2, 2]) {
+			assert.equal(session.applyFeedback("more").watchdogThreshold, cadence);
+			assert.equal(session.watchdogThreshold(), cadence);
+			assert.equal(session.initialCadence(), 6);
+		}
+		session.resetForSession(6);
+		for (const cadence of [12, 24, 24]) {
+			assert.equal(session.applyFeedback("less").watchdogThreshold, cadence);
+			assert.equal(session.watchdogThreshold(), cadence);
+			assert.equal(session.initialCadence(), 6);
+		}
+
+		for (const cadence of [undefined, 5]) {
+			session.resetForSession(cadence);
+			assert.equal(session.initialCadence(), 3);
+			assert.equal(session.watchdogThreshold(), 3);
+			assert.equal(session.buildInjection("project", false, emptyReview).block, undefined);
+		}
 	});
 
 	it("curates memory once per session and retries after a session reset", () => {

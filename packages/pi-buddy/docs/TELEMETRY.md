@@ -1,9 +1,34 @@
 # Buddy telemetry reference
 
-Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl`
-(local only, best-effort, never breaks a consultation).
+Consultations, feedback, and lifecycle events append JSONL records to
+`~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort). Every row has
+`v: 1` and an ISO `ts` write timestamp. Telemetry metadata callback/write failures
+never change consultation results or replace their original errors. Source-specific
+outcome validation still fails the consultation when its protocol is invalid.
+No raw transcript or headline payloads are added by lifecycle telemetry.
 
-## Fields
+## Correlation and cadence
+
+All record kinds may carry these fields (optional for older callers/records):
+
+- `sessionId` — Pi's session ID, not a session path or working directory.
+- `runId` — one low-level `agent_start`, not one user task. Retries and follow-ups
+  are separate runs; raw input and user bash are not runs.
+- `policyRevision` — currently `held-candidate-v1`; keep policy cohorts separate.
+- `initialCadence` — starting cadence configured for this session (default 3).
+- `effectiveCadence` — cadence when the consultation/lifecycle context was captured;
+  on run summaries it is the cadence at run start.
+
+Consultation context is copied at invocation, before any await. Explicit request
+context replaces the default callback, so detached work retains its origin even
+if a later run starts before it finishes. Consultation and commit rows can also
+carry `originRunId` (initial investigation), `deliveryRunId` (delivery/revalidation
+run), and `windowRunId` (the held candidate's single subsequent delivery window).
+These are deliberately distinct; do not reattribute by completion timestamp.
+The composition root captures feedback context when feedback is recorded, not
+backdated to the concern's origin.
+
+## Consultation fields
 
 - `source` — `tool` (consult_buddy), `command` (/buddy), or `watchdog`
 - `stance` — requested stance, `watchdog`, or `watchdog-revalidation`
@@ -26,13 +51,44 @@ Feedback rows (`type: "feedback"`) may also contain `concernId` and
 `concernDisposition` (`fixed` or `rebutted`) when the agent records how a
 watchdog concern was settled.
 
+## Lifecycle rows
+
 Commit rows (`type: "watchdog_commit"`) contain `outcome` (`delivered`,
 `resolved`, or `deferred`), `reviewRevision`, `commitRevision`, and
 `revalidationCount`. Deferred rows include `reason` (`activity` or `error`).
-`discarded` consultation outcomes mean a background verdict was dropped because
-the session shut down or was replaced mid-investigation.
-Watchdog/background reviews retry once on transient provider failures before
-falling back or recording an error.
+`delivered` means a **handoff to Pi**, not observed insertion or acceptance.
+A `resolved` outcome means candidate suppression, including superseded,
+irrelevant, disproved, or already-in-progress advice. It does not establish that
+a defect was fixed and is not a `fixed` Concern Disposition.
+`discarded` consultation outcomes mean background work was aborted (for example,
+disable, session replacement, or shutdown), not that the candidate was disproved.
+Watchdog/background reviews retry once on transient provider failures by default
+before falling back or recording an error; configured retries can override this.
+
+Candidate rows (`type: "watchdog_candidate"`) have `trigger`, `concernId`,
+`ageMs` (candidate age at the transition), optional `originRunId`/`windowRunId`,
+and a discriminated `event`:
+
+- `held` — unvalidated candidate retained in Buddy, not delivered/open in Concern
+  history. Recorded once at the transition, without a fabricated commit revision.
+- `expired` — candidate released without publication; required `reason` is
+  `window_closed`, `attempts_exhausted`, `session_reset`, `shutdown`, or `disabled`.
+  Expiry is not a pass verdict, suppression decision, or fixed disposition.
+
+Insertion rows (`type: "watchdog_inserted"`) contain `trigger`, `concernId`,
+optional `originRunId`/`deliveryRunId`, and optional ISO `handedOffAt`.
+They mean a newly handed-off `buddy-review` message was observed at `message_end`.
+They do **not** prove the model/user read or accepted it. Attribution comes from
+the captured handoff, never a later current-run pointer; historical messages do
+not reconstruct insertion rows. Join by session and Concern ID; use the captured
+delivery run where available. `ts - handedOffAt` approximates handoff-to-observation
+gap, not attention time.
+
+Run rows (`type: "buddy_run"`) require `runId`, `turns`, ISO `startedAt`/`endedAt`,
+`outcome` (`ended` or `incomplete`), and `finalCadence`. `turns` counts observed
+`turn_end` events. Normal `agent_end` produces one summary; teardown may close an
+unfinished run once as `incomplete`. `effectiveCadence` is the start value and
+`finalCadence` is the end value; neither supplies per-turn cadence exposure.
 
 ## Token telemetry
 
@@ -44,11 +100,16 @@ Two layers:
   requested consultations.
 - `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
   `reasoningTokens`, `totalTokens`, and `costUsd` come from pi-ai's
-  provider-reported `AssistantMessage.usage`, summed across all Buddy model
-  calls in the consultation. `reasoningTokens` is a subset of `outputTokens`,
-  not an additive category. `finalRoundInputTokens` and
+  provider-reported `AssistantMessage.usage`, summed across the returned Buddy
+  tool-loop's model calls. Failed attempts/retries do not necessarily return
+  usage, so these are recorded totals, not a complete billing ledger.
+  `reasoningTokens` is a subset of `outputTokens`, not an additive category. `finalRoundInputTokens` and
   `finalRoundTotalTokens` report only the final model call, which is useful for
   seeing how large the final tool-loop context became.
+
+Missing token fields mean **unknown**, not zero. `attempts` counts consultation
+attempts (including retry/failover), not every underlying tool-loop model request;
+`rounds` describes the returned tool loop and is absent on failure.
 
 `costUsd` depends on pi-ai model pricing metadata. The default `zai/glm-5.2`
 reports real token counts but currently has zero pricing metadata, so
@@ -56,9 +117,9 @@ reports real token counts but currently has zero pricing metadata, so
 
 ## Health signals
 
-- **watchdog pass:concern:resolved ratio** — mostly `pass` with occasional
-  `concern` is healthy; `resolved` measures candidates correctly suppressed by
-  current-state revalidation.
+- **watchdog pass:concern:resolved ratio** — describes review decisions, not
+  accuracy or recall. `resolved` counts candidates suppressed by current-state
+  revalidation; inspect evidence to judge whether suppression was appropriate.
 - **watchdog_commit deferred rate** — frequent `activity` deferrals indicate
   reviews are colliding with active work; every eventual delivery should have a
   stable commit revision.
@@ -72,7 +133,8 @@ reports real token counts but currently has zero pricing metadata, so
   truncation climbs above ~10%, raise `outputMaxTokens.watchdog`; if mean
   `outputTokens` sits far below the cap, consider lowering it.
 - **costUsd** — only meaningful for models with nonzero pricing metadata.
-- **totalMs** — how much latency the buddy adds per consultation.
+- **totalMs** — consultation time, not measured user waiting. Detached work can
+  overlap main-agent work; do not sum durations as user latency.
 - **failoverUsed / modelsAttempted** — how often the configured primary model
   failed and which fallback succeeded.
 - **outcome: error** — surfaces failures that would otherwise be invisible
@@ -84,6 +146,44 @@ reports real token counts but currently has zero pricing metadata, so
   prompt is too eager. Tune the prompt before raising caps.
 - **retractMisses** — the buddy is hallucinating or misremembering a lesson;
   inspect the memory files.
+
+## Comparing frequency and resource use
+
+Use `100 * count / sum(buddy_run.turns)` on a matched set of correlated runs;
+report low-level run counts and incomplete-run counts alongside the denominator.
+Count **all automatic consultation invocations**, including run-end reviews,
+revalidations, failures and discards. Keep attempts and tool-loop rounds separate.
+Compare recorded `totalTokens` and **observed insertions** per 100 turns, with
+handoffs, holds, expiry and suppression reported separately. Missing token usage
+must remain visible rather than being interpreted as free calls.
+
+Split by policy and starting cadence, then inspect effective cadence at launch,
+trigger, review phase and Buddy model. Run summaries have no model/per-turn cadence
+exposure: model-specific numerators over cohort turns are contributions to that
+cohort's rate, **not** model-specific exposure-normalized rates. Insertion rows have
+no model either; join an unambiguous revalidation by session/Concern/delivery run
+or report unknown. Preserve retry/failover labels; a consultation's `model` is the
+successful (or last attempted) Buddy model, not the main agent's model.
+
+Lower counts alone are not improvement: a held single slot can prevent fresh
+checks, and an expired candidate may never reach the main agent. Feedback is
+fixed/rebutted/**unknown**, not an accuracy, recall or benefit score. Compare
+bounded evidence-backed samples separately; do not infer correctness from passes
+or `resolved` rows.
+
+### Legacy and missing-data limits
+
+Older rows remain unchanged. Missing session/run IDs or policy/cadence metadata
+are legacy/unknown; do not infer a cohort from dates, the current config, or row
+order. A handoff without an insertion row has **unknown insertion**, not confirmed
+non-insertion. Missing dispositions are unknown, not false positives. Missing run
+summaries (including crashes or best-effort write failures) mean missing exposure;
+exclude unjoinable events from normalized rates and report them separately. Do not
+mix legacy raw counts with new denominators or reconstruct old runs from calls.
+
+Telemetry cannot establish whether the model acted on an inserted warning, whether
+an unreported defect existed, or how much user time Buddy saved. Optional context
+or writer failures can leave gaps even on the new policy.
 
 ## Quick queries
 

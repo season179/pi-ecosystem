@@ -11,8 +11,8 @@
  *   buddy investigates IN THE BACKGROUND while the agent keeps working — like
  *   a colleague who checks his suspicion before interrupting. Structured pass
  *   verdicts are suppressed; concerns remain private until revalidated against
- *   a stable current snapshot, then are steered in (or queued for the next
- *   turn if the run already ended — never auto-waking the agent).
+ *   a stable current snapshot during an active run. Idle candidates stay private
+ *   for one subsequent run's revalidation window — never queued into a prompt.
  * - End-of-run review: runs of >= 2 turns that never consulted the buddy get
  *   a quiet background review once the agent is fully settled, using the same
  *   revalidation gate.
@@ -22,6 +22,7 @@
  * watchdog from re-raising concerns the agent explicitly fixed or rebutted.
  */
 
+import { randomUUID } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
 	BuildSystemPromptOptions,
@@ -39,6 +40,7 @@ import {
 	type BuddyFeedback,
 } from "./calibration.js";
 import { BuddySession } from "./buddy-session.js";
+import { loadBuddyConfig } from "./buddy-config.js";
 import {
 	ConsultationWorkflow,
 	formatFailoverLine,
@@ -65,7 +67,12 @@ import {
 	GIVE_BUDDY_FEEDBACK_TOOL,
 	parseBuddyCommand,
 } from "./switch.js";
-import { recordFeedback } from "./telemetry.js";
+import {
+	BUDDY_POLICY_REVISION,
+	recordBuddyRun,
+	recordFeedback,
+	type BuddyTelemetryContext,
+} from "./telemetry.js";
 import { closeBuddyBrowser, createWebTools, type ExecFn } from "./web-tools.js";
 import { createWatchdogVerdictTool } from "./watchdog-verdict.js";
 
@@ -80,6 +87,44 @@ const MODEL_STATUS_KEY = "buddy-model";
 export default function setup(pi: ExtensionAPI): void {
 	const session = new BuddySession(new MemoryStore());
 	let currentSkills: Skill[] = [];
+	let sessionId: string | undefined;
+	let currentRun: {
+		context: BuddyTelemetryContext & { runId: string };
+		startedAt: string;
+		turns: number;
+		ended: boolean;
+	} | undefined;
+
+	function telemetryContext(includeEndedRun = false): BuddyTelemetryContext {
+		return {
+			sessionId,
+			runId: currentRun && (!currentRun.ended || includeEndedRun)
+				? currentRun.context.runId
+				: undefined,
+			policyRevision: BUDDY_POLICY_REVISION,
+			initialCadence: session.initialCadence(),
+			effectiveCadence: session.watchdogThreshold(),
+		};
+	}
+
+	async function finishRun(outcome: "ended" | "incomplete"): Promise<void> {
+		if (!currentRun || currentRun.ended) return;
+		const run = currentRun;
+		// Release ownership before I/O; teardown must not record this run twice.
+		run.ended = true;
+		try {
+			await recordBuddyRun({
+				...run.context,
+				turns: run.turns,
+				startedAt: run.startedAt,
+				endedAt: new Date().toISOString(),
+				outcome,
+				finalCadence: session.watchdogThreshold(),
+			});
+		} catch {
+			// Telemetry must never interfere with Pi's lifecycle.
+		}
+	}
 
 	const execFn: ExecFn = async (command, args, options) => {
 		session.markBrowserUsed();
@@ -107,6 +152,7 @@ export default function setup(pi: ExtensionAPI): void {
 		webTools,
 		setModelStatus: setBuddyModelStatus,
 		notifyConfigWarnings,
+		getTelemetryContext: telemetryContext,
 	});
 	const automaticReview: AutomaticReview = new AutomaticReview({
 		host: pi,
@@ -114,6 +160,8 @@ export default function setup(pi: ExtensionAPI): void {
 		tools: watchdogTools,
 		revalidationTools: watchdogRevalidationTools,
 		getWatchdogThreshold: () => session.watchdogThreshold(),
+		// Settled run-end launches still belong to the low-level run just ended.
+		getTelemetryContext: () => telemetryContext(true),
 		isEnabled: () => session.enabled,
 		reviewMessageType: BUDDY_REVIEW_TYPE,
 		backgroundStatusKey: BG_STATUS_KEY,
@@ -147,7 +195,7 @@ export default function setup(pi: ExtensionAPI): void {
 	}
 
 	function abortBackgroundReview(): void {
-		automaticReview.abort();
+		automaticReview.abort("disabled");
 	}
 
 	async function initializeBuddySwitch(ctx?: ExtensionContext): Promise<void> {
@@ -432,6 +480,7 @@ export default function setup(pi: ExtensionAPI): void {
 				? concernUpdate.concern
 				: undefined;
 			await recordFeedback({
+				...telemetryContext(),
 				feedback,
 				reason: reason || undefined,
 				previousLevel: result.previousLevel,
@@ -624,14 +673,19 @@ export default function setup(pi: ExtensionAPI): void {
 	// --- Automatic triggers ---
 
 	pi.on("session_start", async (_event, ctx) => {
-		automaticReview.restoreSession(ctx.sessionManager.getBranch());
-		session.resetForSession();
+		automaticReview.restoreSession(ctx.sessionManager.getBranch(), ctx);
+		await finishRun("incomplete");
+		currentRun = undefined;
+		sessionId = ctx.sessionManager.getSessionId();
+		const config = await loadBuddyConfig();
+		session.resetForSession(config.initialCadence);
+		notifyConfigWarnings(ctx, config.warnings);
 		currentSkills = [];
 		await initializeBuddySwitch(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		automaticReview.restoreTree(ctx.sessionManager.getBranch());
+		automaticReview.restoreTree(ctx.sessionManager.getBranch(), ctx);
 	});
 
 	// Every main-session mutation advances the optimistic commit token. A
@@ -645,8 +699,9 @@ export default function setup(pi: ExtensionAPI): void {
 		automaticReview.noteActivity();
 	});
 
-	pi.on("message_end", () => {
+	pi.on("message_end", (event) => {
 		automaticReview.noteActivity();
+		automaticReview.messageEnded(event.message);
 	});
 
 	pi.on("tool_execution_start", (event) => {
@@ -661,20 +716,34 @@ export default function setup(pi: ExtensionAPI): void {
 		automaticReview.noteActivity();
 	});
 
+	pi.on("model_select", () => {
+		automaticReview.noteActivity();
+	});
+
 	pi.on("before_agent_start", async (event) => {
 		currentSkills = event.systemPromptOptions.skills ?? [];
 	});
 
-	pi.on("agent_start", async () => {
-		automaticReview.agentStarted();
+	pi.on("agent_start", async (_event, ctx) => {
+		await finishRun("incomplete");
+		sessionId = ctx.sessionManager.getSessionId();
+		currentRun = {
+			context: { ...telemetryContext(), runId: randomUUID() },
+			startedAt: new Date().toISOString(),
+			turns: 0,
+			ended: false,
+		};
+		automaticReview.agentStarted(ctx);
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
+		if (currentRun && !currentRun.ended) currentRun.turns += 1;
 		await automaticReview.turnEnded(ctx);
 	});
 
-	pi.on("agent_end", async () => {
-		automaticReview.agentEnded();
+	pi.on("agent_end", async (_event, ctx) => {
+		automaticReview.agentEnded(ctx);
+		await finishRun("ended");
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
@@ -682,7 +751,10 @@ export default function setup(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		automaticReview.shutdown();
+		automaticReview.shutdown(ctx);
+		await finishRun("incomplete");
+		currentRun = undefined;
+		sessionId = undefined;
 		session.resetForShutdown();
 		if (ctx.hasUI) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { advisoryLevelForCadence } from "./calibration.js";
 import type { OutputMaxTokensConfig } from "./output-control.js";
 
 export const BUDDY_CONFIG_FILENAME = "buddy.json";
@@ -21,6 +22,8 @@ export interface BuddyConfigLoadResult {
 	perModelRetries?: number;
 	/** Per-source-class hard output caps; absent means use built-in defaults. */
 	outputMaxTokens?: OutputMaxTokensConfig;
+	/** Session-start seed only; absent/invalid means the built-in cadence of 3. */
+	initialCadence?: number;
 	warnings: string[];
 }
 
@@ -85,7 +88,33 @@ export function parseBuddyConfig(
 		path,
 		warnings,
 	);
-	return { path, found: true, models, perModelRetries, outputMaxTokens, warnings };
+	const initialCadence = parseInitialCadence(value.watchdog, path, warnings);
+	return { path, found: true, models, perModelRetries, outputMaxTokens, initialCadence, warnings };
+}
+
+function parseInitialCadence(
+	value: unknown,
+	path: string,
+	warnings: string[],
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) {
+		warnings.push(`${path}: "watchdog" must be an object; using default initialCadence 3.`);
+		return undefined;
+	}
+	const initialCadence = value.initialCadence;
+	if (initialCadence === undefined) return undefined;
+	if (
+		typeof initialCadence !== "number" ||
+		!Number.isInteger(initialCadence) ||
+		advisoryLevelForCadence(initialCadence) === undefined
+	) {
+		warnings.push(
+			`${path}: watchdog.initialCadence must be one of the integers 2, 3, 6, 12, 24; using default 3.`,
+		);
+		return undefined;
+	}
+	return initialCadence;
 }
 
 function parseModels(
