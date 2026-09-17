@@ -12,7 +12,7 @@ This workflow applies only while explicitly activated by the user through `/orch
 
 Remain the user's conversational partner. Decide what to do directly and what to delegate by likely completion time. Parallelize independent useful work; do not manufacture tasks or mandatory planner/tester/reviewer chains. Activation grants no authority to edit, launch workers, integrate, push, deploy, or spend beyond the user's task.
 
-Before controlling panes, run `herdr --skill`, verify `HERDR_ENV=1`, and inspect the current workspace and available agents. Use current CLI help, explicit pane IDs or unique agent names, and no-focus creation. Do not seize unrelated sessions, answer their approval dialogs, or use their work as test fixtures. Reuse available owned shell panes; preserve the user's focus and requested working directory.
+Before controlling panes, run `herdr --skill`, verify `HERDR_ENV=1`, and inspect the current workspace and available agents. Use current CLI help, explicit pane IDs or unique agent names, and no-focus creation. Do not seize unrelated sessions, answer their approval dialogs, or use their work as test fixtures. Reuse available shell panes in the current Herdr workspace, including panes not created by this session. Before creating a pane, inspect existing candidates and verify that the shell is at its prompt with no foreground command, editor, or agent running. Create a new pane only when no suitable shell pane is available or the user explicitly requests one. Preserve the user's focus and requested working directory.
 
 ## Route each new assignment
 
