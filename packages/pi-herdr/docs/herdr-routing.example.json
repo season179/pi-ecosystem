@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "historyWindow": 50,
+  "familyShares": { "astra": 40, "glm": 40, "fable": 20 },
+  "profiles": [
+    {
+      "id": "claude-fable",
+      "harness": "claude",
+      "model": "claude-fable-5-1",
+      "family": "fable",
+      "enabled": true,
+      "capabilities": ["text", "image"],
+      "suitability": { "general": 1, "hardest": 0 },
+      "preference": 2,
+      "protection": "claude-auto",
+      "fallbacks": ["codex-astra"],
+      "planning": {
+        "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
+        "date": "2026-09-17",
+        "intelligenceIndex": 53,
+        "quotaNote": "Roughly one-fifth of Astra quota; reserve for hardest work. Remaining quota unknown."
+      }
+    },
+    {
+      "id": "codex-astra",
+      "harness": "codex",
+      "model": "gpt-6-astra",
+      "family": "astra",
+      "enabled": true,
+      "capabilities": ["text", "image"],
+      "suitability": { "easy": 1, "general": 0, "hardest": 1 },
+      "preference": 1,
+      "protection": "codex-approve-for-me",
+      "fallbacks": ["claude-fable"],
+      "planning": {
+        "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
+        "date": "2026-09-17",
+        "intelligenceIndex": 53,
+        "quotaNote": "Astra family; remaining quota unknown."
+      }
+    },
+    {
+      "id": "pi-astra",
+      "harness": "pi",
+      "provider": "openai-codex",
+      "model": "gpt-6-astra",
+      "family": "astra",
+      "enabled": true,
+      "capabilities": ["text", "image"],
+      "suitability": { "easy": 1, "general": 0, "hardest": 1 },
+      "preference": 0,
+      "protection": "standard",
+      "fallbacks": ["codex-astra", "pi-glm", "claude-fable"],
+      "planning": {
+        "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
+        "date": "2026-09-17",
+        "intelligenceIndex": 53,
+        "quotaNote": "Strong general-purpose option; remaining quota unknown."
+      }
+    },
+    {
+      "id": "pi-glm",
+      "harness": "pi",
+      "provider": "zai",
+      "model": "glm-5.3",
+      "family": "glm",
+      "enabled": true,
+      "capabilities": ["text"],
+      "suitability": { "easy": 0, "general": 0 },
+      "preference": 1,
+      "protection": "standard",
+      "fallbacks": ["pi-astra", "codex-astra"],
+      "planning": {
+        "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
+        "date": "2026-09-17",
+        "intelligenceIndex": 45,
+        "costNote": "92% cheaper than Fable 5.1; 86% cheaper than Astra.",
+        "quotaNote": "Good quota; remaining quota unknown.",
+        "capabilityNote": "No vision per user guidance; installed zai registry input is text only."
+      }
+    },
+    {
+      "id": "pi-glm-flash",
+      "harness": "pi",
+      "provider": "zai",
+      "model": "glm-5.3-flash",
+      "family": "glm",
+      "enabled": true,
+      "capabilities": ["text", "image"],
+      "suitability": { "easy": 0 },
+      "preference": 0,
+      "protection": "standard",
+      "fallbacks": ["pi-glm", "pi-astra", "codex-astra"],
+      "planning": {
+        "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
+        "date": "2026-09-17",
+        "intelligenceIndex": 42,
+        "costNote": "One-ninth the cost of GLM-5.3.",
+        "quotaNote": "Good quota; remaining quota unknown.",
+        "capabilityNote": "Vision capable per user guidance and installed zai registry; verify selected route before image work."
+      }
+    }
+  ]
+}

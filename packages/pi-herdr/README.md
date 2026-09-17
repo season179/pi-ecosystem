@@ -1,6 +1,6 @@
 # @season179/pi-herdr
 
-A [Pi](https://github.com/earendil-works/pi) extension for an orchestrator running inside [Herdr](https://github.com/season179/herdr). It registers one-shot, non-blocking watches for agent lifecycle states, pane-output matches, and bounded shell commands, allowing the orchestrator to end its turn instead of blocking in a wait loop.
+A [Pi](https://github.com/earendil-works/pi) extension for conversational orchestration inside [Herdr](https://github.com/season179/herdr). `/orchestrate` supplies the workflow, editable worker routing, and one-shot non-blocking watches. The agent delegates to visible workers, reads their temporary reports, verifies delivery, and quits finished workers while keeping their panes reusable.
 
 Each watch settles once with a fired, timeout, error, or stopped outcome. Agent and output watches run one detached `herdr agent wait` or `herdr pane wait-output` child; command watches run one detached `/bin/sh -c` child. A wake-enabled watch within budget requests a new turn while Pi is idle and is delivered as steering while Pi is busy. Otherwise its card is delivered without starting an idle turn. Explicitly stopped watches produce no card.
 
@@ -29,15 +29,26 @@ An agent becomes the orchestrator when you explicitly ask it, for example:
 
 > You are the orchestrator — dispatch this to the workers.
 
-The always-active `herdr_orchestrate` tool then enables `herdr_watch`, `herdr_unwatch`, and `herdr_watches`. Natural-language activation relies on the model following that tool instruction.
+Use `/orchestrate` as the single entry point. It activates the bundled [workflow](skills/orchestration/SKILL.md), `herdr_route`, `herdr_watch`, `herdr_unwatch`, and `herdr_watches`, without starting a model turn or launching workers. Repeating it is idempotent. Unknown arguments are rejected.
 
-Alternatives:
+Natural-language requests use the always-active `herdr_orchestrate` tool through the same activation path; this depends on the model following its explicit-request instruction. The tool returns immediate workflow guidance; subsequent agent runs receive scoped system-prompt guidance while active. The skill is hidden from automatic model invocation so installation does not assign every worker the orchestrator role.
 
-- `PI_HERDR_ORCHESTRATOR=1 pi` auto-promotes at launch.
-- `/orchestrate` promotes manually.
-- `/orchestrate off` demotes and stops all armed watches.
+- `PI_HERDR_ORCHESTRATOR=1 pi` remains an explicit opt-in for scripted orchestrator starts, including genuinely new sessions in that process. A saved `off` wins for its conversation; forks/parent-linked sessions ignore this default. Never propagate it into worker launches.
+- `/orchestrate off` removes active guidance/tools and stops armed watches, including running command-watch children. It **does not quit workers** or erase prior conversation history. Resolve outstanding supervision deliberately.
+- Reload/resume of the same conversation restores activation. A new conversation starts inactive unless explicitly configured; forks do not inherit activation or worker ownership. This replaces the old process-wide promotion behavior.
+- **Restored role is not restored supervision.** Watches are not persisted. After reload/resume, reconcile actual worker identity and report evidence before rearming; do not assume all visible panes are owned.
 
-Promotion persists across Pi session changes in the same process until explicit demotion or process exit.
+Activation grants no operational permission beyond the user's request. No automatic worker launch, Git integration, task restart, push, or deployment is implemented.
+
+## Worker routing
+
+Policy lives in `~/.pi/agent/herdr-routing.json` (or `herdr-routing.json` under `PI_CODING_AGENT_DIR`), separate from watch settings. See [setup, schema and examples](docs/ROUTING.md). The bundled example represents Claude Code, Codex CLI, and Pi profiles; no credentials or executable shell templates belong in it. Missing/invalid configuration gives an actionable setup message rather than guessed defaults.
+
+The agent calls `herdr_route` before every new dispatch. It rereads policy, checks exact Pi model/auth/input support, and selects among eligible profiles by suitability, soft family shares and preference. Claude/Codex require agent-observed native model/auth/protection evidence supplied in `externalChecks`; an unknown check is not readiness. The tool does **not** launch processes or prove a live worker's permission settings. Verify installed native flags and effective startup settings before submitting work.
+
+`select` returns a profile, fallback information, argument array and selection ID. `record` counts that ID only after the agent reports successful dispatch with a target. Repeated records are idempotent. Previews and failed starts do not count; session-stamped assignment history survives resume but is not inherited by forks. This small history is not a task database or proof of worker ownership/completion.
+
+Configuration edits affect the next selection without rebuilding or restarting active workers. Explicit user choices override defaults, never capability or protection requirements. Family shares are soft counts of recent assignments, not spend, runtime, or forced ratios for small batches; static quota notes are not live balances.
 
 ## Watch Tools and Modes
 
@@ -92,7 +103,9 @@ When a positive wake budget is exhausted, cards continue to arrive without start
 
 ## Status and Compatibility
 
-Implemented. As of 2026-08-23, 94 automated tests pass on macOS, TypeScript checks cleanly, and the stable package entrypoint imports successfully. Historical live evidence covers agent-watch settlement, agent-tail retrieval, a wake-card delivery request, and telemetry; current local telemetry also shows agent and command watches used in real sessions.
+Implemented and locally installed. As of 2026-09-17, 130 tests pass in 10 files; TypeScript, isolated/installed builds, and package contents are checked. A real Herdr/Pi trial verified command and natural-language activation, delegation → automatic watch wake → report verification → delivery → graceful worker exit, hot routing edits, reload/resume/new/fork behavior, and normal installed-package discovery. See [validation and trial limits](docs/VALIDATION.md).
+
+Existing sessions must `/reload` to load this build; then use `/orchestrate`. New sessions load it normally. No push, publication, or release is implied. Historical watch evidence also covers agent-tail retrieval, wake-card delivery requests, and telemetry.
 
 Not yet verified live: `/watches` interaction, state-triggered notifications, output-mode watches, current wake-budget exhaustion UX, and SIGTERM→SIGKILL escalation. Output-card parsing covers Herdr 0.8.2's documented `result.matched_line` field in unit tests, but output mode remains unverified against a live 0.8.2 process.
 

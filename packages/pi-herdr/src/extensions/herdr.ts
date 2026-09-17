@@ -9,6 +9,15 @@ import { Type } from "typebox";
 import { registerWatchesCommand } from "../commands.js";
 import { loadHerdrConfig } from "../config.js";
 import { runHerdr } from "../herdr-cli.js";
+import {
+	type ActivationSource,
+	loadOrchestrationSkill,
+	ORCHESTRATION_ENTRY_TYPE,
+	parseOrchestrateArgs,
+	readOrchestrationState,
+	summarizeRoutingStatus,
+} from "../orchestration-state.js";
+import { registerRoutingTool, routingGuidance } from "../routing-tool.js";
 import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
 	formatStatusChip,
@@ -26,7 +35,11 @@ const WATCH_TOOL_NAMES = [
 	"herdr_unwatch",
 	"herdr_watches",
 ] as const;
-const WATCH_TOOL_NAME_SET: ReadonlySet<string> = new Set(WATCH_TOOL_NAMES);
+/** Tools that become active only while orchestration is explicitly on. */
+const ORCHESTRATOR_TOOL_NAMES = [...WATCH_TOOL_NAMES, "herdr_route"] as const;
+const ORCHESTRATOR_TOOL_NAME_SET: ReadonlySet<string> = new Set(
+	ORCHESTRATOR_TOOL_NAMES,
+);
 
 const WATCH_DESCRIPTION =
 	"Register a non-blocking watch on a herdr agent, pane, or bounded command. You will be woken with a report when it fires — do NOT poll `herdr agent read` in a loop, and NEVER run `herdr agent wait` or `agent prompt --wait` through bash (that blocks your whole turn). To watch a command finishing (CI runs, builds, deploys), prefer mode: 'command': you are woken with its exit code, with no pane or sentinel needed. For workers, prompt WITHOUT --wait, then herdr_watch them, then end your turn or do other work.";
@@ -169,9 +182,16 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		return;
 	}
 
-	const config = loadHerdrConfig(getAgentDir());
+	const agentDir = getAgentDir();
+	const config = loadHerdrConfig(agentDir);
+	const envActivation = process.env.PI_HERDR_ORCHESTRATOR === "1";
 	let manager: WatchManager | undefined;
-	let promoted = process.env.PI_HERDR_ORCHESTRATOR === "1";
+	// Activation belongs to the session: it is decided in session_start from
+	// persisted entries (or the explicit env launch) and never assumed from
+	// package installation alone.
+	let promoted = false;
+	let recoveryNote: string | undefined;
+	const noticedSessions = new Set<string>();
 	let agentBusy = false;
 	let wakesUsed = 0;
 	let exhaustionNotified = false;
@@ -196,21 +216,93 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		}
 	};
 
-	const setWatchToolsActive = (active: boolean): void => {
+	const setOrchestratorToolsActive = (active: boolean): void => {
 		const current = pi.getActiveTools();
 		pi.setActiveTools(
 			active
-				? [...new Set([...current, ...WATCH_TOOL_NAMES])]
-				: current.filter((name) => !WATCH_TOOL_NAME_SET.has(name)),
+				? [...new Set([...current, ...ORCHESTRATOR_TOOL_NAMES])]
+				: current.filter((name) => !ORCHESTRATOR_TOOL_NAME_SET.has(name)),
 		);
 	};
 
-	const promote = (): boolean => {
-		if (promoted) return false;
+	const notify = (
+		ctx: ExtensionContext | undefined,
+		message: string,
+		level: "info" | "warning" | "error",
+	): void => {
+		try {
+			if (ctx?.hasUI) ctx.ui.notify(message, level);
+		} catch {
+			// Notifications are best-effort.
+		}
+	};
+
+	const persistActivation = (
+		ctx: ExtensionContext,
+		active: boolean,
+		source: ActivationSource,
+	): void => {
+		pi.appendEntry(ORCHESTRATION_ENTRY_TYPE, {
+			active,
+			sessionId: ctx.sessionManager.getSessionId(),
+			source,
+			at: new Date().toISOString(),
+		});
+	};
+
+	/** Single activation path shared by `/orchestrate`, `herdr_orchestrate`, env, and restore. */
+	const activate = (
+		ctx: ExtensionContext,
+		source: ActivationSource,
+		options: { persist: boolean },
+	): boolean => {
+		const changed = !promoted;
 		promoted = true;
-		setWatchToolsActive(true);
+		setOrchestratorToolsActive(true);
 		updateFooter();
-		return true;
+		if (changed && options.persist) persistActivation(ctx, true, source);
+		return changed;
+	};
+
+	/** Deactivate guidance and tools; stops only this extension's armed watches. */
+	const deactivate = async (ctx: ExtensionContext): Promise<number> => {
+		const stopped = manager ? (await manager.stop("all")).length : 0;
+		const changed = promoted;
+		promoted = false;
+		recoveryNote = undefined;
+		setOrchestratorToolsActive(false);
+		updateFooter();
+		if (changed) persistActivation(ctx, false, "command");
+		return stopped;
+	};
+
+	/** Concise routing status for notifications; reads/validates the policy now. */
+	const routingStatus = (): { line: string; ready: boolean } => {
+		const line = summarizeRoutingStatus(routingGuidance(agentDir));
+		return { line, ready: line.startsWith("Routing ready") };
+	};
+
+	const OFF_DISCLOSURE =
+		"workers were NOT stopped and conversation history is unchanged; resolve any outstanding supervision deliberately.";
+
+	const buildGuidance = (): string => {
+		const skill = loadOrchestrationSkill();
+		const body =
+			"body" in skill
+				? skill.body
+				: `Orchestration workflow guidance is unavailable (${skill.error}). Follow the user's explicit instructions and the herdr_watch tool guidance only.`;
+		const lines = [
+			"# Herdr orchestration (active for this session)",
+			"",
+			body,
+			"",
+			"## Runtime status",
+			`- ${routingGuidance(agentDir)}`,
+			"- Armed watches never survive reload, resume, new session, or fork; re-arm only after reconciling what is actually running.",
+			...(recoveryNote ? [`- ${recoveryNote}`] : []),
+			`- \`/orchestrate off\` removes this guidance and stops armed watches only; ${OFF_DISCLOSURE}`,
+		];
+		return lines.join("\n");
 	};
 
 	const writeTelemetry = (
@@ -392,27 +484,23 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		name: "herdr_orchestrate",
 		label: "Herdr Orchestrate",
 		description:
-			"Enable herdr orchestrator mode: activates the herdr_watch/herdr_unwatch/herdr_watches tools for supervising other herdr agents. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Do not call it on your own initiative.",
+			"Activate herdr orchestration for this session: enables herdr_watch/herdr_unwatch/herdr_watches/herdr_route and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
 		parameters: Type.Object({}),
 		executionMode: "sequential",
-		async execute() {
-			if (!promote()) {
-				return {
-					content: [{ type: "text", text: "orchestrator mode already enabled" }],
-					details: { promoted: true },
-				};
-			}
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const changed = activate(ctx, "tool", { persist: true });
+			const guidance = buildGuidance();
+			const header = changed
+				? "orchestration activated for this session (persisted; restored on reload/resume, not on fork). No workers were started. Follow this workflow now:"
+				: "orchestration already active for this session. Current workflow:";
 			return {
-				content: [
-					{
-						type: "text",
-						text: "orchestrator mode enabled — herdr_watch, herdr_unwatch and herdr_watches are now available. Prompt workers WITHOUT --wait, then herdr_watch them; never block in bash.",
-					},
-				],
-				details: { promoted: true },
+				content: [{ type: "text", text: `${header}\n\n${guidance}` }],
+				details: { promoted: true, changed },
 			};
 		},
 	});
+
+	registerRoutingTool(pi, { isActive: () => promoted });
 
 	pi.registerMessageRenderer(
 		WATCH_MESSAGE_TYPE,
@@ -549,26 +637,52 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("orchestrate", {
-		description: "Enable or disable herdr orchestrator mode",
+		description:
+			"Activate herdr orchestration for this session (`/orchestrate`) or switch it off (`/orchestrate off`)",
+		getArgumentCompletions: (prefix) =>
+			"off".startsWith(prefix.toLowerCase()) ? [{ value: "off", label: "off" }] : null,
 		handler: async (args, ctx) => {
 			uiCtx = ctx;
-			if (args.trim().toLowerCase() === "off") {
-				await manager?.stop("all");
-				promoted = false;
-				setWatchToolsActive(false);
-				updateFooter();
-				ctx.ui.notify("orchestrator mode disabled", "info");
+			const parsed = parseOrchestrateArgs(args);
+			if (parsed.kind === "unknown") {
+				notify(
+					ctx,
+					`unknown /orchestrate argument "${parsed.argument}"; use /orchestrate or /orchestrate off. Task arguments are not supported.`,
+					"error",
+				);
 				return;
 			}
-
-			const changed = promote();
-			ctx.ui.notify(
-				changed
-					? "orchestrator mode enabled"
-					: "orchestrator mode already enabled",
-				"info",
+			if (parsed.kind === "off") {
+				const wasActive = promoted;
+				const stopped = await deactivate(ctx);
+				const watches =
+					stopped === 0
+						? "no armed watches"
+						: `stopped ${stopped} armed watch${stopped === 1 ? "" : "es"} (their child processes were terminated)`;
+				notify(
+					ctx,
+					`${wasActive ? "orchestration off" : "orchestration was already off"}: ${watches}; ${OFF_DISCLOSURE}`,
+					"info",
+				);
+				return;
+			}
+			const changed = activate(ctx, "command", { persist: true });
+			const routing = routingStatus();
+			notify(
+				ctx,
+				`${
+					changed
+						? "orchestration active for this session: workflow guidance and herdr_watch/herdr_route enabled; no workers started. Restored on reload/resume, not on fork."
+						: "orchestration already active for this session."
+				} ${routing.line}.`,
+				routing.ready ? "info" : "warning",
 			);
 		},
+	});
+
+	pi.on("before_agent_start", (event) => {
+		if (!promoted) return undefined;
+		return { systemPrompt: `${event.systemPrompt}\n\n${buildGuidance()}` };
 	});
 
 	pi.on("input", (event, ctx) => {
@@ -580,7 +694,67 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	/**
+	 * Decide activation for the session that just started. Pi re-runs this
+	 * extension factory on reload/new/resume/fork, so nothing in memory
+	 * survives; the persisted entries of this session are authoritative.
+	 * Fork/clone copies entries under a new session id, so they never match,
+	 * and the explicit env launch never activates such an inherited session.
+	 */
+	const restoreActivation = (
+		ctx: ExtensionContext,
+		reason: string,
+	): void => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const state = readOrchestrationState(ctx.sessionManager.getEntries(), sessionId);
+		const firstNotice = !noticedSessions.has(sessionId);
+		noticedSessions.add(sessionId);
+
+		if (state.own) {
+			promoted = state.own.active;
+			setOrchestratorToolsActive(promoted);
+			if (promoted) {
+				recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone and workers dispatched earlier are not being supervised until you verify them and re-arm.`;
+				if (firstNotice) {
+					notify(
+						ctx,
+						`orchestration restored for this session (${reason}): armed watches were NOT restored; reconcile owned workers before re-arming.`,
+						"warning",
+					);
+				}
+			}
+			return;
+		}
+
+		// CLI --fork starts with reason "startup"; an inactive parent may have
+		// no activation entries to mark inherited. Its header still identifies it.
+		const forked = state.inherited || reason === "fork" ||
+			Boolean(ctx.sessionManager.getHeader()?.parentSession);
+		if (envActivation && !forked) {
+			activate(ctx, "env", { persist: true });
+			if (firstNotice) {
+				const routing = routingStatus();
+				notify(
+					ctx,
+					`orchestration active from PI_HERDR_ORCHESTRATOR=1 for this session; no workers started. ${routing.line}.`,
+					routing.ready ? "info" : "warning",
+				);
+			}
+			return;
+		}
+
+		promoted = false;
+		setOrchestratorToolsActive(false);
+		if (forked && firstNotice) {
+			notify(
+				ctx,
+				`forked/cloned session: orchestration is inactive here${envActivation ? " (PI_HERDR_ORCHESTRATOR=1 is ignored for forks)" : ""}; the parent's workers and watches are not owned by this session. Run /orchestrate to activate.`,
+				"info",
+			);
+		}
+	};
+
+	pi.on("session_start", async (event, ctx) => {
 		uiCtx = ctx;
 		agentBusy = false;
 		wakesUsed = 0;
@@ -597,7 +771,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				void handleOutcome(generation, record, outcome);
 			},
 		});
-		setWatchToolsActive(promoted);
+		restoreActivation(ctx, event.reason);
 		updateFooter();
 	});
 

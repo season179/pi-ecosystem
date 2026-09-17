@@ -33,12 +33,23 @@ const ENV_KEYS = [
 
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown;
 
+interface FakeEntry {
+	type: string;
+	customType?: string;
+	data?: unknown;
+}
+
 class FakePi {
 	readonly handlers = new Map<string, Handler[]>();
 	readonly tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
 	readonly commands = new Map<string, { handler: (...args: any[]) => Promise<void> }>();
 	readonly messages: Array<{ message: any; options: any }> = [];
 	readonly statuses: Array<string | undefined> = [];
+	readonly notices: Array<{ message: string; level: string }> = [];
+	/** Simulated persisted session entries (what pi.appendEntry writes). */
+	entries: FakeEntry[] = [];
+	sessionId = "session-a";
+	parentSession: string | undefined;
 	private activeTools: string[] = [];
 
 	readonly ctx = {
@@ -48,7 +59,15 @@ class FakePi {
 			setStatus: (_key: string, value: string | undefined) => {
 				this.statuses.push(value);
 			},
-			notify: () => undefined,
+			notify: (message: string, level = "info") => {
+				this.notices.push({ message, level });
+			},
+		},
+		sessionManager: {
+			getSessionId: () => this.sessionId,
+			getHeader: () => ({ parentSession: this.parentSession }),
+			getBranch: () => [...this.entries],
+			getEntries: () => [...this.entries],
 		},
 	} as unknown as ExtensionContext;
 
@@ -80,16 +99,28 @@ class FakePi {
 		this.messages.push({ message, options });
 	}
 
-	async emit(event: string, fields: Record<string, unknown> = {}): Promise<void> {
+	appendEntry(customType: string, data?: unknown): void {
+		this.entries.push({ type: "custom", customType, data });
+	}
+
+	async emit(event: string, fields: Record<string, unknown> = {}): Promise<unknown[]> {
+		const results: unknown[] = [];
 		for (const handler of this.handlers.get(event) ?? []) {
-			await handler({ type: event, ...fields }, this.ctx);
+			results.push(await handler({ type: event, ...fields }, this.ctx));
 		}
+		return results;
 	}
 
 	async execute(name: string, params: Record<string, unknown> = {}): Promise<any> {
 		const tool = this.tools.get(name);
 		if (!tool) throw new Error(`missing tool ${name}`);
-		return tool.execute("call-1", params);
+		return tool.execute("call-1", params, undefined, undefined, this.ctx);
+	}
+
+	orchestrationEntries(): Array<{ active: boolean; sessionId: string; source: string }> {
+		return this.entries
+			.filter((entry) => entry.customType === "pi-herdr-orchestration")
+			.map((entry) => entry.data as { active: boolean; sessionId: string; source: string });
 	}
 }
 
@@ -121,7 +152,14 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 
 async function createHarness(
 	wakeBudget: number,
-	options: { promoted?: boolean; notificationDelayMs?: number } = {},
+	options: {
+		promoted?: boolean;
+		notificationDelayMs?: number;
+		entries?: FakeEntry[];
+		sessionId?: string;
+		parentSession?: string;
+		reason?: string;
+	} = {},
 ): Promise<Harness> {
 	const dir = mkdtempSync(join(tmpdir(), "pi-herdr-extension-"));
 	const telemetryPath = join(dir, "telemetry.jsonl");
@@ -150,10 +188,36 @@ async function createHarness(
 	delete process.env.FAKE_HERDR_NOTIFICATION_EXIT_CODE;
 
 	const pi = new FakePi();
+	if (options.entries) pi.entries = [...options.entries];
+	if (options.sessionId) pi.sessionId = options.sessionId;
+	pi.parentSession = options.parentSession;
 	herdrExtension(pi as unknown as ExtensionAPI);
-	await pi.emit("session_start");
+	await pi.emit("session_start", { reason: options.reason ?? "startup" });
 	harness = { pi, dir, telemetryPath, notificationPath };
 	return harness;
+}
+
+async function injectedPrompt(current: Harness): Promise<string | undefined> {
+	const results = (await current.pi.emit("before_agent_start", {
+		prompt: "go",
+		systemPrompt: "BASE PROMPT",
+		systemPromptOptions: { cwd: process.cwd() },
+	})) as Array<{ systemPrompt?: string } | undefined>;
+	return results.find((result) => result?.systemPrompt !== undefined)?.systemPrompt;
+}
+
+const ORCHESTRATOR_TOOLS = [
+	"herdr_watch",
+	"herdr_unwatch",
+	"herdr_watches",
+	"herdr_route",
+];
+
+function activeOrchestratorTools(current: Harness): string[] {
+	return current.pi
+		.getActiveTools()
+		.filter((name) => ORCHESTRATOR_TOOLS.includes(name))
+		.sort();
 }
 
 async function arm(
@@ -423,5 +487,161 @@ describe.sequential("herdr extension attendance epochs", () => {
 		assert.equal(exhausted.wakeBudget, 1);
 		assert.equal(exhausted.triggerTurn, false);
 		assert.equal(exhausted.countsAsWake, false);
+	});
+});
+
+describe.sequential("herdr orchestration activation lifecycle", () => {
+	it("stays inactive when installed without env or a persisted decision", async () => {
+		const current = await createHarness(0, { promoted: false });
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.deepEqual(current.pi.orchestrationEntries(), []);
+		assert.equal(await injectedPrompt(current), undefined);
+		assert.ok(current.pi.tools.has("herdr_route"), "herdr_route is registered but inactive");
+	});
+
+	it("/orchestrate activates once, persists a session-owned entry, and injects the bundled skill", async () => {
+		const current = await createHarness(0, { promoted: false });
+		const command = current.pi.commands.get("orchestrate");
+		assert.ok(command);
+
+		await command.handler("", current.pi.ctx);
+		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
+		assert.deepEqual(current.pi.orchestrationEntries(), [
+			{ active: true, sessionId: "session-a", source: "command", at: current.pi.orchestrationEntries()[0]!.at },
+		] as any);
+		assert.match(current.pi.notices.at(-1)!.message, /no workers started/u);
+		assert.match(current.pi.notices.at(-1)!.message, /Routing setup required: Cannot read .*herdr-routing\.json/u, "missing routing policy reported at activation");
+		assert.equal(current.pi.notices.at(-1)!.level, "warning");
+
+		const prompt = await injectedPrompt(current);
+		assert.ok(prompt?.startsWith("BASE PROMPT\n\n# Herdr orchestration"));
+		assert.match(prompt!, /Own the outcome, not every pane/u, "skill body injected");
+		assert.doesNotMatch(prompt!, /^---\nname:/mu, "frontmatter stripped");
+		assert.match(prompt!, /Routing (ready|setup required)/u, "routing status included");
+		assert.match(prompt!, /Armed watches never survive/u);
+
+		await command.handler("  ", current.pi.ctx);
+		assert.equal(current.pi.orchestrationEntries().length, 1, "idempotent: no duplicate entry");
+		assert.match(current.pi.notices.at(-1)!.message, /already active/u);
+	});
+
+	it("herdr_orchestrate uses the same path and returns the workflow immediately", async () => {
+		const current = await createHarness(0, { promoted: false });
+		const result = await current.pi.execute("herdr_orchestrate");
+		assert.equal(result.details.changed, true);
+		assert.match(result.content[0].text, /^orchestration activated for this session/u);
+		assert.match(result.content[0].text, /Own the outcome, not every pane/u);
+		assert.match(result.content[0].text, /No workers were started/u);
+		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
+		assert.equal(current.pi.orchestrationEntries()[0]?.source, "tool");
+
+		const again = await current.pi.execute("herdr_orchestrate");
+		assert.equal(again.details.changed, false);
+		assert.match(again.content[0].text, /already active/u);
+		assert.equal(current.pi.orchestrationEntries().length, 1);
+	});
+
+	it("rejects unknown /orchestrate arguments without changing state", async () => {
+		const current = await createHarness(0, { promoted: false });
+		const command = current.pi.commands.get("orchestrate")!;
+		await command.handler("build the CRM", current.pi.ctx);
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.deepEqual(current.pi.orchestrationEntries(), []);
+		assert.equal(current.pi.notices.at(-1)!.level, "error");
+		assert.match(current.pi.notices.at(-1)!.message, /unknown \/orchestrate argument "build the CRM"/u);
+		assert.equal(await injectedPrompt(current), undefined);
+	});
+
+	it("/orchestrate off stops armed watches, persists off, and discloses that workers keep running", async () => {
+		const current = await createHarness(0, { promoted: false });
+		const command = current.pi.commands.get("orchestrate")!;
+		await command.handler("", current.pi.ctx);
+		process.env.FAKE_HERDR_BEHAVIOR = "stall";
+		await current.pi.execute("herdr_watch", { target: "worker-x", mode: "agent" });
+		assert.equal((await watchDetails(current)).count, 1);
+
+		await command.handler("off", current.pi.ctx);
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.deepEqual(current.pi.orchestrationEntries().map((entry) => entry.active), [true, false]);
+		const notice = current.pi.notices.at(-1)!.message;
+		assert.match(notice, /^orchestration off: stopped 1 armed watch \(their child processes were terminated\)/u);
+		assert.match(notice, /workers were NOT stopped and conversation history is unchanged/u);
+		assert.equal(await injectedPrompt(current), undefined);
+		await assert.rejects(current.pi.execute("herdr_route", { action: "select", difficulty: "easy" }), /Activate orchestration explicitly/u);
+
+		await command.handler("off", current.pi.ctx);
+		assert.equal(current.pi.orchestrationEntries().length, 2, "repeated off appends nothing");
+		assert.match(current.pi.notices.at(-1)!.message, /already off: no armed watches/u);
+	});
+
+	it("PI_HERDR_ORCHESTRATOR=1 activates and persists at session start, but a persisted off wins", async () => {
+		const current = await createHarness(0);
+		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
+		assert.deepEqual(current.pi.orchestrationEntries().map((entry) => entry.source), ["env"]);
+		await current.pi.emit("session_start", { reason: "reload" });
+		assert.equal(current.pi.orchestrationEntries().length, 1, "restore does not re-append");
+
+		await current.pi.commands.get("orchestrate")!.handler("off", current.pi.ctx);
+		await current.pi.emit("session_start", { reason: "reload" });
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.equal(current.pi.orchestrationEntries().length, 2);
+	});
+
+	it("reads the decision conversation-wide so /tree navigation cannot silently flip it", async () => {
+		const current = await createHarness(0, { promoted: false });
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
+		// Simulate /tree moving the leaf to an earlier point: the entry is no
+		// longer on the active branch but remains in the session file.
+		(current.pi.ctx as any).sessionManager.getBranch = () => [];
+		await current.pi.emit("session_start", { reason: "reload" });
+		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
+	});
+
+	it("restores activation on reload/resume of the same session with a truthful watch warning", async () => {
+		const current = await createHarness(0, {
+			promoted: false,
+			reason: "resume",
+			sessionId: "session-a",
+			entries: [
+				{ type: "custom", customType: "pi-herdr-orchestration", data: { active: true, sessionId: "session-a", source: "command", at: "t" } },
+			],
+		});
+		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
+		assert.equal(current.pi.orchestrationEntries().length, 1, "restore appends no entry");
+		const warning = current.pi.notices.find((notice) => notice.level === "warning");
+		assert.match(warning!.message, /restored for this session \(resume\): armed watches were NOT restored/u);
+		const prompt = await injectedPrompt(current);
+		assert.match(prompt!, /Orchestration was restored for this session \(resume\)/u);
+
+		const notices = current.pi.notices.length;
+		await current.pi.emit("session_start", { reason: "resume" });
+		assert.equal(current.pi.notices.length, notices, "duplicate session_start does not re-notify");
+	});
+
+	it("CLI fork of an inactive parent suppresses env activation even without copied role entries", async () => {
+		const current = await createHarness(0, { promoted: true, reason: "startup", parentSession: "/saved/inactive-parent.jsonl" });
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.equal(current.pi.orchestrationEntries().length, 0);
+		assert.match(current.pi.notices.at(-1)!.message, /ignored for forks/);
+	});
+
+	it("a fork/clone carrying the parent's activation starts inactive and says so, even with env set", async () => {
+		const current = await createHarness(0, {
+			promoted: true,
+			reason: "startup",
+			sessionId: "session-child",
+			entries: [
+				{ type: "custom", customType: "pi-herdr-orchestration", data: { active: true, sessionId: "session-parent", source: "command", at: "t" } },
+			],
+		});
+		assert.deepEqual(activeOrchestratorTools(current), []);
+		assert.equal(await injectedPrompt(current), undefined);
+		assert.match(current.pi.notices.at(-1)!.message, /forked\/cloned session: orchestration is inactive here \(PI_HERDR_ORCHESTRATOR=1 is ignored for forks\)/u);
+		assert.equal(current.pi.orchestrationEntries().length, 1, "no entry appended for the child");
+
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
+		assert.deepEqual(current.pi.orchestrationEntries().at(-1), {
+			active: true, sessionId: "session-child", source: "command", at: current.pi.orchestrationEntries().at(-1)!.at,
+		} as any);
 	});
 });

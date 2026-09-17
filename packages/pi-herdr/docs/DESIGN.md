@@ -7,6 +7,23 @@ current Herdr CLI reference. The v1 implementation exists and its automated
 suite passes 94 tests on macOS; retained live evidence covers selected paths,
 not the entire surface. See **Status and evidence** below.
 
+## Conversational workflow and routing (2026-09-17)
+
+`/orchestrate` now activates the existing watch tools **and** one canonical bundled workflow, not a separate fleet runtime. The natural-language `herdr_orchestrate` tool uses the same path and returns immediate guidance for mid-turn activation. Active runs receive scoped system-prompt guidance; workers do not auto-load the role. Activation alone launches nothing.
+
+Activation is small session-stamped metadata, not process-global state. Installed Pi 0.85.1 recreates extension factories on reload and session replacement. Custom entries survive reload/resume and are copied on forks; matching the stored session ID prevents a fork from inheriting activation. Persisted demotion wins over explicit environment defaults. Watch state still does not survive replacement: recovery notices distinguish restored role from restored supervision.
+
+Routing has three small boundaries:
+- `routing.ts`: strict, fresh external JSON policy loading and pure filtering/ranking/fallback selection.
+- `routing-tool.ts`: the model-facing `herdr_route` select/record tool; Pi registry/auth observations; caller-observed external harness evidence; native argument arrays; session-stamped actual-assignment reports.
+- Bundled skill: ownership, useful delegation, nonblocking watches, report reading, authorized integration, graceful worker exit, and recovery reconciliation.
+
+Policy remains in the user-editable `herdr-routing.json`, separate from watches. No model or allocation defaults are hardcoded into workflow prose. Selection previews do not count as dispatches. Assignment history is advisory evidence for soft family balancing, not proof of worker ownership, delivery, or quota. External native checks remain the orchestrator's responsibility; this is not a security sandbox or automatic launcher.
+
+No generic task database, recursive supervisor, automatic Git mutation, new watch transport, or Firstmate infrastructure is introduced. Temporary reports plus concise stable handoffs cover bounded recovery; a richer ledger remains conditional on a demonstrated trial failure, not a prerequisite.
+
+The original v1 decisions and historical test counts below are retained as history; the conversation-scoped activation above supersedes process-wide promotion.
+
 ## The idea
 
 [herdr](https://github.com/season179/herdr) is an agent multiplexer:
@@ -99,9 +116,10 @@ The Herdr-managed Pi integration is the separate outbound half and reported
    - `PI_HERDR_ORCHESTRATOR=1` auto-promotes at launch (scripted
      starts); `/orchestrate` promotes by hand, `/orchestrate off`
      demotes and stops all armed watches.
-   Promotion persists across Pi session changes in the same process until
-   `/orchestrate off`; demotion stops armed watches and removes the watch
-   tools. Process exit also clears it. Accepted residual risk: a worker whose
+   Originally promotion was described as process-wide. This is superseded by
+   the conversation-scoped activation above (reload/resume restore role,
+   new/fork do not inherit it); demotion stops watches but not workers.
+   Accepted residual risk: a worker whose
    prompt suggests orchestration could self-promote — "being asked" is
    precisely what defines the orchestrator here.
 6. **Event card is compact; evidence stays in Herdr.** Cards contain a

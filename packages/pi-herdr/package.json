@@ -1,7 +1,7 @@
 {
   "name": "@season179/pi-herdr",
   "version": "26.8.0",
-  "description": "Non-blocking pi watches over herdr agents, pane output, and bounded commands.",
+  "description": "Conversational Herdr orchestration with editable worker routing and non-blocking watches.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",
@@ -22,11 +22,16 @@
     "dist",
     "index.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "skills",
+    "docs"
   ],
   "pi": {
     "extensions": [
       "./index.js"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
