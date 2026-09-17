@@ -289,7 +289,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		const skill = loadOrchestrationSkill();
 		const body =
 			"body" in skill
-				? skill.body
+				? `${skill.body}\n\nSkill directory: ${skill.directory}\nResolve relative reference links from this directory. Read a reference only when its stated condition applies.`
 				: `Orchestration workflow guidance is unavailable (${skill.error}). Follow the user's explicit instructions and the herdr_watch tool guidance only.`;
 		const lines = [
 			"# Herdr orchestration (active for this session)",

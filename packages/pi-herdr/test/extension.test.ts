@@ -516,6 +516,9 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		const prompt = await injectedPrompt(current);
 		assert.ok(prompt?.startsWith("BASE PROMPT\n\n# Herdr orchestration"));
 		assert.match(prompt!, /Own the outcome, not every pane/u, "skill body injected");
+		assert.ok(prompt!.includes(`Skill directory: ${fileURLToPath(new URL("../skills/orchestration/", import.meta.url))}`));
+		assert.match(prompt!, /references\/routing\.md/);
+		assert.doesNotMatch(prompt!, /^# Routing decisions|^# Recovery and handoff/m, "reference bodies stay on demand");
 		assert.doesNotMatch(prompt!, /^---\nname:/mu, "frontmatter stripped");
 		assert.match(prompt!, /Routing (ready|setup required)/u, "routing status included");
 		assert.match(prompt!, /Armed watches never survive/u);
@@ -531,6 +534,8 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		assert.equal(result.details.changed, true);
 		assert.match(result.content[0].text, /^orchestration activated for this session/u);
 		assert.match(result.content[0].text, /Own the outcome, not every pane/u);
+		assert.ok(result.content[0].text.includes(`Skill directory: ${fileURLToPath(new URL("../skills/orchestration/", import.meta.url))}`));
+		assert.doesNotMatch(result.content[0].text, /^# Routing decisions|^# Recovery and handoff/m);
 		assert.match(result.content[0].text, /No workers were started/u);
 		assert.deepEqual(activeOrchestratorTools(current), [...ORCHESTRATOR_TOOLS].sort());
 		assert.equal(current.pi.orchestrationEntries()[0]?.source, "tool");

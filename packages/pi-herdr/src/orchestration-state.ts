@@ -117,13 +117,15 @@ export function stripFrontmatter(markdown: string): string {
 
 export function loadOrchestrationSkill(
 	url: URL = ORCHESTRATION_SKILL_URL,
-): { body: string } | { error: string } {
+): { body: string; directory: string } | { error: string } {
 	try {
 		const body = stripFrontmatter(readFileSync(fileURLToPath(url), "utf8"));
 		if (body.length === 0) {
 			return { error: `bundled orchestration skill is empty: ${fileURLToPath(url)}` };
 		}
-		return { body };
+		// Injected guidance has no skill-file context. Supply its base directory
+		// without eagerly loading reference files (progressive disclosure).
+		return { body, directory: fileURLToPath(new URL(".", url)) };
 	} catch (error) {
 		return {
 			error: `could not read bundled orchestration skill ${fileURLToPath(url)}: ${

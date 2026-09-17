@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it } from "vitest";
 import {
 	loadOrchestrationSkill,
@@ -48,7 +50,25 @@ describe("orchestration state helpers", () => {
 		const skill = loadOrchestrationSkill();
 		assert.ok("body" in skill, JSON.stringify(skill));
 		assert.ok(skill.body.startsWith("# Herdr orchestration"));
+		assert.equal(readFileSync(resolve(skill.directory, "SKILL.md"), "utf8").includes(skill.body), true);
 		const missing = loadOrchestrationSkill(new URL("file:///nonexistent/SKILL.md"));
 		assert.ok("error" in missing);
+	});
+
+	it("keeps conditional references linked, readable, and out of the loaded core", () => {
+		const skill = loadOrchestrationSkill();
+		assert.ok("body" in skill);
+		assert.match(skill.body, /Do not load all references by default/);
+		assert.match(skill.body, /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/);
+		assert.match(skill.body, /Missing\/invalid policy.*read \[Routing decisions\]/);
+		assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);
+		const links = [...skill.body.matchAll(/\]\((references\/[^)]+)\)/g)].map((m) => m[1]!);
+		assert.deepEqual(links, ["references/routing.md", "references/recovery.md"]);
+		for (const link of links) {
+			const reference = readFileSync(resolve(skill.directory, link), "utf8");
+			assert.ok(reference.startsWith("# "), `${link} readable from the supplied directory`);
+			assert.ok(!skill.body.includes(reference.split("\n")[0]!), "reference content is not eagerly injected");
+			assert.doesNotMatch(reference, /\]\([^)]*\.md\)/, "no nested reference chain");
+		}
 	});
 });
