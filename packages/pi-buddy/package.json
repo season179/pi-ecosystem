@@ -54,5 +54,8 @@
     "@earendil-works/pi-tui": {
       "optional": true
     }
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
   }
 }
