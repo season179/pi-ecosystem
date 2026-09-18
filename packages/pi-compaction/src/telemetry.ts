@@ -18,6 +18,8 @@ const MEASURES = [
   "turn", "candidates", "eligible", "kept", "dropped", "replaced", "excluded",
   "contextBeforeTokensEstimate", "contextAfterTokensEstimate", "contextTokensMeasured",
   "contextFractionMeasured", "latencyMs", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
+  // API-reported input total whose cache split is undocumented (TypeSafe); never treated as uncached.
+  "reportedInputTokens",
 ] as const;
 type Measure = (typeof MEASURES)[number];
 export type TelemetryMeasures = Partial<Record<Measure, number>>;
@@ -501,7 +503,7 @@ function buildReport(snapshot: Snapshot, days: number, retention: number, reject
   );
   for (const role of ["coding", "scoring", undefined] as const) {
     const subset = requests.filter(e => e.role === role);
-    lines.push(`Measured ${role ?? "unknown-role"} usage (completed requests n=${subset.length}): uncached input=${total(subset, "inputTokens")}; output=${total(subset, "outputTokens")}; cache read=${total(subset, "cacheReadTokens")}; cache write=${total(subset, "cacheWriteTokens")}; cost=${cost(subset)}.`);
+    lines.push(`Measured ${role ?? "unknown-role"} usage (completed requests n=${subset.length}): uncached input=${total(subset, "inputTokens")}; reported input (cache split unknown)=${total(subset, "reportedInputTokens")}; output=${total(subset, "outputTokens")}; cache read=${total(subset, "cacheReadTokens")}; cache write=${total(subset, "cacheWriteTokens")}; cost=${cost(subset)}.`);
   }
   lines.push(
     `Prune → next completed summary: eligible passes=${pruned.length}, observed=${observed}, right-censored=${censored}; time ${distribution(waitMinutes, "min")}; turns ${distribution(waitTurns)}.`,

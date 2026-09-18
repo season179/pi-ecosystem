@@ -4,6 +4,8 @@ import type { Action, Decision, DecisionMap, ExclusionReason } from "../engine/t
 export const PASS_ENTRY = "pi-compaction.pass.v1";
 export const PIN_ENTRY = "pi-compaction.pin.v1";
 export const MODE_ENTRY = "pi-compaction.mode.v1";
+/** Telemetry observation scope: rotated when the user continues from an interior tree node. */
+export const SCOPE_ENTRY = "pi-compaction.scope.v1";
 
 export interface PassStats {
 	candidates: number;
@@ -25,6 +27,8 @@ export interface PassRecord {
 	/** Fingerprint of the eligible candidate set plus decision-relevant config. */
 	fingerprint: string;
 	configFingerprint: string;
+	/** Coding model (provider/id) whose usage the pass reacted to; a different model is fresh pressure. */
+	modelKey?: string;
 	createdAt: number;
 	threshold: number;
 	/** Estimated tokens the pass removes from the observed context. */
@@ -45,6 +49,11 @@ export interface ModeRecord {
 	createdAt: number;
 }
 
+export interface ScopeRecord {
+	scopeId: string;
+	createdAt: number;
+}
+
 export interface SessionState {
 	/** Branch-level enablement override; undefined means use the config default. */
 	enabled: boolean | undefined;
@@ -52,10 +61,18 @@ export interface SessionState {
 	/** Applied decisions by tool-call id, pins excluded. */
 	decisions: Map<string, Decision>;
 	pins: Map<string, PinRecord>;
+	/**
+	 * Tool-call ids a pass has judged since the last compaction or branch summary. Keeps
+	 * are not re-asked within one summary interval; after Pi summarizes, the retained
+	 * suffix becomes scoreable again because the evidence the keep rested on is gone.
+	 */
+	considered: Set<string>;
+	/** Newest telemetry scope on the branch, if any; undefined means the session-level scope. */
+	scopeId: string | undefined;
 }
 
 export function emptyState(): SessionState {
-	return { enabled: undefined, passes: [], decisions: new Map(), pins: new Map() };
+	return { enabled: undefined, passes: [], decisions: new Map(), pins: new Map(), considered: new Set(), scopeId: undefined };
 }
 
 const ACTIONS: ReadonlySet<Action> = new Set<Action>(["keep", "drop_result", "drop_pair"]);
@@ -110,6 +127,7 @@ export function parsePass(raw: unknown): PassRecord | undefined {
 		observationId: isId(record.observationId) ? record.observationId : undefined,
 		fingerprint: record.fingerprint,
 		configFingerprint: record.configFingerprint,
+		modelKey: typeof record.modelKey === "string" ? record.modelKey.slice(0, 256) : undefined,
 		createdAt: record.createdAt,
 		threshold: record.threshold,
 		estimatedSavings: record.estimatedSavings,
@@ -143,6 +161,13 @@ export function parseMode(raw: unknown): ModeRecord | undefined {
 	return { enabled: record.enabled, createdAt: isFiniteNumber(record.createdAt) ? record.createdAt : 0 };
 }
 
+export function parseScope(raw: unknown): ScopeRecord | undefined {
+	if (raw === null || typeof raw !== "object") return undefined;
+	const record = raw as Record<string, unknown>;
+	if (!isId(record.scopeId)) return undefined;
+	return { scopeId: record.scopeId, createdAt: isFiniteNumber(record.createdAt) ? record.createdAt : 0 };
+}
+
 /**
  * Rebuild branch-local state from the entries on the current branch (root first).
  * Decisions are monotone: a later pass never resurrects an earlier drop; only pins do.
@@ -151,12 +176,18 @@ export function parseMode(raw: unknown): ModeRecord | undefined {
 export function restoreState(branch: readonly SessionEntry[]): SessionState {
 	const state = emptyState();
 	for (const entry of branch) {
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
+			// Compaction boundary: applied drops and pins persist, keep verdicts expire.
+			state.considered.clear();
+			continue;
+		}
 		if (entry.type !== "custom") continue;
 		if (entry.customType === PASS_ENTRY) {
 			const pass = parsePass(entry.data);
 			if (!pass) continue;
 			state.passes.push(pass);
 			for (const decision of pass.decisions) {
+				state.considered.add(decision.toolCallId);
 				if (decision.effective === "keep") continue;
 				if (!state.decisions.has(decision.toolCallId)) state.decisions.set(decision.toolCallId, decision);
 			}
@@ -166,9 +197,23 @@ export function restoreState(branch: readonly SessionEntry[]): SessionState {
 		} else if (entry.customType === MODE_ENTRY) {
 			const mode = parseMode(entry.data);
 			if (mode) state.enabled = mode.enabled;
+		} else if (entry.customType === SCOPE_ENTRY) {
+			const scope = parseScope(entry.data);
+			if (scope) state.scopeId = scope.scopeId;
 		}
 	}
 	return state;
+}
+
+/** State as it stood right after `entryId` was appended (the observation a pass reacted to). */
+export function restoreStateAt(branch: readonly SessionEntry[], entryId: string): SessionState {
+	const index = branch.findIndex((entry) => entry.id === entryId);
+	return restoreState(index < 0 ? branch : branch.slice(0, index + 1));
+}
+
+/** Ids not worth asking about: judged since the last summary, or already pruned. */
+export function decidedIds(state: SessionState): ReadonlySet<string> {
+	return new Set([...state.considered, ...state.decisions.keys()]);
 }
 
 /** Decisions that apply right now: effective non-keep decisions without a pin. */

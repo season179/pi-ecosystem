@@ -11,6 +11,12 @@ export interface TransformResult {
 	dropped: string[];
 	/** Requested pair drops that were applied as result replacements instead. */
 	downgraded: Array<{ toolCallId: string; reason: ExclusionReason }>;
+	/**
+	 * Decisions left unapplied because the live list is ambiguous for their id: the id
+	 * appears in more than one call or result, or the result is missing. Every message
+	 * involved is passed through untouched.
+	 */
+	unmatched: Array<{ toolCallId: string; reason: Extract<ExclusionReason, "ambiguous" | "incomplete"> }>;
 }
 
 type ToolResult = Extract<AgentMessage, { role: "toolResult" }>;
@@ -42,9 +48,38 @@ function hasText(message: Assistant): boolean {
 	return message.content.some((block) => block.type === "text" && block.text.trim().length > 0);
 }
 
-function effectiveAction(decisions: DecisionMap, toolCallId: string, pinned: ReadonlySet<string>): Action {
-	if (pinned.has(toolCallId)) return "keep";
+function effectiveAction(decisions: DecisionMap, toolCallId: string, pinned: ReadonlySet<string>, blocked: ReadonlySet<string>): Action {
+	if (pinned.has(toolCallId) || blocked.has(toolCallId)) return "keep";
 	return decisions.get(toolCallId)?.effective ?? "keep";
+}
+
+/**
+ * Re-check pairing on the live list at replay time. A decision was committed against one
+ * snapshot; later edits, other context handlers or a repeated id can make it ambiguous, and
+ * an ambiguous id must protect every message that carries it.
+ */
+function unmatchedDecisions(messages: readonly AgentMessage[], decisions: DecisionMap): TransformResult["unmatched"] {
+	const callSeen = new Map<string, number>();
+	const resultSeen = new Map<string, number>();
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall" && decisions.has(block.id)) callSeen.set(block.id, (callSeen.get(block.id) ?? 0) + 1);
+			}
+		} else if (message.role === "toolResult" && decisions.has(message.toolCallId)) {
+			resultSeen.set(message.toolCallId, (resultSeen.get(message.toolCallId) ?? 0) + 1);
+		}
+	}
+	const unmatched: TransformResult["unmatched"] = [];
+	for (const [toolCallId, decision] of decisions) {
+		if (decision.effective === "keep") continue;
+		const calls = callSeen.get(toolCallId) ?? 0;
+		const results = resultSeen.get(toolCallId) ?? 0;
+		if (calls === 0 && results === 0) continue; // not in this context at all; nothing to protect
+		if (calls > 1 || results > 1) unmatched.push({ toolCallId, reason: "ambiguous" });
+		else if (calls !== 1 || results !== 1) unmatched.push({ toolCallId, reason: "incomplete" });
+	}
+	return unmatched;
 }
 
 /**
@@ -65,10 +100,12 @@ export function applyDecisions(
 	const replaced: string[] = [];
 	const dropped: string[] = [];
 	const downgraded: TransformResult["downgraded"] = [];
+	const unmatched = unmatchedDecisions(messages, decisions);
+	const blocked = new Set(unmatched.map((item) => item.toolCallId));
 	// Which result messages exist, so we never remove a call whose result is missing.
 	const resultIndexByCall = new Map<string, number>();
 	messages.forEach((message, index) => {
-		if (message.role === "toolResult") resultIndexByCall.set(message.toolCallId, index);
+		if (message.role === "toolResult" && !blocked.has(message.toolCallId)) resultIndexByCall.set(message.toolCallId, index);
 	});
 
 	const removeMessage = new Set<number>();
@@ -81,9 +118,9 @@ export function applyDecisions(
 		const calls = message.content.filter((block): block is Extract<typeof block, { type: "toolCall" }> => block.type === "toolCall");
 		if (calls.length === 0) continue;
 		const pairDrops = calls.filter(
-			(call) => effectiveAction(decisions, call.id, pinned) === "drop_pair" && resultIndexByCall.has(call.id),
+			(call) => effectiveAction(decisions, call.id, pinned, blocked) === "drop_pair" && resultIndexByCall.has(call.id),
 		);
-		const resultDrops = calls.filter((call) => effectiveAction(decisions, call.id, pinned) === "drop_result");
+		const resultDrops = calls.filter((call) => effectiveAction(decisions, call.id, pinned, blocked) === "drop_result");
 		for (const call of resultDrops) replaceCall.add(call.id);
 		if (pairDrops.length === 0) continue;
 
@@ -145,7 +182,7 @@ export function applyDecisions(
 		}
 		output.push(message);
 	}
-	return { messages: output, replaced, dropped, downgraded };
+	return { messages: output, replaced, dropped, downgraded, unmatched };
 }
 
 function previousKept(messages: readonly AgentMessage[], from: number, removed: ReadonlySet<number>): AgentMessage | undefined {
@@ -167,6 +204,7 @@ export function reconcileDecisions(messages: readonly AgentMessage[], requested:
 	}
 	const result = applyDecisions(messages, map, pinned);
 	const downgradedIds = new Map(result.downgraded.map((item) => [item.toolCallId, item.reason] as const));
+	const unmatchedIds = new Map(result.unmatched.map((item) => [item.toolCallId, item.reason] as const));
 	const appliedIds = new Set([...result.replaced, ...result.dropped]);
 	const reconciled: Decision[] = [];
 	for (const decision of requested) {
@@ -180,7 +218,7 @@ export function reconcileDecisions(messages: readonly AgentMessage[], requested:
 			continue;
 		}
 		if (!appliedIds.has(decision.toolCallId)) {
-			reconciled.push({ ...decision, effective: "keep", downgradeReason: "unsupported" });
+			reconciled.push({ ...decision, effective: "keep", downgradeReason: unmatchedIds.get(decision.toolCallId) ?? "unsupported" });
 			continue;
 		}
 		reconciled.push({ ...decision, effective: decision.requested });

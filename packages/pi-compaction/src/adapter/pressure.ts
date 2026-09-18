@@ -10,6 +10,8 @@ export function currentObservationId(branch: readonly SessionEntry[]): string | 
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index];
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		// Same rule as Pi's getAssistantUsage: aborted, errored and all-zero usage carry no observation.
+		if (entry.message.stopReason === "aborted" || entry.message.stopReason === "error") continue;
 		const usage = entry.message.usage;
 		if (!usage) continue;
 		const total = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
@@ -19,6 +21,12 @@ export function currentObservationId(branch: readonly SessionEntry[]): string | 
 }
 
 /** Fingerprint of what a scoring pass would ask about; unchanged input means no fresh evidence. */
-export function passFingerprint(candidateIds: readonly string[], configFingerprint: string): string {
-	return fingerprint({ candidates: [...candidateIds].sort(), config: configFingerprint });
+export function passFingerprint(candidateIds: readonly string[], configFingerprint: string, modelKey: string): string {
+	return fingerprint({ candidates: [...candidateIds].sort(), config: configFingerprint, model: modelKey });
+}
+
+/** Whether a branch position can still grow into a new sibling: it already has children. */
+export function hasChildren(entries: readonly SessionEntry[], entryId: string | null): boolean {
+	if (entryId === null) return false;
+	return entries.some((entry) => entry.parentId === entryId);
 }

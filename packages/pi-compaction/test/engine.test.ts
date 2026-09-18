@@ -7,11 +7,12 @@ import { PLACEHOLDER_MARKER, applyDecisions, reconcileDecisions } from "../src/e
 import type { Candidate, Decision } from "../src/engine/types.js";
 import { collectCandidates } from "../src/engine/candidates.js";
 import { parseConfig } from "../src/adapter/config.js";
-import { MODE_ENTRY, PASS_ENTRY, PIN_ENTRY, activeDecisions, restoreState } from "../src/adapter/state.js";
+import { MODE_ENTRY, PASS_ENTRY, PIN_ENTRY, SCOPE_ENTRY, activeDecisions, decidedIds, restoreState, restoreStateAt } from "../src/adapter/state.js";
 import { indexArchive, listArchive, readArchive, searchArchive } from "../src/adapter/recall.js";
-import { currentObservationId } from "../src/adapter/pressure.js";
+import { currentObservationId, hasChildren, passFingerprint } from "../src/adapter/pressure.js";
 import { assistant, singleTaskTranscript, toolResult, user, withIds } from "./helpers/messages.js";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { apiRates } from "../src/extensions/compaction.js";
 
 function decision(toolCallId: string, requested: Decision["requested"], extra: Partial<Decision> = {}): Decision {
 	return { toolCallId, resultEntryId: `r-${toolCallId}`, toolName: "read", resultChars: 500, requested, effective: requested, ...extra };
@@ -99,6 +100,39 @@ describe("applyDecisions", () => {
 		expect(result.replaced).toEqual([]);
 		expect(result.dropped).toEqual([]);
 		expect(result.messages).toEqual(messages);
+	});
+
+	it("leaves every message intact when a committed id has become ambiguous or unmatched in the live list", () => {
+		const committed = new Map([["a", decision("a", "drop_pair")], ["b", decision("b", "drop_result")], ["c", decision("c", "drop_pair")]]);
+		// "a": the same id now appears in two calls; "b": two results share the id; "c": result missing.
+		const messages = [
+			user("go"),
+			assistant({ calls: [{ id: "a", name: "read" }] }),
+			toolResult("a", "read", "x".repeat(500)),
+			assistant({ calls: [{ id: "a", name: "read" }, { id: "b", name: "read" }, { id: "c", name: "read" }] }),
+			toolResult("a", "read", "y".repeat(500)),
+			toolResult("b", "read", "z".repeat(500)),
+			toolResult("b", "read", "w".repeat(500)),
+			assistant({ text: "ok" }),
+		];
+		const result = applyDecisions(messages, committed);
+		expect(result.messages).toEqual(messages);
+		expect(result.replaced).toEqual([]);
+		expect(result.dropped).toEqual([]);
+		expect(result.unmatched).toEqual(expect.arrayContaining([
+			{ toolCallId: "a", reason: "ambiguous" },
+			{ toolCallId: "b", reason: "ambiguous" },
+			{ toolCallId: "c", reason: "incomplete" },
+		]));
+		// An unambiguous sibling in the same message is still applied.
+		const withOk = [...messages.slice(0, 3), assistant({ calls: [{ id: "a", name: "read" }, { id: "d", name: "read" }] }), toolResult("a", "read", "y".repeat(500)), toolResult("d", "read", "q".repeat(500)), assistant({ text: "ok" })];
+		const partial = applyDecisions(withOk, new Map([["a", decision("a", "drop_pair")], ["d", decision("d", "drop_result")]]));
+		expect(partial.dropped).toEqual([]);
+		expect(partial.replaced).toEqual(["d"]);
+		expect(partial.messages.filter((message) => message.role === "toolResult" && message.toolCallId === "a")).toHaveLength(2);
+		// Reconcile reports the protection so a pass never persists a drop it could not apply.
+		const reconciled = reconcileDecisions(messages, [decision("a", "drop_pair")], new Set());
+		expect(reconciled[0]).toMatchObject({ effective: "keep", downgradeReason: "ambiguous" });
 	});
 
 	it("reconcileDecisions records the effective action for persistence", () => {
@@ -212,6 +246,30 @@ describe("state", () => {
 		expect(state.decisions.get("b")?.effective).toBe("drop_pair");
 		expect([...activeDecisions(state).keys()]).toEqual(["a"]);
 		expect(state.enabled).toBe(false);
+		expect(state.scopeId).toBeUndefined();
+	});
+
+	it("expires keep verdicts at a compaction boundary while applied drops, pins and scope survive", () => {
+		const pass = (passId: string, decisions: unknown[]) => ({ passId, observationId: "obs", fingerprint: "f", configFingerprint: "c", modelKey: "fake/m", createdAt: 1, threshold: 0.35, estimatedSavings: 10, stats: {}, decisions });
+		const before = [
+			entry("s", SCOPE_ENTRY, { scopeId: "scope-1", createdAt: 1 }),
+			entry("1", PASS_ENTRY, pass("p1", [decision("kept", "keep"), decision("gone", "drop_pair"), decision("pinned", "drop_result")])),
+			entry("2", PIN_ENTRY, { toolCallId: "pinned", resultEntryId: "r-pinned", reason: "recall", createdAt: 2 }),
+		];
+		const open = restoreState(before);
+		expect([...decidedIds(open)].sort()).toEqual(["gone", "kept", "pinned"]);
+		expect(open.passes[0].modelKey).toBe("fake/m");
+		const after = restoreState([...before, { type: "compaction", id: "c", parentId: "2", timestamp: "", summary: "s", firstKeptEntryId: "1", tokensBefore: 1 } as SessionEntry]);
+		// The keep is scoreable again; the drop stays applied and excluded; the pin still overrides it.
+		expect([...decidedIds(after)].sort()).toEqual(["gone", "pinned"]);
+		expect(after.decisions.get("gone")?.effective).toBe("drop_pair");
+		expect([...activeDecisions(after).keys()]).toEqual(["gone"]);
+		expect(after.pins.has("pinned")).toBe(true);
+		expect(after.scopeId).toBe("scope-1");
+		expect(after.passes).toHaveLength(1);
+		// State as of an earlier entry ignores everything appended after it.
+		expect(restoreStateAt([...before], "s").passes).toHaveLength(0);
+		expect(restoreStateAt([...before], "1").pins.size).toBe(0);
 	});
 });
 
@@ -224,6 +282,28 @@ describe("pressure", () => {
 		];
 		expect(currentObservationId(branch)).toBe("a1");
 		expect(currentObservationId([branch[0]])).toBeUndefined();
+		expect(hasChildren(branch, "u")).toBe(true);
+		expect(hasChildren(branch, "a2")).toBe(false);
+		expect(hasChildren(branch, null)).toBe(false);
+	});
+
+	it("changes the pass fingerprint when the coding model changes", () => {
+		expect(passFingerprint(["a", "b"], "cfg", "anthropic/x")).toBe(passFingerprint(["b", "a"], "cfg", "anthropic/x"));
+		expect(passFingerprint(["a", "b"], "cfg", "anthropic/x")).not.toBe(passFingerprint(["a", "b"], "cfg", "openai/y"));
+	});
+});
+
+describe("prices", () => {
+	it("emits catalog API rates per million only when a price exists, honouring request-wide tiers", () => {
+		expect(apiRates(undefined, 100)).toBeUndefined();
+		expect(apiRates({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, 100)).toBeUndefined();
+		expect(apiRates({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, 100)).toEqual({
+			source: "provider_api_rates", inputPerMillionUsd: 3, outputPerMillionUsd: 15, cacheReadPerMillionUsd: 0.3, cacheWritePerMillionUsd: 3.75,
+		});
+		const tiered = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 200_000, input: 2, output: 4, cacheRead: 0, cacheWrite: 0 }] };
+		expect(apiRates(tiered, 1_000)?.inputPerMillionUsd).toBe(1);
+		expect(apiRates(tiered, 250_000)?.inputPerMillionUsd).toBe(2);
+		expect(apiRates({ input: -1, output: 2, cacheRead: 0, cacheWrite: 0 }, 100)).toBeUndefined();
 	});
 });
 

@@ -7,8 +7,11 @@ export interface PolicyOptions {
 	pairDroppableTools: ReadonlySet<string>;
 }
 
-/** Built-in read-only tools whose calls carry no side effects worth remembering. */
-export const DEFAULT_PAIR_DROPPABLE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "glob", "bash_readonly"]);
+/**
+ * Pi's built-in read-only tools whose calls carry no side effects worth remembering.
+ * Custom read-only tools may be added through `pairDroppableTools`; nothing else is assumed.
+ */
+export const DEFAULT_PAIR_DROPPABLE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 export function requestedAction(scores: CandidateScores, threshold: number): Action {
 	if (scores.keepResult >= threshold) return "keep";

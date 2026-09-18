@@ -126,10 +126,21 @@ describe("metadata-only local telemetry", () => {
     assert.match(report, /context fraction: median=0.65, p95=0.65 \(n=1\)/);
     assert.match(report, /minus post-prune estimate: median=50, p95=50 \(n=1\)/);
     assert.match(report, /Scoring requests=5 \(completed=5\); request latency median=30ms, p95=100ms \(n=5\)/);
-    assert.match(report, /Measured scoring usage .*uncached input=500 \(n=5\); output=100 \(n=5\); cache read=0 \(n=5\)/);
+    assert.match(report, /Measured scoring usage .*uncached input=500 \(n=5\); reported input \(cache split unknown\)=unavailable \(n=0\); output=100 \(n=5\); cache read=0 \(n=5\)/);
     assert.match(report, /cost=\$0.002000 \(priced n=5\/5; API estimate, not invoice\)/);
     assert.match(report, /Measured coding usage .*cost=unavailable \(priced n=0\/2\)/);
     assert.equal((await exported(store, root)).data.events.length, 8);
+  });
+
+  it("keeps API-reported input totals separate from uncached input and never prices them", async () => {
+    const { store, root } = await fixture();
+    await store.record(event({ kind: "request", role: "scoring", outcome: "completed",
+      measures: { latencyMs: 40, reportedInputTokens: 900, outputTokens: 12 },
+      prices: { source: "provider_api_rates", inputPerMillionUsd: 2, outputPerMillionUsd: 10 } }));
+    const report = await store.report();
+    assert.match(report, /Measured scoring usage .*uncached input=unavailable \(n=0\); reported input \(cache split unknown\)=900 \(n=1\); output=12 \(n=1\)/);
+    assert.match(report, /Measured scoring usage .*cost=unavailable \(priced n=0\/1\)/);
+    assert.equal((await exported(store, root)).data.events[0].measures.reportedInputTokens, 900);
   });
 
   it("retains and reports measured context overflow while rejecting nonfinite or excessive fractions", async () => {

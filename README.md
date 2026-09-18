@@ -12,6 +12,7 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-worktree`](./packages/pi-worktree) — Published. Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) — Pre-release proof of concept for calmer assistant-message scanning.
+- [`@season179/pi-compaction`](./packages/pi-compaction) — Unpublished. Reversible, provider-valid pruning of stale tool results scored by TypeSafe's Jev, deferring Pi's summary when pruning is enough.
 
 Retired: `packages/pi-moa` (superseded by pi-buddy — see its
 [docs/DESIGN.md](./packages/pi-moa/docs/DESIGN.md)) and

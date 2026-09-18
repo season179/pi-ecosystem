@@ -47,8 +47,8 @@ export const BIG_RESULT_CHARS = 8_000;
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 export type FakeResponse =
-	| { kind: "text"; text: string; inputTokens?: number; thinking?: string }
-	| { kind: "tools"; calls: ToolCall[]; inputTokens?: number; thinking?: string };
+	| { kind: "text"; text: string; inputTokens?: number; thinking?: string; usage?: "none" }
+	| { kind: "tools"; calls: ToolCall[]; inputTokens?: number; thinking?: string; usage?: "none" };
 
 export interface Capture {
 	messages: Context["messages"];
@@ -98,11 +98,15 @@ export interface Harness {
 	readonly runtime: AgentSessionRuntime;
 	captures: Capture[];
 	events: string[];
+	/** Long command output the extension emits when no UI is present. */
+	outputs: string[];
 	prompt(text: string, ...responses: FakeResponse[]): Promise<void>;
 	enqueue(...responses: FakeResponse[]): void;
 	entries(): SessionEntry[];
 	resume(sessionPath: string): Promise<void>;
 	fork(entryId: string): Promise<void>;
+	/** `/tree` navigation: move the leaf to an existing entry. */
+	navigate(entryId: string): Promise<void>;
 	dispose(): Promise<void>;
 }
 
@@ -111,7 +115,8 @@ function model(): Model<Api> {
 }
 
 function assistantMessage(response: FakeResponse, sequence: number): AssistantMessage {
-	const input = response.inputTokens ?? 500;
+	const input = response.usage === "none" ? 0 : response.inputTokens ?? 500;
+	const output = response.usage === "none" ? 0 : 20;
 	const content: AssistantMessage["content"] = [];
 	if (response.thinking) content.push({ type: "thinking", thinking: response.thinking, thinkingSignature: `sig-${sequence}` });
 	if (response.kind === "text") content.push({ type: "text", text: response.text });
@@ -122,7 +127,7 @@ function assistantMessage(response: FakeResponse, sequence: number): AssistantMe
 		api: API,
 		provider: PROVIDER_ID,
 		model: MODEL_ID,
-		usage: { input, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: input + 20, cost: { ...ZERO_COST, total: 0 } },
+		usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost: { ...ZERO_COST, total: 0 } },
 		stopReason: response.kind === "tools" ? "toolUse" : "stop",
 		timestamp: 1_800_000_000_000 + sequence,
 	};
@@ -198,9 +203,10 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 	if (options.config) await writeFile(join(options.agentDir, "pi-compaction.json"), JSON.stringify(options.config));
 	const captures: Capture[] = [];
 	const events: string[] = [];
+	const outputs: string[] = [];
 	const responses: FakeResponse[] = [];
 	const telemetry = new TrackedTelemetry(join(options.agentDir, "pi-compaction", "telemetry"));
-	const compaction = createCompactionExtension({ scorer: options.scorer, agentDir: options.agentDir, env: {}, telemetry });
+	const compaction = createCompactionExtension({ scorer: options.scorer, agentDir: options.agentDir, env: {}, telemetry, output: (text) => outputs.push(text) });
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) =>
 		withAgentDir(agentDir, async () => {
 			const settingsManager = SettingsManager.inMemory(
@@ -247,6 +253,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		telemetry,
 		captures,
 		events,
+		outputs,
 		enqueue: (...queued) => {
 			responses.push(...queued);
 		},
@@ -258,6 +265,10 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		entries: () => runtime.session.sessionManager.getEntries(),
 		resume: (path) => withAgentDir(options.agentDir, () => runtime.switchSession(path)),
 		fork: (entryId) => withAgentDir(options.agentDir, () => runtime.fork(entryId, { position: "at" })),
+		navigate: async (entryId) => {
+			await withAgentDir(options.agentDir, () => runtime.session.navigateTree(entryId));
+			await telemetry.flush();
+		},
 		dispose: () => withAgentDir(options.agentDir, () => runtime.dispose()),
 	};
 }
