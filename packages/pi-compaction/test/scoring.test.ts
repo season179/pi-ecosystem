@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectCandidates } from "../src/engine/candidates.js";
 import { buildSkeleton } from "../src/engine/skeleton.js";
-import { ScoringError, TypeSafeScorer, validateAnswers, type Scorer } from "../src/scoring/client.js";
+import { MAX_SCORING_REQUEST_BYTES, ScoringError, TypeSafeScorer, validateAnswers, type Answers, type ScoreOptions, type Scorer } from "../src/scoring/client.js";
 import { runScoring } from "../src/scoring/pass.js";
 import { callQuestionKey, planBatches, questionsFor, resultQuestionKey } from "../src/scoring/questions.js";
 import { singleTaskTranscript, withIds } from "./helpers/messages.js";
+
+afterEach(() => vi.useRealTimers());
 
 function fixture(groups = 12) {
 	const entries = withIds(singleTaskTranscript(groups));
@@ -56,6 +58,8 @@ describe("runScoring", () => {
 		expect(result.scores.size).toBe(candidates.length);
 		expect(result.requests).toBe(Math.ceil(candidates.length / 4));
 		expect(result.failure).toBeUndefined();
+		expect(result.requestMetrics).toHaveLength(result.requests);
+		expect(result.requestMetrics.every((metric) => metric.outcome === "completed" && metric.latencyMs >= 0 && metric.usage === undefined)).toBe(true);
 		expect(result.scores.get(candidates[0].toolCallId)).toEqual({ keepCall: 0.9, keepResult: 0.1 });
 	});
 
@@ -65,6 +69,9 @@ describe("runScoring", () => {
 		const result = await runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 4, concurrency: 1, timeoutMs: 1_000, deadlineMs: 5_000 });
 		expect(result.failure).toBe("rate_limit");
 		expect(result.failedRequests).toBe(1);
+		expect(result.requestMetrics.map(({ outcome, failure }) => ({ outcome, failure }))).toEqual([
+			{ outcome: "completed", failure: undefined }, { outcome: "failed", failure: "rate_limit" },
+		]);
 		expect(result.scores.size).toBe(4);
 	});
 
@@ -73,7 +80,131 @@ describe("runScoring", () => {
 		const scorer = fakeScorer(() => 0.5, { delayMs: 500 });
 		const result = await runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 2, concurrency: 1, timeoutMs: 1_000, deadlineMs: 50 });
 		expect(result.scores.size).toBe(0);
-		expect(["timeout", "cancelled"]).toContain(result.failure);
+		expect(result.failure).toBe("timeout");
+	});
+
+	it("measures individual concurrent request durations, not pass duration divided by count", async () => {
+		vi.useFakeTimers();
+		const { candidates, skeleton } = fixture();
+		let calls = 0;
+		const scorer: Scorer = { configured: true, async score(_state, questions) {
+			await new Promise((resolve) => setTimeout(resolve, ++calls === 1 ? 100 : 300));
+			return Object.fromEntries(Object.keys(questions).map((key) => [key, 0.5]));
+		} };
+		const pending = runScoring({ skeleton, candidates: candidates.slice(0, 2), scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 1, concurrency: 2, timeoutMs: 1000, deadlineMs: 5000 });
+		await vi.advanceTimersByTimeAsync(300);
+		const result = await pending;
+		expect(result.latencyMs).toBe(300);
+		expect(result.requestMetrics.map((metric) => metric.latencyMs)).toEqual([100, 300]);
+		expect(result.scores.size).toBe(2);
+	});
+
+	it.each(["deadline", "timeout", "cancelled"] as const)("returns at %s even when a scorer ignores abort, rejecting all late changes", async (kind) => {
+		vi.useFakeTimers();
+		const { candidates, skeleton } = fixture();
+		const controller = new AbortController();
+		const pendingCalls: Array<{ options: ScoreOptions; questions: Record<string, unknown>; resolve: (answers: Answers) => void }> = [];
+		const scorer: Scorer = { configured: true, score(_state, questions, options) {
+			return new Promise((resolve) => pendingCalls.push({ options, questions, resolve }));
+		} };
+		const pending = runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 1, concurrency: 2, timeoutMs: kind === "timeout" ? 50 : 1000, deadlineMs: kind === "deadline" ? 50 : 5000, signal: controller.signal });
+		await vi.advanceTimersByTimeAsync(50);
+		if (kind === "cancelled") controller.abort();
+		const result = await pending;
+		const reason = kind === "cancelled" ? "cancelled" : "timeout";
+		expect(result).toMatchObject({ requests: 2, failedRequests: 2, latencyMs: 50, failure: reason });
+		expect(result.scores.size).toBe(0);
+		expect(result.requestMetrics).toEqual(Array.from({ length: 2 }, () => ({ outcome: "failed", failure: reason, latencyMs: 50 })));
+		for (const call of pendingCalls) {
+			expect(call.options.signal?.aborted).toBe(true);
+			call.options.onRequestStart?.();
+			call.options.onRequestMetric?.({ latencyMs: 999, outcome: "completed", usage: { inputTokens: 1, outputTokens: 1 } });
+			call.resolve(Object.fromEntries(Object.keys(call.questions).map((key) => [key, 0])));
+		}
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(result.scores.size).toBe(0);
+		expect(result.requestMetrics).toHaveLength(2);
+		expect(result.requestMetrics.every((metric) => metric.outcome === "failed" && metric.usage === undefined)).toBe(true);
+		expect(pendingCalls).toHaveLength(2);
+	});
+
+	it("handles late rejection without an unhandled promise", async () => {
+		vi.useFakeTimers();
+		const { candidates, skeleton } = fixture();
+		let reject!: (error: Error) => void;
+		const scorer: Scorer = { configured: true, score: () => new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }) };
+		const pending = runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 2, concurrency: 1, timeoutMs: 1000, deadlineMs: 50 });
+		await vi.advanceTimersByTimeAsync(50);
+		const result = await pending;
+		reject(new Error("late private failure"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(result.failure).toBe("timeout");
+		expect(result.requestMetrics).toHaveLength(1);
+	});
+
+	it.each(["cancelled", "expired"])("does not start scoring when already %s", async (kind) => {
+		const { candidates, skeleton } = fixture();
+		const controller = new AbortController();
+		if (kind === "cancelled") controller.abort();
+		const scorer = fakeScorer(() => 0);
+		const result = await runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 4, concurrency: 2, timeoutMs: 1000, deadlineMs: kind === "expired" ? 0 : 1000, signal: controller.signal });
+		expect(scorer.calls).toBe(0);
+		expect(result).toMatchObject({ requests: 0, failedRequests: 0, requestMetrics: [], failure: kind === "expired" ? "timeout" : "cancelled" });
+	});
+
+	it("keeps budget-failed candidates unscored without sending their body", async () => {
+		const { candidates, skeleton } = fixture();
+		skeleton.state.context = "x".repeat(MAX_SCORING_REQUEST_BYTES);
+		const fetch = vi.fn(async () => new Response("{}"));
+		const scorer = new TypeSafeScorer({ apiKey: "k", fetch });
+		const result = await runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 4, concurrency: 1, timeoutMs: 1000, deadlineMs: 5000 });
+		expect(result.failure).toBe("budget");
+		expect(result.scores.size).toBe(0);
+		expect(result.requestMetrics[0]).toMatchObject({ outcome: "failed", failure: "budget" });
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it("rejects invalid custom scorer answers atomically for the batch", async () => {
+		const { candidates, skeleton } = fixture();
+		const scorer = fakeScorer((key) => key === resultQuestionKey(candidates[1]) ? NaN : 0);
+		const result = await runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 4, concurrency: 1, timeoutMs: 1000, deadlineMs: 5000 });
+		expect(result.failure).toBe("invalid_response");
+		expect(result.scores.size).toBe(0);
+	});
+
+	it("preserves measured SDK retries and usage in pass metrics", async () => {
+		vi.useFakeTimers();
+		const { candidates, skeleton } = fixture();
+		let calls = 0;
+		const scorer = new TypeSafeScorer({ apiKey: "k", maxRetries: 1, fetch: async (_url, init) => {
+			await new Promise((resolve) => setTimeout(resolve, ++calls === 1 ? 10 : 30));
+			if (calls === 1) return new Response("{}", { status: 429, headers: { "retry-after-ms": "1" } });
+			const keys = Object.keys(JSON.parse(String(init?.body)).questions);
+			return new Response(JSON.stringify({ answers: Object.fromEntries(keys.map((key) => [key, { type: "noul", noul: 0.2 }])), usage: { input_tokens: 50, output_tokens: 4 } }));
+		} });
+		const pending = runScoring({ skeleton, candidates: candidates.slice(0, 1), scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 1, concurrency: 1, timeoutMs: 1000, deadlineMs: 5000 });
+		await vi.advanceTimersByTimeAsync(100);
+		const result = await pending;
+		expect(result).toMatchObject({ requests: 2, failedRequests: 1, latencyMs: 41 });
+		expect(result.failure).toBeUndefined();
+		expect(result.scores.size).toBe(1);
+		expect(result.requestMetrics).toEqual([
+			{ latencyMs: 10, outcome: "failed", failure: "rate_limit" },
+			{ latencyMs: 30, outcome: "completed", usage: { inputTokens: 50, outputTokens: 4 } },
+		]);
+	});
+
+	it("does not invent an HTTP request when the deadline interrupts retry backoff", async () => {
+		vi.useFakeTimers();
+		const { candidates, skeleton } = fixture();
+		const fetch = vi.fn(async () => new Response("{}", { status: 429, headers: { "retry-after-ms": "1000" } }));
+		const scorer = new TypeSafeScorer({ apiKey: "k", maxRetries: 1, fetch });
+		const pending = runScoring({ skeleton, candidates, scorer, maxRequestTokens: 28_000, maxCandidatesPerBatch: 4, concurrency: 1, timeoutMs: 1000, deadlineMs: 50 });
+		await vi.advanceTimersByTimeAsync(50);
+		const result = await pending;
+		expect(result).toMatchObject({ requests: 1, failedRequests: 1, failure: "timeout" });
+		expect(result.requestMetrics).toEqual([{ latencyMs: 0, outcome: "failed", failure: "rate_limit" }]);
+		expect(fetch).toHaveBeenCalledTimes(1);
 	});
 });
 
