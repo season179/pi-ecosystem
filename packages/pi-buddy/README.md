@@ -28,7 +28,7 @@ The buddy gets involved four ways:
 | `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance |
 | `/buddy <question>` | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt |
 | Watchdog (automatic) | After 3 turns without a consult, the buddy investigates in the background while the agent keeps working |
-| Run-end (automatic) | Interactive runs of ≥ 2 turns that neither consulted nor triggered the watchdog get a quiet background review at completion; print/JSON mode skips it because the process exits immediately |
+| Run-end (automatic) | Interactive runs of ≥ 2 turns without an actual consultation get a quiet background review at completion; Jev skips do not count as consultations. Print/JSON mode skips it because the process exits immediately |
 
 Stances for `consult_buddy`:
 
@@ -76,6 +76,31 @@ Optional. Lives in `~/.pi/agent/buddy.json`. Models, retries, and output caps ar
 - **Models** — a priority failover chain (ascending). Buddy retries the current model on transient failures, then falls back to the next. `perModelRetries: 0` means immediate failover. A configured `models` chain takes precedence over `--buddy-model`; when no usable chain exists, `pi --buddy-model provider/id` applies for that Pi process before the built-in default.
 - **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Automatic reviews must finish with the structured verdict tool; an incomplete prose answer is an error and is never published. Buddy never requests extended thinking, so the cap bounds the answer directly.
 - **Starting cadence** — `watchdog.initialCadence` accepts only 2, 3, 6, 12, or 24; absent means 3, invalid values warn and fall back to 3. This seeds the existing advisory level on startup/new/resume/fork/reload, without fabricating feedback. Starting at 6, `more` goes to 3 then 2; `less` goes to 12 then 24. Run-end and requested reviews are unchanged. Default remains 3; changing cadence is a separate opt-in experiment.
+
+### Optional active Jev triage
+
+Opt in with `<agentDir>/typesafe.json` (`~/.pi/agent` by default; respects `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "model": "jev-1.13.0",
+  "timeoutMs": 3000,
+  "apiKeyFile": "typesafe.key",
+  "buddy": { "enabled": true, "skipThreshold": 0.85, "auditEvery": 5 }
+}
+```
+
+Provide `TYPESAFE_API_KEY` through your secure environment, or a private key file named by `apiKeyFile` (relative to agentDir or absolute; restrict permissions to `0600`). Environment takes precedence. Never paste a key into prompts or logs. Config and credentials are re-read at each decision; absent config or `buddy.enabled: false` leaves normal Buddy behavior. This file can also contain the separate `memory` settings used by pi-memory.
+
+This is **active, not shadow**: before a periodic investigation, Jev can skip the reviewer call for clearly routine, low-risk work. Every fifth periodic opportunity bypasses Jev for a full audit. A skip consumes one cadence opportunity but is not a Buddy consultation: eligible run-end reviews and explicit tool/user consultations still run normally. The gate pauses that turn boundary for up to the configured operation budget (default 3 seconds); the full investigation remains detached.
+
+At candidate revalidation, Jev can also suppress clearly irrelevant or explicitly already-handled concerns **for the current request**. Repetition alone is insufficient; unclear context or ongoing material risk gets normal Buddy revalidation. Suppression requires the coordinator's unchanged, active-run snapshot and is not proof fixed or a `resolved` Buddy verdict. Surviving candidates retain full revalidation before publication.
+
+Jev receives only the current request and up to eight recent activity messages (16 KB serialized state limit), plus bounded candidate/evidence/history when applicable—not the full transcript or hidden thinking. Verbose requests, read/bash output, tool arguments and candidate/history text use UTF-8-safe head/tail excerpts with visible middle-omission markers and original/omitted byte counts. The request gets priority; older activity and omitted evidence items are explicitly disclosed. Excerpts are not full evidence: independent context/risk questions judge whether the visible evidence suffices, rather than automatically rejecting ordinary verbosity. Genuinely missing intent, unrepresentable nontext content or failed state construction goes to normal Buddy. Three independent choice questions must agree above the probability threshold; `confidence` alone never authorizes a skip. This is probabilistic routing, not a guarantee of correctness.
+
+Missing credentials, malformed config/answers, provider errors or deadlines use normal Buddy, with a bounded warning and `Jev: fallback` footer status. Cancellation, new activity, session/tree changes and Buddy off prevent stale gate results from launching or suppressing work. `/buddy status` shows the last gate state; `not checked` is not an activation claim. Telemetry uses distinct `jev_triage` rows, never synthetic passes. SDK logging is explicitly off, the endpoint is pinned to `https://api.typesafe.ai`, retries are disabled, and response bytes plus the complete parsed-result wait are bounded.
+
+`timeoutMs` accepts integer 1–10000, `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
 
 ## Enable / Disable
 
@@ -128,5 +153,7 @@ and preserve the boundaries recorded in the
 - OS: developed on macOS and tested in Linux CI. Core Buddy code uses cross-platform Node path, filesystem, and process APIs and has no shell dependency, so Windows is expected to work, including backslash/drive-letter project paths, but it is not tested in CI. `read_webpage` additionally depends on `agent-browser` being installable and available on that platform.
 
 ## Security
+
+Opting into Jev sends the bounded current request/recent activity and candidate context described above to TypeSafe AI, in addition to Buddy's configured model providers. Jev telemetry contains routing metadata only, not request/response bodies or credentials.
 
 Pi extensions execute with your user permissions. The buddy's tools are read-only by construction: no write or edit tool, no shell or bash tool (only fixed `read`/`grep`/`find`/`ls` repository tools), and read-only browser verbs. It sends your persisted session transcript, current working-directory path, durable Buddy memory, and repository excerpts to whichever model providers you configure. `lookup_docs` additionally sends Buddy's questions—which may quote transcript or repository content—to the third-party DeepWiki service at `mcp.deepwiki.com`; `read_webpage` fetches Buddy-chosen URLs through a local isolated `agent-browser` session. Fetched web content is treated as untrusted data, never as instructions. Review the source before installing.

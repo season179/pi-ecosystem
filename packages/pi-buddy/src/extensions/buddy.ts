@@ -33,6 +33,7 @@ import type {
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { AutomaticReview } from "./automatic-review.js";
+import { LiveJevTriage } from "./jev-triage.js";
 import type { BuddyTool } from "./buddy-tool.js";
 import {
 	BUDDY_FEEDBACKS,
@@ -166,6 +167,7 @@ export default function setup(pi: ExtensionAPI): void {
 		reviewMessageType: BUDDY_REVIEW_TYPE,
 		backgroundStatusKey: BG_STATUS_KEY,
 		runEndReviewMinTurns: RUN_END_REVIEW_MIN_TURNS,
+		jev: new LiveJevTriage(),
 	});
 
 	pi.registerFlag("buddy-disabled", {
@@ -554,7 +556,7 @@ export default function setup(pi: ExtensionAPI): void {
 			const parsed = parseBuddyCommand(args);
 			if (parsed.kind === "control") {
 				if (parsed.action === "status") {
-					notify(ctx, `Buddy is ${session.enabled ? "on" : "off"}.`);
+					notify(ctx, `Buddy is ${session.enabled ? "on" : "off"}. ${automaticReview.triageStatus()}.`);
 					return;
 				}
 				setBuddyEnabled(parsed.action === "on", ctx);

@@ -460,7 +460,65 @@ describe("AutomaticReview", () => {
 	});
 });
 
+describe("Jev stable candidate routing", () => {
+	it("candidate triage cancellation consumes no held invocation budget or run consultation", async () => {
+		let release!: (value: any) => void;
+		const rows: any[] = [];
+		const h = harness(() => concernResult(), {
+			jev: { decide: async (input: any) => input.candidate
+				? new Promise((resolve) => { release = resolve; })
+				: { outcome: "review", totalMs: 0 } },
+			recordJev: async (record: any) => { rows.push(record); },
+		});
+		await runToStagedCandidate(h);
+		h.review.agentEnded(h.ctx); await h.review.agentSettled(h.ctx);
+		h.review.agentStarted(h.ctx);
+		const checking = h.review.turnEnded(h.ctx);
+		await vi.waitFor(() => assert.equal(typeof release, "function"));
+		h.review.noteActivity();
+		release({ outcome: "suppress", totalMs: 0 }); await checking;
+		assert.equal(h.review.heldCandidate()?.hold?.window?.invocations, 0);
+		assert.equal(revalidations(h).length, 0);
+		assert.equal(h.sent.length, 0);
+		assert.equal(rows.at(-1).outcome, "stale");
+		// Next turn is deferred by a running tool (no triage/reviewer). At settle,
+		// expiry frees the held slot and this unconsulted run is still eligible.
+		h.review.toolStarted("busy"); await h.review.turnEnded(h.ctx);
+		h.review.agentEnded(h.ctx); await h.review.agentSettled(h.ctx);
+		assert.equal(h.calls.at(-1).trigger, "run_end");
+	});
+
+	it("activity interleaving after a gate decision cannot launch the reviewer", async () => {
+		const h = harness(() => concernResult(), {
+			jev: { decide: async () => ({ outcome: "review", totalMs: 0 }) },
+			recordJev: async () => {},
+		});
+		h.ctx.ui.setStatus = (_key: string, text: string) => {
+			if (text === "Jev: review") h.review.noteActivity();
+		};
+		h.review.agentStarted(h.ctx);
+		await h.review.turnEnded(h.ctx); await h.review.turnEnded(h.ctx);
+		assert.equal(h.calls.length, 0);
+	});
+});
+
 describe("WatchdogCoordinator ownership", () => {
+	it("relevance suppression uses the same stable current/active snapshot guard and frees the slot", async () => {
+		const coordinator = new WatchdogCoordinator<string, { id?: string }>();
+		coordinator.stage(coordinator.capture([]), "candidate");
+		let release!: (value: any) => void;
+		const attempt = coordinator.commit([], () => new Promise((resolve) => { release = resolve; }));
+		coordinator.noteActivity(); release({ decision: "irrelevant" });
+		assert.deepEqual(await attempt, { status: "deferred", reason: "activity" });
+		assert.equal(coordinator.peekPending(), "candidate");
+		const idle = await coordinator.commit([], async () => ({ decision: "irrelevant" }), undefined, () => false);
+		assert.deepEqual(idle, { status: "deferred", reason: "activity" });
+		assert.equal(coordinator.peekPending(), "candidate");
+		const applied = await coordinator.commit([], async () => ({ decision: "irrelevant" }), undefined, () => true);
+		assert.equal(applied.status, "suppressed");
+		if (applied.status === "suppressed") assert.equal(applied.reason, "irrelevant");
+		assert.equal(coordinator.stage(coordinator.capture([]), "fresh"), true);
+	});
 	it("invalidation releases commit ownership; the old continuation cannot touch new state", async () => {
 		const coordinator = new WatchdogCoordinator<{ id: string }, { id?: string }>();
 		let releaseOld!: (value: any) => void;

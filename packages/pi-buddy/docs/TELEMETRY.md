@@ -14,7 +14,7 @@ All record kinds may carry these fields (optional for older callers/records):
 - `sessionId` — Pi's session ID, not a session path or working directory.
 - `runId` — one low-level `agent_start`, not one user task. Retries and follow-ups
   are separate runs; raw input and user bash are not runs.
-- `policyRevision` — currently `held-candidate-v1`; keep policy cohorts separate.
+- `policyRevision` — currently `jev-triage-v1`; keep policy cohorts separate (including prior `held-candidate-v1` rows).
 - `initialCadence` — starting cadence configured for this session (default 3).
 - `effectiveCadence` — cadence when the consultation/lifecycle context was captured;
   on run summaries it is the cadence at run start.
@@ -89,6 +89,42 @@ Run rows (`type: "buddy_run"`) require `runId`, `turns`, ISO `startedAt`/`endedA
 `turn_end` events. Normal `agent_end` produces one summary; teardown may close an
 unfinished run once as `incomplete`. `effectiveCadence` is the start value and
 `finalCadence` is the end value; neither supplies per-turn cadence exposure.
+
+## Jev routing rows
+
+`type: "jev_triage"` is separate from Buddy consultations and commit verdicts:
+
+- `phase`: `periodic` (pre-investigation) or `candidate` (pre-revalidation).
+- `outcome`: `skip`, `review`, `audit`, `suppress`, `fallback`, `cancelled`, or `stale`.
+- `reason` when applicable: `config`, `no_key`, `error`, `deadline`, `malformed`, or `incomplete`.
+- `model`: configured Jev model when configuration is valid; not the Buddy model.
+- `totalMs`: routing duration, including config/key reads and the parsed-result wait.
+- `opportunity`: session/tree-local periodic opportunity number, independent of candidate checks. Every `auditEvery` opportunities bypasses Jev. Off/on does not restart the audit counter.
+- `concernId`: candidate identity for candidate checks, when present.
+- Standard session/run/policy/cadence correlation captured before awaiting Jev.
+
+`skip` means the periodic reviewer was not invoked; it does not mark the run
+consulted, so otherwise-eligible run-end review remains available. `suppress`
+means the candidate's relevance decision was accepted by the unchanged active
+coordinator snapshot, releasing the slot without a full revalidation invocation.
+It neither increments the held candidate's actual-review invocation budget nor
+creates a Buddy `pass`, `resolved`, Concern Disposition, or `watchdog_commit` row.
+It does not prove the original defect fixed. Candidate suppression proposals
+invalidated before commit are `stale`, not `suppress`.
+
+`review` routes to normal Buddy (including `incomplete` bounded context).
+`audit` bypasses Jev; `fallback` preserves normal review when triage is unavailable.
+`cancelled`/`stale` do not authorize replacement review calls. Disabled/missing
+configuration does not emit Jev rows. SDK/request/response/provider-error bodies
+are never logged; warnings contain only bounded reason codes and are shown at
+most once per reason per session/tree reset. Footer and `/buddy status` show the
+last state. These rows are best-effort routing observations, not provider accuracy
+or a complete billing ledger; Jev token/cost totals are not currently recorded.
+
+Keep Jev outcomes separate from consultation pass/concern/resolved ratios. Compare
+actual reviewer invocations per periodic opportunity and report audits, fallback,
+cancellation and stable candidate suppression separately. Skipping a call is not
+proof it had no value; audits and real usage evaluation remain important.
 
 ## Token telemetry
 

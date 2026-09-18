@@ -31,7 +31,7 @@ import type { ConcernDisposition } from "./concern-history.js";
 export type { BuddyOutcome, BuddySource, BuddyTrigger } from "./buddy-context.js";
 export type BuddyFeedback = "more" | "same" | "less";
 
-export const BUDDY_POLICY_REVISION = "held-candidate-v1";
+export const BUDDY_POLICY_REVISION = "jev-triage-v1";
 
 /** Captured at invocation, never inferred from the current run at completion. */
 export interface BuddyTelemetryContext {
@@ -194,6 +194,24 @@ export interface BuddyWatchdogInsertedTelemetryRecord extends BuddyTelemetryCont
 	handedOffAt?: string;
 }
 
+/** Jev routing is not a Buddy consultation, pass, or proof of resolution. */
+export interface BuddyJevTelemetryRecord extends BuddyTelemetryContext {
+	v: 1;
+	ts: string;
+	type: "jev_triage";
+	phase: "periodic" | "candidate";
+	outcome: "disabled" | "review" | "skip" | "suppress" | "audit" | "fallback" | "cancelled" | "stale";
+	reason?: "config" | "no_key" | "error" | "deadline" | "malformed" | "incomplete";
+	model?: string;
+	totalMs: number;
+	opportunity?: number;
+	concernId?: string;
+}
+
+export async function recordJevTriage(record: Omit<BuddyJevTelemetryRecord, "v" | "ts" | "type">): Promise<void> {
+	await appendTelemetry({ type: "jev_triage", ...record });
+}
+
 export interface BuddyRunTelemetryRecord extends BuddyTelemetryContext {
 	v: 1;
 	ts: string;
@@ -264,7 +282,8 @@ async function appendTelemetry(
 		Omit<BuddyWatchdogCommitTelemetryRecord, "v" | "ts"> |
 		(Omit<BuddyWatchdogCandidateTelemetryBase, "v" | "ts"> & BuddyWatchdogCandidateEvent) |
 		Omit<BuddyWatchdogInsertedTelemetryRecord, "v" | "ts"> |
-		Omit<BuddyRunTelemetryRecord, "v" | "ts">,
+		Omit<BuddyRunTelemetryRecord, "v" | "ts"> |
+		Omit<BuddyJevTelemetryRecord, "v" | "ts">,
 ): Promise<void> {
 	try {
 		const path = telemetryPath();

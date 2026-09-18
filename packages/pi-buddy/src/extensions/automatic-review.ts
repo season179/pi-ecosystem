@@ -16,6 +16,7 @@ import {
 	rebuildConcernHistory,
 } from "./concern-history.js";
 import { formatBuddyAdvisory } from "./message-format.js";
+import type { JevDecision, JevInput, JevTriage } from "./jev-triage.js";
 import {
 	type BackgroundTrigger,
 	BuddyRunTracker,
@@ -34,6 +35,7 @@ import {
 	recordWatchdogCandidate,
 	recordWatchdogCommit,
 	recordWatchdogInserted,
+	recordJevTriage,
 } from "./telemetry.js";
 import {
 	WatchdogCoordinator,
@@ -122,6 +124,8 @@ export interface AutomaticReviewOptions {
 	recordCommit?: RecordWatchdogCommit;
 	recordCandidate?: RecordWatchdogCandidate;
 	recordInserted?: RecordWatchdogInserted;
+	jev?: JevTriage;
+	recordJev?: typeof recordJevTriage;
 }
 
 type InitialWatchdogVerdict = Extract<
@@ -168,6 +172,11 @@ export class AutomaticReview {
 	private readonly recordInserted: RecordWatchdogInserted;
 	private readonly holdWidgetKey: string;
 	private backgroundAbort?: AbortController;
+	private gate?: { controller: AbortController; ctx: ExtensionContext };
+	private periodicOpportunities = 0;
+	private jevStatus = "Jev: not checked";
+	private jevStatusCtx?: ExtensionContext;
+	private readonly jevWarnings = new Set<string>();
 	private runEndReviewPending = false;
 	/** Context that last set the hold widget; used to clear it best-effort. */
 	private holdWidgetCtx?: ExtensionContext;
@@ -219,6 +228,8 @@ export class AutomaticReview {
 		this.abort("session_reset", ctx);
 		this.runEndReviewPending = false;
 		this.verdictRing.length = 0;
+		this.periodicOpportunities = 0;
+		this.jevWarnings.clear();
 		rebuildConcernHistory(entries, this.concerns);
 	}
 
@@ -240,6 +251,8 @@ export class AutomaticReview {
 	 */
 	abort(reason: WatchdogResetReason = "session_reset", ctx?: ExtensionContext): void {
 		const pending = this.coordinator.peekPending();
+		this.cancelGate();
+		this.clearJevStatus(ctx);
 		this.tracker.invalidate();
 		this.coordinator.invalidate();
 		this.backgroundAbort?.abort();
@@ -250,6 +263,8 @@ export class AutomaticReview {
 	}
 
 	onConsultationRequested(): void {
+		this.cancelGate();
+		this.coordinator.noteActivity();
 		this.tracker.onPull();
 	}
 
@@ -262,14 +277,17 @@ export class AutomaticReview {
 	}
 
 	noteActivity(): void {
+		this.cancelGate();
 		this.coordinator.noteActivity();
 	}
 
 	toolStarted(toolCallId: string): void {
+		this.cancelGate();
 		this.coordinator.toolStarted(toolCallId);
 	}
 
 	toolEnded(toolCallId: string): void {
+		this.cancelGate();
 		this.coordinator.toolEnded(toolCallId);
 	}
 
@@ -306,6 +324,7 @@ export class AutomaticReview {
 
 	/** No model work here: only tag a held candidate's single delivery window. */
 	agentStarted(_ctx?: ExtensionContext): void {
+		this.cancelGate();
 		this.runEndReviewPending = false;
 		// Lifecycle transitions invalidate any revalidation snapshot in flight.
 		this.coordinator.noteActivity();
@@ -314,7 +333,7 @@ export class AutomaticReview {
 	}
 
 	async turnEnded(ctx: ExtensionContext): Promise<void> {
-		if (!this.options.isEnabled()) return;
+		if (!this.options.isEnabled() || this.gate) return;
 		const lifecycle = this.tracker.lifecycleToken();
 		await this.commitPending(ctx);
 		// A reset (off/on, tree, session) or a run boundary while an uncooperative
@@ -322,11 +341,21 @@ export class AutomaticReview {
 		// and must neither count a turn nor launch into the new one.
 		if (!this.tracker.isLifecycleCurrent(lifecycle)) return;
 		if (this.tracker.onTurnEnd() && !this.coordinator.hasPending) {
+			const opportunity = ++this.periodicOpportunities;
+			if (this.options.jev) {
+				const snapshot = this.coordinator.capture(ctx.sessionManager.getBranch());
+				const decision = await this.triage(ctx, { entries: snapshot.entries, opportunity });
+				if (["skip", "cancelled", "stale"].includes(decision.outcome)) return;
+				// An event may interleave between triage's return and this continuation.
+				if (!this.tracker.isLifecycleCurrent(lifecycle) || !this.snapshotCurrent(ctx, snapshot)) return;
+			}
+			if (!this.tracker.isLifecycleCurrent(lifecycle) || !this.tracker.isRunActive || ctx.signal?.aborted) return;
 			this.launch("turns", ctx);
 		}
 	}
 
 	agentEnded(_ctx?: ExtensionContext): void {
+		this.cancelGate();
 		// A run ending during a revalidation must invalidate its snapshot so the
 		// result can never steer an idle session.
 		this.coordinator.noteActivity();
@@ -353,6 +382,82 @@ export class AutomaticReview {
 		if (shouldReview && ctx.hasUI && !this.coordinator.hasPending) {
 			this.launch("run_end", ctx);
 		}
+	}
+
+	triageStatus(): string { return this.jevStatus; }
+
+	private snapshotCurrent(ctx: ExtensionContext, snapshot: WatchdogSnapshot): boolean {
+		const current = this.coordinator.capture(ctx.sessionManager.getBranch());
+		return snapshot.generation === current.generation && snapshot.revision === current.revision && snapshot.leafId === current.leafId;
+	}
+
+	private cancelGate(): void {
+		const gate = this.gate;
+		this.gate = undefined;
+		gate?.controller.abort();
+		if (gate) this.showJevStatus(gate.ctx, "Jev: cancelled");
+	}
+
+	private clearJevStatus(ctx?: ExtensionContext): void {
+		this.jevStatus = "Jev: not checked";
+		const target = this.jevStatusCtx ?? ctx;
+		this.jevStatusCtx = undefined;
+		try { if (target?.hasUI) target.ui.setStatus("buddy-jev", undefined); } catch { /* best effort */ }
+	}
+
+	private showJevStatus(ctx: ExtensionContext, text: string): void {
+		this.jevStatus = text;
+		this.jevStatusCtx = ctx;
+		try { if (ctx.hasUI) ctx.ui.setStatus("buddy-jev", text); } catch { /* best effort */ }
+	}
+
+	private reportJev(ctx: ExtensionContext, decision: JevDecision, phase: "periodic" | "candidate", context: BuddyTelemetryContext, extra: { opportunity?: number; concernId?: string } = {}, visible = true): void {
+		if (visible) {
+			this.showJevStatus(ctx, decision.outcome === "fallback"
+				? `Jev: fallback (${decision.reason}); normal Buddy`
+				: `Jev: ${decision.outcome}${decision.reason ? ` (${decision.reason})` : ""}`);
+			if (decision.outcome === "fallback" && !this.jevWarnings.has(decision.reason ?? "error")) {
+				this.jevWarnings.add(decision.reason ?? "error");
+				try { if (ctx.hasUI) ctx.ui.notify(`Buddy Jev triage unavailable (${decision.reason}); using normal Buddy review.`, "warning"); } catch { /* best effort */ }
+			}
+		}
+		if (decision.outcome !== "disabled") void this.bestEffort(() => (this.options.recordJev ?? recordJevTriage)({ ...context, ...decision, phase, ...extra }));
+	}
+
+	/** Separate ownership: Jev never calls tracker consultation bookkeeping. */
+	private async triage(ctx: ExtensionContext, input: Omit<JevInput, "signal">, concernId?: string): Promise<JevDecision> {
+		const gate = { controller: new AbortController(), ctx };
+		this.gate = gate;
+		const signal = ctx.signal;
+		const abort = () => gate.controller.abort();
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		const lifecycle = this.tracker.lifecycleToken();
+		const snapshot = this.coordinator.capture(input.entries);
+		const context = this.telemetryContext();
+		this.showJevStatus(ctx, "Jev: checking");
+		let decision: JevDecision;
+		try {
+			decision = await this.options.jev!.decide({ ...input, signal: gate.controller.signal });
+		} catch {
+			decision = { outcome: "fallback", reason: "error", totalMs: 0 };
+		} finally {
+			signal?.removeEventListener("abort", abort);
+		}
+		const owned = this.gate === gate;
+		const lifecycleCurrent = owned && this.tracker.isLifecycleCurrent(lifecycle);
+		// Never access a replaced session's context from a stale continuation.
+		const current = lifecycleCurrent ? this.coordinator.capture(ctx.sessionManager.getBranch()) : undefined;
+		if (!current || snapshot.generation !== current.generation || snapshot.revision !== current.revision || snapshot.leafId !== current.leafId || !this.options.isEnabled() || !this.tracker.isRunActive) {
+			decision = { ...decision, outcome: "stale", reason: undefined };
+		} else if (gate.controller.signal.aborted) {
+			decision = { ...decision, outcome: "cancelled", reason: undefined };
+		}
+		if (owned) this.gate = undefined;
+		// Candidate suppression is only a proposal here. The coordinator must
+		// accept it at the stable snapshot before it is reported as applied.
+		if (decision.outcome !== "suppress") this.reportJev(ctx, decision, input.candidate ? "candidate" : "periodic", context, { opportunity: input.opportunity, concernId }, owned);
+		return decision;
 	}
 
 	/** Frozen snapshot: a mutable injected object cannot rewrite origin later. */
@@ -491,6 +596,7 @@ export class AutomaticReview {
 		let attemptedCandidate: WatchdogCandidate | undefined;
 		let attemptedSnapshot: WatchdogSnapshot | undefined;
 		let attemptedRevalidationCount = 0;
+		let candidateTriage: JevDecision | undefined;
 		const correlation = (candidate: WatchdogCandidate) => ({
 			...deliveryContext,
 			originRunId: candidate.originRunId,
@@ -560,6 +666,16 @@ export class AutomaticReview {
 					attemptedCandidate = candidate;
 					attemptedSnapshot = snapshot;
 					attemptedRevalidationCount = revalidationCount;
+					if (this.options.jev) {
+						candidateTriage = await this.triage(ctx, {
+							entries: snapshot.entries, candidate,
+							concernDigest: this.concerns.buildDigest(),
+						}, candidate.id);
+						if (candidateTriage.outcome === "stale" || candidateTriage.outcome === "cancelled" ||
+							!this.tracker.isLifecycleCurrent(lifecycle) || !this.tracker.isRunActive ||
+							!this.options.isEnabled() || ctx.signal?.aborted || !this.snapshotCurrent(ctx, snapshot)) throw new JevCancelledError();
+						if (candidateTriage.outcome === "suppress") return { decision: "irrelevant" };
+					}
 					// An actual invocation: carried candidates consume window budget and
 					// count as this run's automatic consultation, even if this fails.
 					if (candidate.hold?.window) {
@@ -612,17 +728,24 @@ export class AutomaticReview {
 				publish,
 				// Final eligibility: the run must still be active in the same
 				// synchronous continuation as the revision check. Never steer idle.
-				() => this.tracker.isRunActive,
+				() => this.tracker.isRunActive && this.options.isEnabled() && !ctx.signal?.aborted,
 			);
 
 			// A reset or run boundary interleaved before this continuation resumed:
 			// the coordinator already rejected the result; do not touch the new
 			// lifecycle's widget, verdict ring or slot.
+			if (candidateTriage?.outcome === "suppress") {
+				const applied = result.status === "suppressed" && result.reason === "irrelevant";
+				this.reportJev(ctx, { ...candidateTriage, outcome: applied ? "suppress" : "stale" }, "candidate", deliveryContext, { concernId: attemptedCandidate?.id }, this.tracker.isLifecycleCurrent(lifecycle));
+			}
 			if (!this.tracker.isLifecycleCurrent(lifecycle)) return;
 			// All lifecycle/state updates happen synchronously here, before any
 			// telemetry await, so a reset during telemetry cannot be overwritten.
 			if (result.status === "suppressed") {
 				this.clearHoldWidget(ctx);
+				// Relevance suppression is NOT proof fixed/resolved and must not
+				// enter Buddy's verdict ring, concern history or commit telemetry.
+				if (result.reason === "irrelevant") return;
 				this.recordVerdict(attemptedTrigger ?? "turns", "resolved before delivery");
 				if (attemptedCandidate) {
 					await recordCommit({
@@ -669,7 +792,10 @@ export class AutomaticReview {
 				...correlation(candidate),
 			});
 		} catch (error) {
-			if (!this.tracker.isLifecycleCurrent(lifecycle)) return;
+			if (error instanceof JevCancelledError && candidateTriage?.outcome === "suppress") {
+				this.reportJev(ctx, { ...candidateTriage, outcome: "stale" }, "candidate", deliveryContext, { concernId: attemptedCandidate?.id }, this.tracker.isLifecycleCurrent(lifecycle));
+			}
+			if (!this.tracker.isLifecycleCurrent(lifecycle) || error instanceof JevCancelledError) return;
 			this.expireIfExhausted(attemptedCandidate, ctx);
 			if (attemptedCandidate && attemptedSnapshot) {
 				await recordCommit({
@@ -808,6 +934,8 @@ export class AutomaticReview {
 		})();
 	}
 }
+
+class JevCancelledError extends Error {}
 
 function buildRevalidationRequest(
 	candidate: WatchdogCandidate,
