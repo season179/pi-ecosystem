@@ -1,6 +1,6 @@
 # Routing decisions
 
-Read when policy includes an eligible external harness, or for missing/invalid policy, image/risky tasks, fallbacks, explicit overrides, or policy edits.
+Read for quota-aware delegation, eligible external harnesses, missing/invalid policy, image/risky tasks, fallbacks, explicit overrides, or policy edits.
 
 ## Policy and selection
 
@@ -12,9 +12,21 @@ Choose in this order:
 3. Task difficulty, likely successful completion time, cost and quota **when actually known**.
 4. Soft family shares among otherwise suitable choices.
 
-Shares only balance equal suitability ranks. Keep capable generalists equally ranked so a family is not starved; reserve stricter ranks for genuine task-fit differences. Use automatic selection unless the user specifies a route: `profileId` and `override` bypass share balancing.
+Shares only balance equal suitability ranks in baseline automatic selection. Keep capable generalists equally ranked so a family is not starved; reserve stricter ranks for genuine task-fit differences. `profileId` and `override` are explicit-user choices, not an agent budget shortcut.
 
-Static quota notes are not live balances; intelligence indices are not task-performance guarantees. Never create work, delay urgent work, or choose an unsuitable model to fill a percentage. If task fit contradicts configured ranks, report the mismatch rather than silently pinning a route or editing policy.
+### Budget-informed judgment
+
+When `quota.groups` is configured, use `herdr_route` action `inspect` with the actual task difficulty/capabilities/protection needs and native evidence. It returns candidate blockers and cached subscription windows. Then use `select` with `budgetChoice: { profileId, snapshotId, reason }` to depart from baseline ranks/shares. Budget choice still requires suitability for the difficulty, enabled/authenticated availability, capabilities, protections and non-exhausted quota. It cannot add a model or rewrite the policy. If the snapshot changes, inspect and reconsider. Use automatic selection when live evidence is unavailable; do not treat missing readings as abundant capacity.
+
+Reason across **all** groups, not hardcoded families: remaining allowance, reset time, recent observed burn, pending work and coordination reserve. Keep the current orchestrator on its model unless the user authorizes changing it. Reduce workers sharing its scarce subscription first. Favor a capable group's surplus near reset for real pending work. A smaller model-specific allowance can drain faster; apply only actual reported/mapped windows, never manufacture a half-sized quota or double a usage percentage. Percentages across subscriptions are not equivalent amounts of work.
+
+Pacing labels are advisory arithmetic, not predictions or instructions to exhaust a budget. `conserve` compares spendable allowance to remaining time and recent burn; `surplus` means a window is ahead of even pacing. Short-window limits can constrain an otherwise generous weekly balance. Missing model-specific limits must be disclosed. Native CLI and Pi may use different accounts: configured group bindings must be reverified after account changes.
+
+If premium groups are constrained together, warn the user and shift only suitable work to available economical routes. If the economical group is constrained, warn early and explain whether to wait, reduce parallelism or ask for another configured/authorized model. Do not purchase, install or activate a new provider without permission. Quota warnings do not authorize downgrading an unsuitable or permission-protected task.
+
+Provider checks are shared and limited to once per 30 minutes while orchestration is active. `inspect`, `select`, and `/limits` reuse the cache; do not poll CodexBar yourself or force more frequent checks. After a worker reports **confirmed subscription exhaustion**, use `herdr_route` action `exhausted` with its profile ID so all routes in that group are temporarily blocked immediately. A generic 429/throughput error is not enough. Unknown/stale/reset-past readings are neither exhausted nor unlimited.
+
+Static quota notes are not live balances; intelligence indices are not task-performance guarantees. Never create work, delay urgent work, or choose an unsuitable model to fill a percentage or use expiring allowance. Explain meaningful budget departures in the worker report. Report genuine task-fit mismatches rather than silently changing policy.
 
 ## Exceptional routes
 

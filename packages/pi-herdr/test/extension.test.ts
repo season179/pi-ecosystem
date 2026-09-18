@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
 	mkdtempSync,
+	existsSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -24,6 +25,9 @@ const ENV_KEYS = [
 	"PI_HERDR_ORCHESTRATOR",
 	"PI_CODING_AGENT_DIR",
 	"PI_HERDR_COMMAND",
+	"PI_HERDR_CODEXBAR",
+	"FAKE_CODEXBAR_LOG",
+	"FAKE_CODEXBAR_MODE",
 	"FAKE_HERDR_BEHAVIOR",
 	"FAKE_HERDR_DELAY_MS",
 	"FAKE_HERDR_NOTIFICATION_LOG",
@@ -648,5 +652,38 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		assert.deepEqual(current.pi.orchestrationEntries().at(-1), {
 			active: true, sessionId: "session-child", source: "command", at: current.pi.orchestrationEntries().at(-1)!.at,
 		} as any);
+	});
+
+	it("collects only for active orchestration, injects current quota, and warns without idle wakes", async () => {
+		const current = await createHarness(1, { promoted: false });
+		const { pi, dir } = current;
+		process.env.PI_HERDR_CODEXBAR = fileURLToPath(new URL("./fixtures/fake-codexbar.mjs", import.meta.url));
+		process.env.FAKE_CODEXBAR_LOG = join(dir, "quota-calls.jsonl");
+		delete process.env.FAKE_CODEXBAR_MODE;
+		const policy = JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8"));
+		policy.quota = { groups: [{ id: "astra", provider: "codex", source: "oauth", profiles: ["pi-astra", "codex-astra"], reservePercent: 10 }] };
+		writeFileSync(join(dir, "herdr-routing.json"), JSON.stringify(policy));
+		await pi.commands.get("limits")!.handler("", pi.ctx);
+		assert.equal(existsSync(process.env.FAKE_CODEXBAR_LOG!), false, "inactive sessions/workers do not poll");
+		await pi.commands.get("orchestrate")!.handler("", pi.ctx);
+		await pi.commands.get("limits")!.handler("", pi.ctx);
+		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1);
+		const warningCount = () => pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").length;
+		assert.equal(warningCount(), 1);
+		assert.ok(pi.messages.every(m => m.options.triggerTurn === false));
+		await pi.commands.get("limits")!.handler("", pi.ctx);
+		assert.equal(warningCount(), 1, "reusing cache does not repeat warnings");
+		const contexts = await pi.emit("context", { messages: [] }) as Array<any>;
+		assert.match(contexts.find(c => c?.messages)?.messages[0].content, /5% left/);
+		assert.doesNotMatch(JSON.stringify(pi.messages), /fixture-private@example/);
+		Object.assign(pi.ctx, { model: { provider: "openai-codex", id: "gpt-6-astra" } });
+		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 429 too many requests" } });
+		assert.equal(warningCount(), 1, "generic rate limits are not exhaustion");
+		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit" } });
+		assert.equal(warningCount(), 2);
+		assert.match(pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").at(-1)!.message.content, /exhausted/);
+		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1, "exhaustion does not force polling");
+		await pi.commands.get("orchestrate")!.handler("off", pi.ctx);
+		assert.ok((await pi.emit("context", { messages: [] })).every(c => c === undefined));
 	});
 });

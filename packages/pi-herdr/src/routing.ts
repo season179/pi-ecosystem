@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigError } from "./types.js";
+import { validateQuotaConfig, type QuotaConfig } from "./quota-source.js";
+import type { QuotaReport } from "./quota.js";
 
 export type Difficulty = "easy" | "general" | "hardest";
 export type Harness = "pi" | "claude" | "codex";
@@ -36,6 +38,7 @@ export interface RoutingConfig {
 	historyWindow: number;
 	familyShares: Record<string, number>;
 	profiles: RoutingProfile[];
+	quota?: QuotaConfig;
 }
 export interface RouteRequest {
 	difficulty: Difficulty;
@@ -45,6 +48,8 @@ export interface RouteRequest {
 	/** Explicit one-off user choice, including when policy is unavailable. */
 	override?: RoutingProfile;
 	allowFallback?: boolean;
+	/** Agent judgment based on an inspected snapshot; never an explicit-user override. */
+	budgetChoice?: { profileId: string; reason: string; snapshotId: string };
 }
 /** Caller-observed readiness, not declarations copied from policy. Unknown blocks. */
 export interface RouteAvailability {
@@ -64,7 +69,8 @@ export interface RouteAvailability {
 export interface RouteAssignment { family: string }
 export interface RouteSelection {
 	profile: RoutingProfile;
-	source: "policy" | "explicit" | "fallback";
+	source: "policy" | "explicit" | "fallback" | "budget";
+	budgetReason?: string;
 	fallbackOf?: string;
 	warnings: string[];
 }
@@ -107,7 +113,7 @@ export function loadRoutingConfig(agentDir: string): RoutingConfig {
 
 /** Strict schema validation plus cross-reference checks; returns an independent copy. */
 export function validateRoutingConfig(value: unknown): RoutingConfig {
-	const c = record(value, "config", ["version", "historyWindow", "familyShares", "profiles"]);
+	const c = record(value, "config", ["version", "historyWindow", "familyShares", "profiles", "quota"]);
 	check(c.version === 1, "config.version must be 1");
 	check(Number.isSafeInteger(c.historyWindow) && Number(c.historyWindow) > 0,
 		"config.historyWindow must be a positive safe integer");
@@ -128,6 +134,10 @@ export function validateRoutingConfig(value: unknown): RoutingConfig {
 		for (const id of p.fallbacks) {
 			check(id !== p.id && ids.has(id), `profile ${p.id}: fallback must name another configured profile`);
 		}
+	}
+	if (c.quota !== undefined) {
+		try { validateQuotaConfig(c.quota, [...ids]); }
+		catch (error) { throw new RoutingError(error instanceof Error ? error.message : "Invalid quota configuration"); }
 	}
 	return structuredClone(value) as RoutingConfig;
 }
@@ -168,9 +178,10 @@ export function selectRoute(
 	request: RouteRequest,
 	availability: readonly RouteAvailability[],
 	history: readonly RouteAssignment[] = [],
+	quota?: QuotaReport,
 ): RouteSelection {
 	if (config) config = validateRoutingConfig(config);
-	record(request, "request", ["difficulty", "requiredCapabilities", "risky", "profileId", "override", "allowFallback"]);
+	record(request, "request", ["difficulty", "requiredCapabilities", "risky", "profileId", "override", "allowFallback", "budgetChoice"]);
 	check(DIFFICULTIES.includes(request.difficulty), "request.difficulty must be easy, general, or hardest");
 	if (request.requiredCapabilities !== undefined) strings(request.requiredCapabilities, "request.requiredCapabilities");
 	for (const key of ["risky", "allowFallback"] as const) {
@@ -182,7 +193,18 @@ export function selectRoute(
 	check(Array.isArray(history) && history.every(h => h && typeof h.family === "string"), "history must contain assignment families, oldest first");
 	const explicit = request.profileId !== undefined || request.override !== undefined;
 	let preferred: RoutingProfile | undefined;
-	if (request.override !== undefined) {
+	if (request.budgetChoice !== undefined) {
+		check(!explicit, "budgetChoice cannot be combined with an explicit user choice");
+		const choice = record(request.budgetChoice, "budgetChoice", ["profileId", "reason", "snapshotId"]);
+		identifier(choice.profileId, "budgetChoice.profileId", LABEL);
+		check(typeof choice.reason === "string" && choice.reason.trim().length >= 10 && choice.reason.length <= 1000 && !/[\x00-\x1f\x7f]/.test(choice.reason), "budgetChoice requires a concise task-and-budget reason (10–1000 characters)");
+		check(quota !== undefined && choice.snapshotId === quota.snapshotId && Date.now() - quota.checkedAt < 30 * 60_000, "Quota snapshot changed or expired; inspect again before a budget choice");
+		check(quota.groups.some(g => g.state === "fresh" && g.windows.some(w => w.applicable && w.state === "fresh")), "Budget choice requires fresh applicable quota evidence; use baseline routing when unknown");
+		preferred = config?.profiles.find(p => p.id === choice.profileId);
+		check(preferred !== undefined, "Budget choice must name a configured profile");
+		const targetBudget = quota.groups.find(g => g.profiles.includes(preferred!.id));
+		check(!targetBudget || (targetBudget.state === "fresh" && targetBudget.windows.some(w => w.applicable && w.state === "fresh")), "Chosen profile's quota is unavailable/stale; inspect again or use baseline routing, not another group's freshness");
+	} else if (request.override !== undefined) {
 		preferred = validateProfile(request.override, "request.override");
 		check(!config?.profiles.some(p => p.id === preferred!.id), "override ID already exists in config; use profileId instead");
 		check(preferred.fallbacks.every(id => config?.profiles.some(p => p.id === id)), "override fallbacks require configured profile IDs");
@@ -200,13 +222,25 @@ export function selectRoute(
 			deficit(b) - deficit(a) || a.preference - b.preference || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
 		check(preferred !== undefined, "No enabled profile fits difficulty, capabilities, and required protections; review policy or make an explicit safe choice");
 	}
+	// A one-off alias of a configured route still consumes the same subscription.
+	const effectiveQuota = request.override && config && quota ? {
+		...quota,
+		groups: quota.groups.map(g => ({ ...g, profiles: config.profiles.some(p => g.profiles.includes(p.id) &&
+			p.harness === request.override!.harness && p.provider === request.override!.provider && p.model === request.override!.model)
+			? [...g.profiles, request.override!.id] : g.profiles })),
+	} : quota;
 	const block = (p: RoutingProfile, overrideFit: boolean, req = request) =>
-		policyBlock(p, req, overrideFit) ?? readinessBlock(p, req, availability);
+		routeBlock(p, req, availability, effectiveQuota, overrideFit);
 	const reason = block(preferred, explicit);
 	const result = (p: RoutingProfile, source: RouteSelection["source"], warnings: string[], fallbackOf?: string): RouteSelection => ({
 		profile: structuredClone(p), source, ...(fallbackOf ? { fallbackOf } : {}), warnings,
 	});
-	if (!reason) return result(preferred, explicit ? "explicit" : "policy", explicit ? ["Explicit user choice overrides suitability and share preferences, not authorization or safety checks."] : []);
+	if (!reason) {
+		if (request.budgetChoice) return { ...result(preferred, "budget", ["Budget-informed choice changes preferences only; report the reason. Baseline policy was not edited."]), budgetReason: request.budgetChoice.reason };
+		return result(preferred, explicit ? "explicit" : "policy", explicit ? ["Explicit user choice overrides suitability and share preferences, not authorization or safety checks."] : []);
+	}
+	// Do not quietly replace the model's budget judgment with a quota-blind fallback.
+	if (request.budgetChoice) throw new RoutingError(`Budget choice ${preferred.id} blocked: ${reason}. Inspect and reconsider; never bypass constraints.`);
 	const failures = [`${preferred.id}: ${reason}`];
 	if (!explicit || request.allowFallback === true) {
 		// A fallback must not drop protections requested by the original profile.
@@ -220,6 +254,12 @@ export function selectRoute(
 		}
 	}
 	throw new RoutingError(`No eligible route. ${failures.join("; ")}. Verify readiness/auth and protections, or configure an eligible fallback; never bypass approvals.`);
+}
+
+/** Same hard checks for inspect and select; quota comes from the collector, not tool inputs. */
+export function routeBlock(p: RoutingProfile, r: RouteRequest, availability: readonly RouteAvailability[], quota?: QuotaReport, explicit = false): string | undefined {
+	return policyBlock(p, r, explicit) ?? readinessBlock(p, r, availability) ??
+		(quota?.groups.some(g => g.profiles.includes(p.id) && g.exhausted) ? "confirmed subscription quota exhausted" : undefined);
 }
 
 function policyBlock(p: RoutingProfile, r: RouteRequest, explicit: boolean): string | undefined {

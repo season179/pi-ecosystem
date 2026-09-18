@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, it } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { launchArguments, piAvailability, readAssignments, registerRoutingTool, routingGuidance } from "../src/routing-tool.js";
 import type { RoutingConfig, RoutingProfile } from "../src/routing.js";
+import { QuotaMonitor } from "../src/quota.js";
 
 const profile: RoutingProfile = {
 	id: "pi-test", harness: "pi", provider: "test", model: "text-model", family: "test",
@@ -27,7 +28,7 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness(quota?: QuotaMonitor) {
 	let tool: any;
 	let active = true;
 	let sessionId = "session-one";
@@ -51,7 +52,7 @@ function harness() {
 		on: (event: string, callback: () => void) => { handlers.set(event, callback); },
 		appendEntry: (customType: string, data: unknown) => { entries.push({ type: "custom", customType, data }); },
 	} as unknown as ExtensionAPI;
-	registerRoutingTool(pi, { isActive: () => active });
+	registerRoutingTool(pi, { isActive: () => active, quota });
 	return {
 		ctx, entries,
 		execute: (params: unknown) => tool.execute("call", params, undefined, undefined, ctx),
@@ -63,6 +64,31 @@ function harness() {
 }
 
 describe.sequential("routing tool consumer boundary", () => {
+	it("inspects fresh evidence, makes a budget choice, records the reason and blocks confirmed exhaustion", async () => {
+		let calls = 0;
+		const quota = new QuotaMonitor({ agentDir: dir,
+			config: () => ({ groups: [{ id: "budget", provider: "codex", source: "oauth", profiles: [profile.id] }] }),
+			collect: async () => { calls++; return { observedAt: Date.now(), windows: [{ id: "secondary", usedPercent: 25, resetsAt: Date.now() + 86400000, windowMinutes: 10080 }] }; },
+		});
+		quota.start();
+		try {
+			const h = harness(quota);
+			const inspected = await h.execute({ action: "inspect", difficulty: "easy" });
+			assert.equal(inspected.details.candidates[0].blocked, null);
+			assert.equal(inspected.details.quota.groups[0].state, "fresh");
+			assert.equal(h.entries.length, 0);
+			const reason = "This route fits the task and has ample capacity before tomorrow's reset.";
+			const selected = await h.execute({ action: "select", difficulty: "easy", budgetChoice: { profileId: profile.id, reason, snapshotId: inspected.details.quota.snapshotId } });
+			assert.equal(selected.details.source, "budget");
+			await h.execute({ action: "record", selectionId: selected.details.selectionId, target: "worker" });
+			assert.equal(h.entries[0].data.budgetReason, reason);
+			await h.execute({ action: "exhausted", profileId: profile.id });
+			await assert.rejects(h.execute({ action: "select", difficulty: "easy", profileId: profile.id }), /exhausted/);
+			await assert.rejects(h.execute({ action: "select", difficulty: "easy", override: { ...profile, id: "alias" } }), /exhausted/);
+			assert.equal(calls, 1);
+		} finally { quota.stop(); }
+	});
+
 	it("reloads policy on every selection without counting previews or exposing credentials", async () => {
 		const h = harness();
 		const first = await h.execute({ action: "select", difficulty: "easy" });

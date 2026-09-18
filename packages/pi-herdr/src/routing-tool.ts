@@ -5,11 +5,13 @@ import { Type } from "typebox";
 import {
 	loadRoutingConfig,
 	selectRoute,
+	routeBlock,
 	type RouteAvailability,
 	type RoutingConfig,
 	type RoutingProfile,
 	type RouteSelection,
 } from "./routing.js";
+import type { QuotaMonitor } from "./quota.js";
 
 const ASSIGNMENT_TYPE = "pi-herdr-assignment";
 const Difficulty = StringEnum(["easy", "general", "hardest"] as const);
@@ -22,7 +24,7 @@ const Profile = Type.Object({
 	preference: Type.Number(), protection: Protection, fallbacks: Type.Array(Type.String()),
 });
 const Params = Type.Object({
-	action: StringEnum(["select", "record"] as const),
+	action: StringEnum(["inspect", "select", "record", "exhausted"] as const),
 	difficulty: Type.Optional(Difficulty),
 	requiredCapabilities: Type.Optional(Type.Array(Type.String())),
 	risky: Type.Optional(Type.Boolean()),
@@ -37,6 +39,11 @@ const Params = Type.Object({
 		bypassPermissions: Type.Boolean(),
 		evidence: Type.String({ minLength: 1, maxLength: 1000, description: "Non-secret evidence from current native help/auth/model checks; verify protection on the worker after launch." }),
 	}))),
+	budgetChoice: Type.Optional(Type.Object({
+		profileId: Type.String(),
+		reason: Type.String({ minLength: 10, maxLength: 1000, description: "Explain task fit, quota/reset outlook and orchestration reserve; never claim this is a user override." }),
+		snapshotId: Type.String({ description: "Latest inspect quota snapshotId; inspect again if it changed." }),
+	})),
 	selectionId: Type.Optional(Type.String()),
 	target: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
 });
@@ -48,6 +55,7 @@ interface Assignment {
 	family: string;
 	target: string;
 	fallbackOf?: string;
+	budgetReason?: string;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -118,14 +126,14 @@ export async function piAvailability(ctx: ExtensionContext, profiles: readonly R
 	return results;
 }
 
-export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () => boolean }): void {
+export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () => boolean; quota?: QuotaMonitor }): void {
 	// Selections are previews, not assignments. Runtime reset deliberately invalidates them.
 	const pending = new Map<string, { sessionId: string; selection: RouteSelection }>();
 	pi.on("session_shutdown", () => { pending.clear(); });
 	pi.registerTool({
 		name: "herdr_route",
 		label: "Herdr Route",
-		description: "Select a worker profile from freshly read herdr-routing.json; never launches a worker. Call before EVERY dispatch. Pi model/auth/input support is checked through Pi. For Claude/Codex supply externalChecks from current native model/auth/help evidence (no credentials); unknown checks block. Required capabilities use input names text/image. Explicit user overrides may work without policy. After a successful dispatch, record the returned selectionId and target to count the assignment; previews and failed starts do not count. Native launchArgs are argument arrays, not shell commands: quote each argument and verify permission mode on the worker. No automatic ownership or watch recovery.",
+		description: "Inspect task candidates and cached subscription quotas, then select before EVERY dispatch. Use budgetChoice with inspect snapshotId and a task/budget reason to adjust preferences; this cannot bypass suitability, capabilities, auth, protection or exhaustion. profileId/override are reserved for explicit USER choices. Record selectionId + target only after successful dispatch. Use exhausted with profileId only after confirmed subscription exhaustion (not generic 429); no forced polling. Quotas refresh at most every 30 minutes. Pi readiness is checked through Pi; native externalChecks need current non-secret help/auth/model evidence. Native launchArgs are arrays, not shell commands; verify worker permissions. Never launches workers or proves ownership. Inspect text capped at 24KB/500 lines.",
 		parameters: Params,
 		executionMode: "sequential",
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -140,13 +148,18 @@ export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () =>
 				}
 				const selected = pending.get(params.selectionId);
 				if (!selected || selected.sessionId !== sessionId) throw new Error("Unknown or expired selection. Select before dispatch; do not reconstruct ownership from another session.");
-				const { profile, fallbackOf } = selected.selection;
-				const assignment: Assignment = { sessionId, selectionId: params.selectionId, profileId: profile.id, family: profile.family, target: params.target, ...(fallbackOf ? { fallbackOf } : {}) };
+				const { profile, fallbackOf, budgetReason } = selected.selection;
+				const assignment: Assignment = { sessionId, selectionId: params.selectionId, profileId: profile.id, family: profile.family, target: params.target, ...(fallbackOf ? { fallbackOf } : {}), ...(budgetReason ? { budgetReason } : {}) };
 				pi.appendEntry(ASSIGNMENT_TYPE, assignment);
 				pending.delete(params.selectionId);
 				return { content: [{ type: "text", text: `Recorded ${profile.id} (${profile.family}) → ${params.target}. This records your dispatch report, not verified completion or ownership.` }], details: assignment };
 			}
-			if (!params.difficulty) throw new Error("select requires difficulty: easy, general, or hardest.");
+			if (params.action === "exhausted") {
+				if (!params.profileId || !options.quota) throw new Error("exhausted requires a configured quota monitor and profileId");
+				options.quota.reportExhausted(params.profileId);
+				return { content: [{ type: "text", text: "Confirmed exhaustion recorded for the shared subscription group; reconsider other routes. No extra provider poll." }], details: options.quota.read() };
+			}
+			if (!params.difficulty) throw new Error("inspect/select requires difficulty: easy, general, or hardest.");
 			let config: RoutingConfig | undefined;
 			let configWarning: string | undefined;
 			try { config = loadRoutingConfig(getAgentDir()); }
@@ -159,14 +172,29 @@ export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () =>
 			for (const check of params.externalChecks ?? []) {
 				availability.push({ ...check, reason: `Agent-observed native evidence: ${check.evidence}` });
 			}
-			const selection = selectRoute(config, {
+			const quota = await options.quota?.refresh();
+			// A new override ID cannot disguise the same exhausted harness/provider/model.
+			for (const observation of availability) {
+				if (profiles.some(p => p.harness === observation.harness && p.provider === observation.provider && p.model === observation.model && quota?.groups.some(g => g.profiles.includes(p.id) && g.exhausted))) observation.remainingQuota = 0;
+			}
+			const request = {
 				difficulty: params.difficulty,
 				...(params.requiredCapabilities ? { requiredCapabilities: params.requiredCapabilities } : {}),
 				...(params.risky === undefined ? {} : { risky: params.risky }),
 				...(params.profileId ? { profileId: params.profileId } : {}),
 				...(params.override ? { override: params.override } : {}),
 				...(params.allowFallback === undefined ? {} : { allowFallback: params.allowFallback }),
-			}, availability, readAssignments(ctx));
+				...(params.budgetChoice ? { budgetChoice: params.budgetChoice } : {}),
+			};
+			if (params.action === "inspect") {
+				const details = { quota, candidates: profiles.map(profile => ({
+					profile,
+					blocked: routeBlock(profile, request, availability, quota) ?? null,
+				})), ...(configWarning ? { configWarning } : {}) };
+				const output = truncateHead(JSON.stringify(details, null, 2), { maxBytes: 24_000, maxLines: 500 });
+				return { content: [{ type: "text", text: output.content + (output.truncated ? "\n[Inspect output truncated; full policy is in herdr-routing.json.]" : "") + "\nChoose among eligible candidates using task needs, remaining allowance, reset time, observed burn and orchestration reserve. Pressure is advisory, not a forecast. Prefer expiring surplus for useful work, conserve scarce groups, warn when alternatives are constrained. No selection or worker was recorded." }], details };
+			}
+			const selection = selectRoute(config, request, availability, readAssignments(ctx), quota);
 			const selectionId = randomUUID();
 			// A bounded preview cache, not a persistent task ledger.
 			if (pending.size >= 100) pending.delete(pending.keys().next().value!);

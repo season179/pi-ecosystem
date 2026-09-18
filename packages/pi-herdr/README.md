@@ -44,11 +44,19 @@ Activation grants no operational permission beyond the user's request. No automa
 
 Policy lives in `~/.pi/agent/herdr-routing.json` (or `herdr-routing.json` under `PI_CODING_AGENT_DIR`), separate from watch settings. See [setup, schema and examples](docs/ROUTING.md). The bundled example represents Claude Code, Codex CLI, and Pi profiles; no credentials or executable shell templates belong in it. Missing/invalid configuration gives an actionable setup message rather than guessed defaults.
 
-The agent calls `herdr_route` before every new dispatch. It rereads policy, checks exact Pi model/auth/input support, and selects among eligible profiles by suitability, soft family shares and preference. Claude/Codex require agent-observed native model/auth/protection evidence supplied in `externalChecks`; an unknown check is not readiness. The tool does **not** launch processes or prove a live worker's permission settings. Verify installed native flags and effective startup settings before submitting work.
+The agent calls `herdr_route` before every new dispatch. It rereads policy and checks exact Pi model/auth/input support. Baseline selection uses suitability, soft family shares and preference. With quota monitoring configured, `inspect` exposes subscription windows and candidate blockers; the orchestrator can select a suitable model with a reasoned `budgetChoice` rather than follow fixed shares. Claude/Codex require agent-observed native model/auth/protection evidence supplied in `externalChecks`; an unknown check is not readiness. The tool does **not** launch processes or prove a live worker's permission settings. Verify installed native flags and effective startup settings before submitting work.
 
 `select` returns a profile, fallback information, argument array and selection ID. `record` counts that ID only after the agent reports successful dispatch with a target. Repeated records are idempotent. Previews and failed starts do not count; session-stamped assignment history survives resume but is not inherited by forks. This small history is not a task database or proof of worker ownership/completion.
 
-Configuration edits affect the next selection without rebuilding or restarting active workers. Explicit user choices override defaults, never capability or protection requirements. Family shares are soft counts of recent assignments, not spend, runtime, or forced ratios for small batches; static quota notes are not live balances.
+Configuration edits affect the next selection without rebuilding or restarting active workers. Explicit user choices override defaults, never capability or protection requirements. Budget choices do not bypass suitability either. Family shares are soft counts of recent assignments, not spend, runtime, or forced ratios for small batches; static quota notes are not live balances.
+
+### Subscription quotas
+
+Optional `quota.groups` binds profiles to CodexBar subscription sources for Codex, Claude and Z.ai. Active orchestrators refresh at activation and every **30 minutes**; a shared private cache coalesces checks across sessions. Workers never poll. `/limits` displays cached readings, reset times, pacing and reserves; `herdr_route inspect` also provides recent burn and candidate eligibility. Low/constrained/unknown readings warn without waking an idle model. Confirmed subscription exhaustion can be reported immediately without another poll.
+
+Collection supplies facts; the orchestrator judges task needs and pending work. Capability/auth/protection/exhaustion checks stay in code. No automatic purchases, account switching, policy rewrites or work invented to consume quota. Account bindings are explicit configuration, not inferred from model names or synchronized with Pi's account picker. Missing model-specific windows are unknown—not a guessed multiplier.
+
+See [quota setup, behavior and limitations](docs/QUOTA.md). CodexBar is an optional runtime dependency, not bundled. The extension finds its macOS app helper or `codexbar` on PATH; `PI_HERDR_CODEXBAR` can select an executable.
 
 ## Watch Tools and Modes
 

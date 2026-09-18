@@ -18,6 +18,8 @@ import {
 	summarizeRoutingStatus,
 } from "../orchestration-state.js";
 import { registerRoutingTool, routingGuidance } from "../routing-tool.js";
+import { loadRoutingConfig } from "../routing.js";
+import { QuotaMonitor, quotaSummary } from "../quota.js";
 import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
 	formatStatusChip,
@@ -237,6 +239,58 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		}
 	};
 
+	const quotaWarnings = new Map<string, string>();
+	const quota = new QuotaMonitor({
+		agentDir,
+		config: () => loadRoutingConfig(agentDir).quota,
+		onUpdate: (report) => {
+			if (!promoted) return;
+			for (const group of report.groups) {
+				const signature = JSON.stringify([group.state, group.pressure, group.windows.filter(w => w.applicable).map(w => [w.id, w.resetsAt, w.state])]);
+				if (quotaWarnings.get(group.id) === signature) continue;
+				quotaWarnings.set(group.id, signature);
+				if (!group.warnings.length) continue;
+				const text = group.warnings.join("\n") + "\n" + quotaSummary({ ...report, groups: [group] });
+				notify(uiCtx, text, "warning");
+				try {
+					pi.sendMessage({ customType: "pi-herdr-quota-warning", content: text, display: true }, { deliverAs: "steer", triggerTurn: false });
+				} catch { /* Never wake an idle model or fail orchestration for reporting. */ }
+			}
+		},
+	});
+
+	pi.registerCommand("limits", {
+		description: "Show Herdr subscription quotas (shared 30-minute cache; does not force a refresh)",
+		handler: async (_args, ctx) => {
+			const report = promoted ? await quota.refresh() : quota.read();
+			const text = quotaSummary(report) + "\n" + report.binding;
+			if (!ctx.hasUI) return;
+			pi.sendMessage({ customType: "pi-herdr-limits", content: text, display: true }, { triggerTurn: false });
+		},
+	});
+
+	pi.on("context", (event) => {
+		if (!promoted) return;
+		const report = quota.read();
+		if (!report.groups.length) return;
+		// Transient latest snapshot, not an ever-growing series of quota observations.
+		return { messages: [...event.messages, {
+			role: "custom" as const, customType: "pi-herdr-quota-context", display: false, timestamp: Date.now(),
+			content: "Latest subscription snapshot (supersedes historical quota messages):\n" + quotaSummary(report) +
+				"\nUse herdr_route inspect for candidate eligibility, reserve and burn details. Reconsider delegation when budgets change; warn if premium or economical alternatives are constrained. Unknown is not unlimited. " + report.binding,
+		}] };
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		if (!promoted || event.message.role !== "assistant" || event.message.stopReason !== "error") return;
+		// Ordinary HTTP 429 can be a transient throughput limit, not plan exhaustion.
+		if (!/usage_limit_reached|hit your ChatGPT usage limit|subscription quota exhausted/i.test(event.message.errorMessage ?? "")) return;
+		try {
+			const profile = loadRoutingConfig(agentDir).profiles.find(p => p.harness === "pi" && p.provider === ctx.model?.provider && p.model === ctx.model?.id);
+			if (profile) quota.reportExhausted(profile.id);
+		} catch { /* Unmapped route: do not guess a subscription. */ }
+	});
+
 	const persistActivation = (
 		ctx: ExtensionContext,
 		active: boolean,
@@ -258,6 +312,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	): boolean => {
 		const changed = !promoted;
 		promoted = true;
+		quota.start();
 		setOrchestratorToolsActive(true);
 		updateFooter();
 		if (changed && options.persist) persistActivation(ctx, true, source);
@@ -269,6 +324,8 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		const stopped = manager ? (await manager.stop("all")).length : 0;
 		const changed = promoted;
 		promoted = false;
+		quota.stop();
+		quotaWarnings.clear();
 		recoveryNote = undefined;
 		setOrchestratorToolsActive(false);
 		updateFooter();
@@ -500,7 +557,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	registerRoutingTool(pi, { isActive: () => promoted });
+	registerRoutingTool(pi, { isActive: () => promoted, quota });
 
 	pi.registerMessageRenderer(
 		WATCH_MESSAGE_TYPE,
@@ -714,6 +771,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			promoted = state.own.active;
 			setOrchestratorToolsActive(promoted);
 			if (promoted) {
+				quota.start();
 				recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone and workers dispatched earlier are not being supervised until you verify them and re-arm.`;
 				if (firstNotice) {
 					notify(
@@ -756,6 +814,8 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		uiCtx = ctx;
+		quota.stop();
+		quotaWarnings.clear();
 		agentBusy = false;
 		wakesUsed = 0;
 		exhaustionNotified = false;
@@ -786,6 +846,8 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		quota.stop();
+		quotaWarnings.clear();
 		uiCtx = ctx;
 		agentBusy = false;
 		sessionGeneration += 1;

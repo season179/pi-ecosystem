@@ -60,9 +60,11 @@ describe("orchestration state helpers", () => {
 		assert.ok("body" in skill);
 		assert.match(skill.body, /Do not load all references by default/);
 		assert.match(skill.body, /verify eligible external harnesses before first dispatch/);
-		assert.match(skill.body, /use automatic selection unless the user specifies a route/);
+		assert.match(skill.body, /select` with `budgetChoice`/);
+		assert.match(skill.body, /Otherwise use baseline automatic selection/);
+		assert.match(skill.body, /Reserve `profileId`\/`override` for explicit user choices/);
 		assert.match(skill.body, /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/);
-		assert.match(skill.body, /Missing\/invalid policy.*read \[Routing decisions\]/);
+		assert.match(skill.body, /missing\/invalid policy.*read \[Routing decisions\]/);
 		assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);
 		const links = [...skill.body.matchAll(/\]\((references\/[^)]+)\)/g)].map((m) => m[1]!);
 		assert.deepEqual(links, ["references/routing.md", "references/recovery.md"]);

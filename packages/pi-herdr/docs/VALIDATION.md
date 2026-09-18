@@ -1,4 +1,19 @@
-# Orchestration validation — 2026-09-17
+# Orchestration validation
+
+## Subscription quotas — 2026-09-18
+
+- Built and tested the existing local package: **165 tests in 13 files** pass. Package dry run includes new compiled collectors/cache, schema and quota documentation; `git diff --check` passes. No release version bump or publish.
+- New coverage: actual fake-executable boundary, output caps/abort/redaction, missing/malformed/stale windows, source validation, cross-monitor coalescing, 30-minute timer and failure cooldown, private cache, dead/empty/live lock behavior, account selectors, exhaustion between polls, budget-choice suitability/auth/image/protection checks, inspect → select → record reason, and explicit-alias exhaustion blocking.
+- Runtime integration tests cover inactive workers not polling, transient context snapshots, deduplicated warnings, no idle model wake, generic 429 vs confirmed exhaustion, and off/deactivation.
+- Verified installed CodexBar 0.56.6 supports all three sources. Codex OAuth and Z.ai API worked; Claude OAuth/web were unavailable, but native CLI `/usage` worked. No credentials were copied into Herdr configuration or cache.
+- Initial local binding check: saved Pi default Codex account ID matched native Codex; Pi's Z.ai key matched CodexBar's selected `default` token account. This checks saved defaults, not future account switches. Fable workers use the same native Claude source queried by CodexBar.
+- Real Pi 0.85.1 RPC smoke loaded the built extension, found `/limits`, activated a disposable orchestrator session, displayed fresh quotas for all three configured groups, reused the cache on a second `/limits`, and switched orchestration off. **Zero assistant/model turns and zero extension errors.** No workers, purchases or reset-credit consumption. Smoke process exited.
+- Observed at approximately 06:18 UTC: Astra weekly 43% remaining, reset September 24 (`conserve`, 10-point editable orchestration reserve); Claude shared session 34%/weekly 63% remaining (`surplus`); GLM session 98%/weekly 81% remaining (`surplus`). These are historical acceptance observations, not current balances. No separate Fable-specific allowance was returned and none was fabricated.
+- The user's installed Pi package points directly to this checkout; building updates its installed files. The running session needs `/reload` (or a new session) to load the new tool schema and handlers. Local `herdr-routing.json` now opts into the three verified source bindings, retaining baseline shares and suitability.
+
+Limitations: no paid end-to-end model delegation was launched for quota testing; intelligent task judgment is guide-driven and not guaranteed by deterministic tests. Real provider reset transitions, multi-day behavior and automatic account identity synchronization were not tested or claimed. Initial unchanged baseline had one intermittent watch kill-grace assertion failure; isolated and subsequent full runs passed.
+
+## Earlier orchestration validation — 2026-09-17
 
 Validated locally on macOS, Node 24.19.0, Pi 0.85.1, Herdr 0.9.1. Native profile preflight also checked Claude Code 2.1.274 and Codex CLI 0.154.0. This is bounded acceptance evidence, not a cross-platform or model-performance benchmark.
 

@@ -35,6 +35,7 @@ All fields are required unless marked optional. Unknown fields are rejected at e
 - `version`: `1`.
 - `historyWindow`: positive safe integer. Number of most recent actual assignments, not days, tokens, spend, or runtime.
 - `familyShares`: family name → non-negative relative weight, with a positive total. `40/40/20` and `.4/.4/.2` are equivalent. Zero is a soft target, **not disablement**.
+- `quota` (optional): explicit subscription groups and profile/window bindings; see [QUOTA.md](QUOTA.md). Omit to disable polling.
 - `profiles`: nonempty array:
   - `id`, `family`: stable labels. History records the assigned family, so later profile renaming does not reinterpret old assignments.
   - `harness`: `pi`, `claude`, or `codex`.
@@ -47,7 +48,7 @@ All fields are required unless marked optional. Unknown fields are rejected at e
   - `fallbacks`: ordered list of other configured IDs. Only direct edges are followed; mutual fallback lists are safe, not recursive traversal.
   - `planning` (optional): required `source` and `date` (`YYYY-MM-DD`); optional `intelligenceIndex`, `costNote`, `quotaNote`, `capabilityNote`. Descriptive text only, never executable instructions or live balances.
 
-IDs reject whitespace, globs, CLI flags, and shell expressions. Provider identifiers allow ASCII letters/digits plus `.`, `_`, `/`, `-`, starting with a letter/digit. Model identifiers additionally allow `@` (including first position) and `:` to preserve real IDs such as `@cf/zai-org/glm-5.3` and `z-ai/glm-5.3:batch`; they still cannot start with a dash. Exact registry matching, not this character filter, establishes a valid model. Colon segments are preserved verbatim, never interpreted as thinking suffixes by this helper. Profile/family/capability labels exclude `/`.  No credentials, endpoints, auth commands, argv, environment overrides, executable templates, dispatch engine, or quota daemon are accepted. The schema cannot recognize secrets hidden in prose: do not put secrets in notes either.
+IDs reject whitespace, globs, CLI flags, and shell expressions. Provider identifiers allow ASCII letters/digits plus `.`, `_`, `/`, `-`, starting with a letter/digit. Model identifiers additionally allow `@` (including first position) and `:` to preserve real IDs such as `@cf/zai-org/glm-5.3` and `z-ai/glm-5.3:batch`; they still cannot start with a dash. Exact registry matching, not this character filter, establishes a valid model. Colon segments are preserved verbatim, never interpreted as thinking suffixes by this helper. Profile/family/capability labels exclude `/`.  No credentials, endpoints, auth commands, argv, environment overrides, executable templates, or dispatch engine are accepted. Optional quota monitoring uses a fixed bounded CodexBar adapter, not a configurable shell command. The schema cannot recognize secrets hidden in prose: do not put secrets in notes either.
 
 ## Pure API
 
@@ -61,6 +62,7 @@ selectRoute(
   request: RouteRequest,
   availability: readonly RouteAvailability[],
   history: readonly RouteAssignment[] = [],
+  quota?: QuotaReport,
 ): RouteSelection
 ```
 
@@ -73,8 +75,8 @@ const selected = selectRoute(config, {
   requiredCapabilities: ["text"],
   risky: false,
 }, observations, actualAssignmentHistory);
-// selected: { profile, source: "policy" | "explicit" | "fallback",
-//             fallbackOf?: string, warnings: string[] }
+// selected: { profile, source: "policy" | "explicit" | "fallback" | "budget",
+//             fallbackOf?: string, budgetReason?: string, warnings: string[] }
 // No worker has started. Report any fallback; preserve authorization boundaries.
 ```
 
@@ -84,6 +86,7 @@ const selected = selectRoute(config, {
 
 - `profileId`: explicit user selection of a configured profile. Bypasses suitability/share preferences, never enablement, runtime capability/auth checks, or protections.
 - `override`: an explicit one-off full `RoutingProfile`, validated identically. Use a new ID rather than shadowing a configured profile; use `profileId` for an existing ID. Can work with `config: undefined` after a reported missing/invalid-file error. Without config its fallback list must be empty. The override is not written to the policy.
+- `budgetChoice`: `{ profileId, snapshotId, reason }` from the latest `inspect`. Allows agent budget judgment to depart from ranks/shares, never from difficulty suitability or hard constraints. Requires fresh applicable quota evidence and a 10–1000 character reason. Does not silently fall back if blocked; inspect and reconsider. Mutually exclusive with user overrides.
 - `profileId` and `override` are mutually exclusive. `allowFallback: true` is required to substitute for either explicit selection; otherwise failure is a blocker. Fallbacks must meet the actual requested difficulty even when the explicitly selected original bypassed suitability.
 
 ### Availability and permission boundary
@@ -112,7 +115,7 @@ Observations must be independently checked, not copied from config or a model la
 
 Family deficit = normalized target weight − observed proportion in the last `historyWindow` assignment entries. With empty history the observed proportion is zero. `RouteAssignment` only needs `{ family: string }`; callers may retain profile/target/session identity as well. History is oldest first and counts real starts, not selection queries, failed launches, completions, tokens, or runtime. Historical unknown/removed families remain in the denominator: they were still actual assignments. Astra includes Codex and Pi; GLM includes full and Flash. Fallback order overrides balance.
 
-Shares only distinguish equally ranked suitable choices; they cannot override explicit selection, capability, quota exhaustion, or protection. The example ranks Claude, Astra and GLM equally for general work so Claude's share can participate, while preferring Claude for hardest work and GLM for easy work. Giving Claude a worse general rank would starve it regardless of its share. The example can still diverge substantially from 40/40/20 when work is mostly easy or hardest. Never generate unnecessary work, wait for a percentage, or use a weaker unsuitable model to balance. Use automatic selection unless the user specifies a route; report task-fit mismatches rather than silently bypassing shares.
+Shares only distinguish equally ranked suitable choices; they cannot override explicit selection, capability, quota exhaustion, or protection. The example ranks Claude, Astra and GLM equally for general work so Claude's share can participate, while preferring Claude for hardest work and GLM for easy work. Giving Claude a worse general rank would starve it regardless of its share. The example can still diverge substantially from 40/40/20 when work is mostly easy or hardest. Never generate unnecessary work, wait for a percentage, or use a weaker unsuitable model to balance. Use baseline automatic selection without live quota evidence, explicit selection for user choices, or a reasoned `budgetChoice` for adaptive delegation. Report task-fit mismatches rather than silently editing the policy.
 
 The agent-facing tool/context owns registry checks, fresh loading, result presentation, and session-stamped assignment recording **after successful dispatch**. Resume can reuse that conversation's history; forks must not inherit assignment ownership. This helper neither persists history nor starts/restarts workers.
 
@@ -120,6 +123,8 @@ The agent-facing tool/context owns registry checks, fresh loading, result presen
 
 Available only after explicit orchestration activation. This tool never launches a worker.
 
+- `action: "inspect"`: requires `difficulty`; accepts task constraints and `externalChecks`. Returns candidates with blockers plus the shared quota snapshot (including snapshot ID), without recording a selection. Text is bounded to 24KB/500 lines.
+- `action: "exhausted"`: requires `profileId`; report only confirmed subscription exhaustion, not a generic 429. Temporarily blocks the shared subscription group without an extra provider poll.
 - `action: "select"`: requires `difficulty`; accepts the request fields above plus `externalChecks`. Reloads policy, obtains Pi model/auth/input readiness, and returns `selectionId`, `profile`, `source`, optional `fallbackOf`, `warnings`, and `launchArgs`. If an explicit override proceeds without valid config, also reports `configWarning`.
 - `externalChecks`: Claude/Codex observations only: `harness`, exact `model`, `available`, `authenticated`, `capabilities`, `protection`, `bypassPermissions`, and nonempty `evidence` text from current native auth/model/help checks. These are **agent-supplied advisory evidence**, not an automatic external adapter or independent verification of a live worker. No credentials in evidence. Verify effective protection after launch. Pi checks cannot be replaced with these assertions.
 - `action: "record"`: only **after successful dispatch**, supply the returned `selectionId` and worker `target`. Records session-stamped profile/family/target/fallback metadata. Repeating the same selection/target does not count twice. Unknown/expired selections or a different target for an already-recorded selection fail. Recording asserts a dispatch report, not completion, ownership, or restored supervision.
@@ -134,7 +139,7 @@ Available only after explicit orchestration activation. This tool never launches
 | Codex / codex-approve-for-me | `--model <model> --approve-for-me` |
 | Codex / standard | `--model <model> --sandbox workspace-write --ask-for-approval on-request` |
 
-Quote each argument if a caller subsequently uses a shell. Preserve the current user's operational limits; clear inherited orchestrator activation from workers. Verify native flags and the effective worker permission mode before starting substantive work. Protection implementation is deliberately not editable executable policy. Do not route around a refusal using a different profile. The tool records no quota balance and never schedules work to fill a share.
+Quote each argument if a caller subsequently uses a shell. Preserve the current user's operational limits; clear inherited orchestrator activation from workers. Verify native flags and the effective worker permission mode before starting substantive work. Protection implementation is deliberately not editable executable policy. Do not route around a refusal using a different profile. The tool reads the shared quota cache but never schedules work to fill a share. Explicit IDs do not override known exhaustion.
 
 ## Focused verification
 

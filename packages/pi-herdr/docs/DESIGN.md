@@ -24,6 +24,12 @@ No generic task database, recursive supervisor, automatic Git mutation, new watc
 
 The original v1 decisions and historical test counts below are retained as history; the conversation-scoped activation above supersedes process-wide promotion.
 
+## Subscription-aware delegation (2026-09-18)
+
+`quota-source.ts` normalizes bounded CodexBar output without handling credentials; `quota.ts` owns private shared cache, refresh lifecycle and advisory arithmetic. Active orchestrators poll every 30 minutes, not each worker or model turn. Profile/account/window bindings are explicit policy, not model-name inference. Failed, stale and reset-past observations stay unknown.
+
+`herdr_route inspect` gives the model task candidates and quota facts. `budgetChoice` records a reason and snapshot identity, allowing task-aware departures from rank/share preferences without treating them as explicit user overrides (which historically bypass suitability). Code still enforces suitability, runtime capability/auth, permission protections and confirmed exhaustion. The model weighs task quality, remaining time, burn and coordination reserve; a formula does not allocate work. Warnings do not start idle model turns. No policy rewriting, purchases, model activation or reset-credit consumption is automated. See [QUOTA.md](QUOTA.md) for setup, account-binding limitations and model-specific windows.
+
 ## The idea
 
 [herdr](https://github.com/season179/herdr) is an agent multiplexer:
