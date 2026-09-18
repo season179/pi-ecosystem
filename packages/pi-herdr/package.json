@@ -36,10 +36,13 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle.mjs",
     "test": "vitest run",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run clean && npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   },
   "engines": {
     "node": ">=22"

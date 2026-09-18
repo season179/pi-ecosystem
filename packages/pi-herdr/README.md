@@ -111,7 +111,17 @@ When a positive wake budget is exhausted, cards continue to arrive without start
 
 ## Status and Compatibility
 
-Implemented and locally installed. As of 2026-09-17, 130 tests pass in 10 files; TypeScript, isolated/installed builds, and package contents are checked. A real Herdr/Pi trial verified command and natural-language activation, delegation → automatic watch wake → report verification → delivery → graceful worker exit, hot routing edits, reload/resume/new/fork behavior, and normal installed-package discovery. See [validation and trial limits](docs/VALIDATION.md).
+Implemented and locally installed. As of 2026-09-18, 172 tests pass in 14 files; TypeScript, isolated/installed builds, and package contents are checked. A real Herdr/Pi trial verified command and natural-language activation, delegation → automatic watch wake → report verification → delivery → graceful worker exit, hot routing edits, reload/resume/new/fork behavior, and normal installed-package discovery. See [validation and trial limits](docs/VALIDATION.md).
+
+### Code activation: rebuild + `/reload`
+
+The extension entry (`index.js`) is a stable shim that fingerprints the single-file bundle (`dist/herdr.bundle.js`, built by `npm run build`) by content and imports it under a query-busted URL. Pi's `/reload` re-invokes the factory, so a rebuilt bundle goes live in the same process; an unchanged bundle reuses the cached module graph. Pi's loader delegates `"type":"module"` `.js` entries to Node's process-wide ESM cache, which is why the runtime must be one bundle file behind a tiny, never-edit shim.
+
+- Sessions started with the shim entry pick up every rebuild via `/reload` — no restart.
+- Sessions still running a pre-2026-09-18 static entry module keep old code even after `/reload` (Node pins their entry module for the process lifetime): they need **one restart** to adopt the shim, after which reload works.
+- Editing `index.js` itself always requires a restart; it is designed not to need further edits.
+
+Note: `tsc` still emits the per-file tree under `dist/` (types, `.d.ts`, and legacy layout), but only `dist/herdr.bundle.js` is loaded at runtime. Debug the bundle/source, not `dist/extensions/herdr.js`.
 
 Existing sessions must `/reload` to load this build; then use `/orchestrate`. New sessions load it normally. No push, publication, or release is implied. Historical watch evidence also covers agent-tail retrieval, wake-card delivery requests, and telemetry.
 

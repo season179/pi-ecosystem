@@ -21,8 +21,10 @@ Validated locally on macOS, Node 24.19.0, Pi 0.85.1, Herdr 0.9.1. Native profile
 
 - Baseline: 94 tests in 7 files.
 - Final: **130 tests in 10 files**, including activation/context/lifecycle, fresh routing, exact identity/auth/capability/protection filtering, fallback, family history, explicit override, dispatch recording and existing watch behavior.
+- 2026-09-18 reload-entry fix: **172 tests in 14 files** (adds `test/entry.test.ts` — shim structure, and a child-process fixture proving initial load → dependency-only rebuild → factory re-invocation picks up the rebuilt bundle, unchanged re-invocations stay pinned, and externals keep host module identity).
 - TypeScript `--noEmit`, isolated build, installed local-package build, and `git diff --check` passed.
 - Isolated `npm pack --dry-run --json` included compiled entrypoint/helpers, canonical skill, routing schema/example and documentation. No publish/release was performed.
+- 2026-09-18: `npm pack` smoke loaded the extracted tarball entry through the shim and confirmed tool/command registration; end-to-end same-process rebuild→reload was verified through the installed Pi loader against an isolated fixture (old-code bundle → new-code bundle, changed behavior, pinned on repeated unchanged reload). The live installed dist was never regressed for verification.
 - Source and installed builds were validated separately; the installed checkout was built only after isolated live acceptance passed.
 
 ## Real Herdr/Pi acceptance
