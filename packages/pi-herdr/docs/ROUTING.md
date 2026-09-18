@@ -10,11 +10,11 @@ Read it at activation and before **every new selection**. There is no cache: edi
 2. Verify the exact harness/model/provider, auth readiness, input support, and protection flags on your installation. Edit enabled state, ranks, fallback order, and share window to reflect your preferences.
 3. Select a route before dispatch, including explicit one-off choices. Missing or invalid configuration reports the path and setup instructions. A caller may report that error and still pass an explicit validated override, without rewriting defaults.
 
-The example represents all five requested profiles. It is a candidate policy, not live quota data or a universal model recommendation. Its difficulty ranks, within-family preferences, and 50-assignment window are editable proposals. Relative shares 40 Astra / 40 GLM / 20 Fable and the dated intelligence/cost/quota notes are **user-supplied planning inputs from 2026-09-17**, not independently verified benchmarks or prices. Static notes do not affect the algorithm.
+The example represents all eight requested profiles (Sol primary/protected, Fable hardest, Opus and both Astra profiles reserved, GLM full/Flash easy). It is a candidate policy, not live quota data or a universal model recommendation. Its difficulty ranks, within-family preferences, and 50-assignment window are editable proposals. Relative shares 40 Sol / 40 GLM / 20 Fable with zero-weight Astra and Opus families, and the dated intelligence/cost/quota notes are **user-supplied planning inputs from 2026-09-18**, not independently verified benchmarks or prices. Static notes do not affect the algorithm.
 
-## Verified local identifiers (2026-09-17)
+## Verified local identifiers (2026-09-18)
 
-Checked installed Pi 0.85.1, Claude Code 2.1.274, and Codex CLI 0.154.0. No paid worker or model request was launched for these checks.
+Checked installed Pi 0.85.1, Claude Code 2.1.276, and Codex CLI 0.155.0. No paid worker or model request was launched for these checks.
 
 | Profile | Native model selection | Auth owner / observed readiness | Input metadata |
 |---|---|---|---|
@@ -23,8 +23,11 @@ Checked installed Pi 0.85.1, Claude Code 2.1.274, and Codex CLI 0.154.0. No paid
 | Pi Astra | `pi --provider openai-codex --model gpt-6-astra` | Pi `openai-codex`, OAuth configured | Pi registry: text/image |
 | Pi GLM | `pi --provider zai --model glm-5.3` | Pi `zai`, API key configured | Pi registry: text only |
 | Pi GLM Flash | `pi --provider zai --model glm-5.3-flash` | Pi `zai`, API key configured | Pi registry: text/image |
+| Pi Sol | `pi --provider openai-codex --model gpt-5.6-sol` | Pi `openai-codex`, OAuth configured | Pi registry: text/image |
+| Codex Sol | `codex --model gpt-5.6-sol` | Native Codex auth; logged in with ChatGPT | Native cached model catalog: text/image |
+| Claude Opus 5 | `claude --model claude-opus-5` | Native Claude auth; same first-party team login as Fable | Pi Anthropic catalog: text/image |
 
-Evidence: installed harness `--help`; Claude binary contains exact `claude-fable-5-1` identifier and Pi's Anthropic catalog agrees; native Codex `models_cache.json` has `gpt-6-astra`; installed Pi `ModelRuntime` registry with local cached catalogs and read-only injected credential/store access returned these exact available provider/model pairs. Credential values were neither printed nor copied to routing files. Native auth checks were filtered to readiness fields. Metadata presence is not a successful inference request, quota balance, or guarantee of access when dispatch happens. Never translate logical “Astra” into provider `openai` when the intended Pi subscription provider is `openai-codex`.
+Evidence: installed harness `--help`; Claude binary contains exact `claude-fable-5-1` and `claude-opus-5` identifiers and Pi's Anthropic catalog agrees; native Codex `models_cache.json` has `gpt-6-astra` and `gpt-5.6-sol`; installed Pi `ModelRuntime` registry with local cached catalogs and read-only injected credential/store access returned these exact available provider/model pairs. Verified effort flags on the installed CLIs and Pi docs (`docs/usage.md`): Pi `--thinking <level>` (off…max; this policy only ever passes `low`/`medium`/`high`), Claude `--effort <level>`, and Codex config override `-c model_reasoning_effort=<level>`. Credential values were neither printed nor copied to routing files. Native auth checks were filtered to readiness fields. Metadata presence is not a successful inference request, quota balance, or guarantee of access when dispatch happens. Never translate logical “Astra” into provider `openai` when the intended Pi subscription provider is `openai-codex`.
 
 For integration, use Pi's model/auth registry, not another credential database. `find(provider, id)` establishes an exact registered identity; `getAvailable()` establishes configured availability and `model.input` provides `text`/`image` metadata. Resolve current readiness through Pi when necessary, without returning credentials. External harness readiness comes from current native evidence supplied by the caller; this module has no external adapter or probes.
 
@@ -46,6 +49,8 @@ All fields are required unless marked optional. Unknown fields are rejected at e
   - `preference`: non-negative rank (lower better), used after fit/share ties, e.g. economical Flash for an easy task or preferred Pi harness within Astra. Configure ranks deliberately; unknown prices/quota are not fabricated.
   - `protection`: `standard`, `claude-auto` (Claude only), or `codex-approve-for-me` (Codex only).
   - `fallbacks`: ordered list of other configured IDs. Only direct edges are followed; mutual fallback lists are safe, not recursive traversal.
+  - `fallbackOnly` (optional boolean): reserved route. Excluded from baseline ranking and `budgetChoice`; reachable only as a configured fallback target of another profile or through an explicit user `profileId`/`override` (reported with a warning). Zero-weight family shares are a soft signal; `fallbackOnly` is the hard exclusion. The loader does not require an incoming fallback edge: an explicit-user-only reserved profile is valid configuration.
+  - `reasoningEffort` (optional `low`/`medium`/`high`): exact effort level emitted in `launchArgs` (`--thinking` for Pi, `--effort` for Claude, `-c model_reasoning_effort=<level>` for Codex). Values above `high` are rejected by design: this policy never launches worker reasoning above high. This is a launch-time argument, not a runtime cap — verify the worker's effective effort after launch.
   - `planning` (optional): required `source` and `date` (`YYYY-MM-DD`); optional `intelligenceIndex`, `costNote`, `quotaNote`, `capabilityNote`. Descriptive text only, never executable instructions or live balances.
 
 IDs reject whitespace, globs, CLI flags, and shell expressions. Provider identifiers allow ASCII letters/digits plus `.`, `_`, `/`, `-`, starting with a letter/digit. Model identifiers additionally allow `@` (including first position) and `:` to preserve real IDs such as `@cf/zai-org/glm-5.3` and `z-ai/glm-5.3:batch`; they still cannot start with a dash. Exact registry matching, not this character filter, establishes a valid model. Colon segments are preserved verbatim, never interpreted as thinking suffixes by this helper. Profile/family/capability labels exclude `/`.  No credentials, endpoints, auth commands, argv, environment overrides, executable templates, or dispatch engine are accepted. Optional quota monitoring uses a fixed bounded CodexBar adapter, not a configurable shell command. The schema cannot recognize secrets hidden in prose: do not put secrets in notes either.
@@ -85,7 +90,7 @@ const selected = selectRoute(config, {
 `RouteRequest` requires `difficulty`; optional `requiredCapabilities` defaults to none, `risky` defaults to false. Caller must classify risk from current instructions/task context, not label risky work safe to force a route. Current user authorization remains authoritative outside this advisory selector.
 
 - `profileId`: explicit user selection of a configured profile. Bypasses suitability/share preferences, never enablement, runtime capability/auth checks, or protections.
-- `override`: an explicit one-off full `RoutingProfile`, validated identically. Use a new ID rather than shadowing a configured profile; use `profileId` for an existing ID. Can work with `config: undefined` after a reported missing/invalid-file error. Without config its fallback list must be empty. The override is not written to the policy.
+- `override`: an explicit one-off full `RoutingProfile`, validated identically (including optional `fallbackOnly`/`reasoningEffort`). Use a new ID rather than shadowing a configured profile; use `profileId` for an existing ID. Can work with `config: undefined` after a reported missing/invalid-file error. Without config its fallback list must be empty. The override is not written to the policy.
 - `budgetChoice`: `{ profileId, snapshotId, reason }` from the latest `inspect`. Allows agent budget judgment to depart from ranks/shares, never from difficulty suitability or hard constraints. Requires fresh applicable quota evidence and a 10–1000 character reason. Does not silently fall back if blocked; inspect and reconsider. Mutually exclusive with user overrides.
 - `profileId` and `override` are mutually exclusive. `allowFallback: true` is required to substitute for either explicit selection; otherwise failure is a blocker. Fallbacks must meet the actual requested difficulty even when the explicitly selected original bypassed suitability.
 
@@ -109,13 +114,13 @@ Observations must be independently checked, not copied from config or a model la
 ### Ranking and fallbacks
 
 1. Honor explicit safe choices first.
-2. Policy candidates must be enabled and meet configured capabilities, difficulty, and risk protections.
+2. Policy candidates must be enabled and meet configured capabilities, difficulty, and risk protections. `fallbackOnly` profiles are not baseline candidates.
 3. Rank by suitability (ascending), family deficit (descending), preference (ascending), then ID (ASCII ascending) for deterministic ties.
-4. Check the preferred route's current readiness. If blocked, try its **configured direct fallbacks**, in order, applying all safety/capability/difficulty filters. Report `source: "fallback"`, `fallbackOf`, and a warning. No eligible fallback means a blocker, not silent substitution from an unrelated profile.
+4. Check the preferred route's current readiness. If blocked, try its **configured direct fallbacks**, in order, applying all safety/capability/difficulty filters. A `fallbackOnly` profile is a legitimate fallback target; this is its configured purpose. Fallback triggers on any blocker (readiness, auth, capability, or confirmed quota exhaustion) — there is no quota-only fallback condition; if you need one, model it through per-group window mapping so exhaustion blocks the exact group. Report `source: "fallback"`, `fallbackOf`, and a warning. No eligible fallback means a blocker, not silent substitution from an unrelated profile.
 
 Family deficit = normalized target weight − observed proportion in the last `historyWindow` assignment entries. With empty history the observed proportion is zero. `RouteAssignment` only needs `{ family: string }`; callers may retain profile/target/session identity as well. History is oldest first and counts real starts, not selection queries, failed launches, completions, tokens, or runtime. Historical unknown/removed families remain in the denominator: they were still actual assignments. Astra includes Codex and Pi; GLM includes full and Flash. Fallback order overrides balance.
 
-Shares only distinguish equally ranked suitable choices; they cannot override explicit selection, capability, quota exhaustion, or protection. The example ranks Claude, Astra and GLM equally for general work so Claude's share can participate, while preferring Claude for hardest work and GLM for easy work. Giving Claude a worse general rank would starve it regardless of its share. The example can still diverge substantially from 40/40/20 when work is mostly easy or hardest. Never generate unnecessary work, wait for a percentage, or use a weaker unsuitable model to balance. Use baseline automatic selection without live quota evidence, explicit selection for user choices, or a reasoned `budgetChoice` for adaptive delegation. Report task-fit mismatches rather than silently editing the policy.
+Shares only distinguish equally ranked suitable choices; they cannot override explicit selection, capability, quota exhaustion, or protection. The example ranks Claude Fable and the Sol/GLM generalists equally for general work so Fable's share can participate, while preferring Fable for hardest work and GLM for easy work. The example can still diverge substantially from 40/40/20 when work is mostly easy or hardest. Never generate unnecessary work, wait for a percentage, or use a weaker unsuitable model to balance. Use baseline automatic selection without live quota evidence, explicit selection for user choices, or a reasoned `budgetChoice` for adaptive delegation (never for `fallbackOnly` routes). Report task-fit mismatches rather than silently editing the policy.
 
 The agent-facing tool/context owns registry checks, fresh loading, result presentation, and session-stamped assignment recording **after successful dispatch**. Resume can reuse that conversation's history; forks must not inherit assignment ownership. This helper neither persists history nor starts/restarts workers.
 
@@ -129,15 +134,15 @@ Available only after explicit orchestration activation. This tool never launches
 - `externalChecks`: Claude/Codex observations only: `harness`, exact `model`, `available`, `authenticated`, `capabilities`, `protection`, `bypassPermissions`, and nonempty `evidence` text from current native auth/model/help checks. These are **agent-supplied advisory evidence**, not an automatic external adapter or independent verification of a live worker. No credentials in evidence. Verify effective protection after launch. Pi checks cannot be replaced with these assertions.
 - `action: "record"`: only **after successful dispatch**, supply the returned `selectionId` and worker `target`. Records session-stamped profile/family/target/fallback metadata. Repeating the same selection/target does not count twice. Unknown/expired selections or a different target for an already-recorded selection fail. Recording asserts a dispatch report, not completion, ownership, or restored supervision.
 
-`launchArgs` are argument arrays, never shell command templates. The fixed safety implementation uses:
+`launchArgs` are argument arrays, never shell command templates. `reasoningEffort`, when configured, appends the harness effort flag. The fixed safety implementation uses:
 
-| Harness/protection | Fixed native options |
-|---|---|
-| Pi / standard | `--provider <provider> --model <model>` |
-| Claude / claude-auto | `--model <model> --permission-mode auto` |
-| Claude / standard | `--model <model> --permission-mode manual` |
-| Codex / codex-approve-for-me | `--model <model> --approve-for-me` |
-| Codex / standard | `--model <model> --sandbox workspace-write --ask-for-approval on-request` |
+| Harness/protection | Fixed native options | Effort suffix (when set) |
+|---|---|---|
+| Pi / standard | `--provider <provider> --model <model>` | `--thinking <level>` |
+| Claude / claude-auto | `--model <model> --permission-mode auto` | `--effort <level>` |
+| Claude / standard | `--model <model> --permission-mode manual` | `--effort <level>` |
+| Codex / codex-approve-for-me | `--model <model> --approve-for-me` | `-c model_reasoning_effort=<level>` |
+| Codex / standard | `--model <model> --sandbox workspace-write --ask-for-approval on-request` | `-c model_reasoning_effort=<level>` |
 
 Quote each argument if a caller subsequently uses a shell. Preserve the current user's operational limits; clear inherited orchestrator activation from workers. Verify native flags and the effective worker permission mode before starting substantive work. Protection implementation is deliberately not editable executable policy. Do not route around a refusal using a different profile. The tool reads the shared quota cache but never schedules work to fill a share. Explicit IDs do not override known exhaustion.
 
@@ -150,4 +155,4 @@ node_modules/.bin/vitest run packages/pi-herdr/test/routing.test.ts packages/pi-
 node_modules/.bin/tsc -p packages/pi-herdr/tsconfig.json --noEmit
 ```
 
-Tests cover reload behavior, all five profiles, missing/invalid JSON, exact identity/readiness, capability and protection filtering, explicit overrides, direct eligible fallback, quota unknown/zero, family grouping, rolling windows, deterministic selection, and no input mutation. They intentionally do not enforce exact small-batch ratios or launch paid workers.
+Tests cover reload behavior, all eight profiles, missing/invalid JSON, exact identity/readiness, capability and protection filtering, explicit overrides, direct eligible fallback, fallback-only reservation (baseline, budget, fallback target, explicit), reasoning-effort validation and launch flags, scoped Claude window exhaustion granularity, quota unknown/zero, family grouping, rolling windows, deterministic selection, and no input mutation. They intentionally do not enforce exact small-batch ratios or launch paid workers.

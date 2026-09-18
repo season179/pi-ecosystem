@@ -9,6 +9,8 @@ import type { QuotaReport } from "./quota.js";
 export type Difficulty = "easy" | "general" | "hardest";
 export type Harness = "pi" | "claude" | "codex";
 export type Protection = "standard" | "claude-auto" | "codex-approve-for-me";
+/** Launch reasoning effort. Higher levels (xhigh/max) are rejected by policy: this selector never launches reasoning above high. */
+export type ReasoningEffort = "low" | "medium" | "high";
 export interface RoutingProfile {
 	id: string;
 	harness: Harness;
@@ -24,6 +26,10 @@ export interface RoutingProfile {
 	protection: Protection;
 	/** Ordered, direct fallback IDs; never recursively traversed. */
 	fallbacks: string[];
+	/** Reserved route: excluded from baseline and budget selection; reachable only as a configured fallback target or through an explicit user choice. */
+	fallbackOnly?: boolean;
+	/** Exact effort level passed to the native launch flags; a launch setting, not a runtime cap on the worker. */
+	reasoningEffort?: ReasoningEffort;
 	planning?: {
 		source: string;
 		date: string;
@@ -143,7 +149,7 @@ export function validateRoutingConfig(value: unknown): RoutingConfig {
 }
 
 function validateProfile(value: unknown, at: string): RoutingProfile {
-	const p = record(value, at, ["id", "harness", "provider", "model", "family", "enabled", "capabilities", "suitability", "preference", "protection", "fallbacks", "planning"]);
+	const p = record(value, at, ["id", "harness", "provider", "model", "family", "enabled", "capabilities", "suitability", "preference", "protection", "fallbacks", "fallbackOnly", "reasoningEffort", "planning"]);
 	identifier(p.id, `${at}.id`, LABEL);
 	identifier(p.family, `${at}.family`, LABEL);
 	identifier(p.model, `${at}.model`, MODEL_IDENTIFIER);
@@ -159,6 +165,8 @@ function validateProfile(value: unknown, at: string): RoutingProfile {
 	check(nonNegative(p.preference), `${at}.preference must be a finite non-negative number`);
 	check(p.protection === "standard" || (p.harness === "claude" && p.protection === "claude-auto") ||
 		(p.harness === "codex" && p.protection === "codex-approve-for-me"), `${at}.protection is not supported by this harness; bypass modes are forbidden`);
+	check(p.fallbackOnly === undefined || typeof p.fallbackOnly === "boolean", `${at}.fallbackOnly must be boolean`);
+	check(p.reasoningEffort === undefined || ["low", "medium", "high"].includes(String(p.reasoningEffort)), `${at}.reasoningEffort must be low, medium, or high; this policy never launches reasoning above high`);
 	if (p.planning !== undefined) {
 		const notes = record(p.planning, `${at}.planning`, ["source", "date", "intelligenceIndex", "costNote", "quotaNote", "capabilityNote"]);
 		check(typeof notes.source === "string" && notes.source.trim().length > 0, `${at}.planning.source is required`);
@@ -237,7 +245,9 @@ export function selectRoute(
 	});
 	if (!reason) {
 		if (request.budgetChoice) return { ...result(preferred, "budget", ["Budget-informed choice changes preferences only; report the reason. Baseline policy was not edited."]), budgetReason: request.budgetChoice.reason };
-		return result(preferred, explicit ? "explicit" : "policy", explicit ? ["Explicit user choice overrides suitability and share preferences, not authorization or safety checks."] : []);
+		const warnings = explicit ? ["Explicit user choice overrides suitability and share preferences, not authorization or safety checks."] : [];
+		if (preferred.fallbackOnly) warnings.push(`${preferred.id} is reserved (fallback-only): direct use is an explicit user choice, not a baseline or budget route.`);
+		return result(preferred, explicit ? "explicit" : "policy", warnings);
 	}
 	// Do not quietly replace the model's budget judgment with a quota-blind fallback.
 	if (request.budgetChoice) throw new RoutingError(`Budget choice ${preferred.id} blocked: ${reason}. Inspect and reconsider; never bypass constraints.`);
@@ -248,7 +258,8 @@ export function selectRoute(
 		for (const id of preferred.fallbacks) {
 			const fallback = config?.profiles.find(p => p.id === id);
 			if (!fallback) continue;
-			const why = block(fallback, false, fallbackRequest);
+		// fallbackOnly targets are legitimate here: that is their configured purpose.
+		const why = routeBlock(fallback, fallbackRequest, availability, effectiveQuota, false, true);
 			if (!why) return result(fallback, "fallback", [`Fallback from ${preferred.id}: ${reason}. Selected ${fallback.id}; report this deviation.`], preferred.id);
 			failures.push(`${id}: ${why}`);
 		}
@@ -257,13 +268,14 @@ export function selectRoute(
 }
 
 /** Same hard checks for inspect and select; quota comes from the collector, not tool inputs. */
-export function routeBlock(p: RoutingProfile, r: RouteRequest, availability: readonly RouteAvailability[], quota?: QuotaReport, explicit = false): string | undefined {
-	return policyBlock(p, r, explicit) ?? readinessBlock(p, r, availability) ??
+export function routeBlock(p: RoutingProfile, r: RouteRequest, availability: readonly RouteAvailability[], quota?: QuotaReport, explicit = false, asFallback = false): string | undefined {
+	return policyBlock(p, r, explicit, asFallback) ?? readinessBlock(p, r, availability) ??
 		(quota?.groups.some(g => g.profiles.includes(p.id) && g.exhausted) ? "confirmed subscription quota exhausted" : undefined);
 }
 
-function policyBlock(p: RoutingProfile, r: RouteRequest, explicit: boolean): string | undefined {
+function policyBlock(p: RoutingProfile, r: RouteRequest, explicit: boolean, asFallback = false): string | undefined {
 	if (!p.enabled) return "disabled in routing policy";
+	if (!explicit && !asFallback && p.fallbackOnly) return "reserved (fallback-only): excluded from baseline and budget selection; reachable only as a configured fallback target or an explicit user choice";
 	if (r.risky && p.protection === "standard") return "risky work requires Claude auto review or Codex approve-for-me protections";
 	if (!explicit && p.suitability[r.difficulty] === undefined) return "unsuitable for required difficulty";
 	if ((r.requiredCapabilities ?? []).some(c => !p.capabilities.includes(c))) return "required capability absent from policy hints";

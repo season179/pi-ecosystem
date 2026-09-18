@@ -6,19 +6,25 @@ Collection, cache and routing live in pi-herdr, using the installed CodexBar CLI
 
 Install/configure [CodexBar](https://github.com/steipete/CodexBar) first. Herdr resolves `/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI` on macOS, otherwise `codexbar` on PATH. `PI_HERDR_CODEXBAR` may name an executable path (not a shell command). No executable is downloaded automatically.
 
-Add an optional `quota` section to `~/.pi/agent/herdr-routing.json`. Verify that the selected CodexBar/native accounts are the accounts used by the listed worker profiles. This example matches the existing five-profile policy; it is not a universal account mapping:
+Add an optional `quota` section to `~/.pi/agent/herdr-routing.json`. Verify that the selected CodexBar/native accounts are the accounts used by the listed worker profiles. This example matches the eight-profile policy; it is not a universal account mapping:
 
 ```json
 "quota": {
   "groups": [
     { "id": "astra", "provider": "codex", "source": "oauth", "profiles": ["pi-astra", "codex-astra"], "reservePercent": 10 },
-    { "id": "fable", "provider": "claude", "source": "cli", "profiles": ["claude-fable"] },
+    { "id": "sol", "provider": "codex", "source": "oauth", "profiles": ["pi-sol", "codex-sol"], "reservePercent": 10 },
+    { "id": "fable", "provider": "claude", "source": "cli", "profiles": ["claude-fable"], "windows": ["primary", "secondary", "claude-weekly-scoped-fable"] },
+    { "id": "opus", "provider": "claude", "source": "cli", "profiles": ["claude-opus-5"] },
     { "id": "glm", "provider": "zai", "source": "api", "account": "default", "profiles": ["pi-glm", "pi-glm-flash"] }
   ]
 }
 ```
 
-The 10-percentage-point coordination reserve is an editable starting preference, not a provider quota or mandatory cutoff. Set a reserve for whichever subscription is hosting orchestration. Reserving capacity does not automatically switch the orchestrator model. Polling is opt-in through this configuration and explicit orchestration activation. `/orchestrate off` stops it. `/limits` shows cached data even when orchestration is off, but does not initiate a check there.
+Two groups may share one provider/source/account: the `astra` and `sol` groups above are one Codex subscription (one observation, one poll, one cache entry — never an independent allowance), and the two Claude groups share the native Claude login. Profile sets must stay disjoint (one group per profile). The `sol` group repeats the 10-point coordination reserve so worker delegation sees the same spendable margin as orchestration.
+
+The `fable` group explicitly maps `claude-weekly-scoped-fable`, a user assertion from the 2026-09-18 CodexBar evidence showing that scoped window exhausted while shared Claude windows still had headroom. With that mapping, a 100%-used scoped window marks **only the fable group exhausted** (blocking `claude-fable` and enabling its configured fallback), while the `opus` group — default shared windows only, scoped window deliberately unmapped — stays eligible. Mapping a scoped window is exactly the mechanism QUOTA.md describes for model-specific exhaustion; herdr never infers it from a model name. Do not map the Fable-scoped window onto other Claude models.
+
+The 10-percentage-point coordination reserve is an editable starting preference, not a provider quota or mandatory cutoff. Set a reserve for whichever subscription is hosting orchestration, and mirror it on every group sharing that subscription. Reserving capacity does not automatically switch the orchestrator model. Polling is opt-in through this configuration and explicit orchestration activation. `/orchestrate off` stops it. `/limits` shows cached data even when orchestration is off, but does not initiate a check there.
 
 Each group requires `id`, `provider`, `source`, and configured `profiles`. Optional `account` selects a CodexBar account label; omit for that source's current account. Allowed sources: Codex/Claude `oauth`, `cli`, `web`; Z.ai `api`. There is no automatic cross-source authentication fallback. Source failures appear as unavailable; diagnose/login with the owning app, not by putting credentials in routing config.
 

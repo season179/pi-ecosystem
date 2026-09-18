@@ -158,4 +158,15 @@ describe.sequential("routing tool consumer boundary", () => {
 		assert.deepEqual(result.details.launchArgs, ["--model", "external-model", "--permission-mode", "auto"]);
 		assert.deepEqual(launchArguments({ ...external, harness: "codex", protection: "codex-approve-for-me" }), ["--model", "external-model", "--approve-for-me"]);
 	});
+	it("emits harness effort flags and accepts reserved/effort override fields", async () => {
+		const h = harness();
+		const result = await h.execute({ action: "select", difficulty: "easy", override: { ...profile, id: "one-off-capped", fallbackOnly: true, reasoningEffort: "high" } });
+		assert.equal(result.details.source, "explicit");
+		assert.match(result.details.warnings.join(), /fallback-only/);
+		assert.deepEqual(result.details.launchArgs, ["--provider", "test", "--model", "text-model", "--thinking", "high"]);
+		assert.deepEqual(launchArguments({ ...profile, harness: "claude", provider: undefined, protection: "claude-auto", reasoningEffort: "high" }), ["--model", "text-model", "--permission-mode", "auto", "--effort", "high"]);
+		assert.deepEqual(launchArguments({ ...profile, harness: "codex", provider: undefined, protection: "codex-approve-for-me", reasoningEffort: "high" }), ["--model", "text-model", "--approve-for-me", "-c", "model_reasoning_effort=high"]);
+		assert.deepEqual(launchArguments({ ...profile, harness: "codex", provider: undefined, protection: "standard", reasoningEffort: "low" }), ["--model", "text-model", "--sandbox", "workspace-write", "--ask-for-approval", "on-request", "-c", "model_reasoning_effort=low"]);
+		assert.deepEqual(launchArguments(profile), ["--provider", "test", "--model", "text-model"]);
+	});
 });

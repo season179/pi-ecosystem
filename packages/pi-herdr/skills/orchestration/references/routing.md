@@ -12,7 +12,7 @@ Choose in this order:
 3. Task difficulty, likely successful completion time, cost and quota **when actually known**.
 4. Soft family shares among otherwise suitable choices.
 
-Shares only balance equal suitability ranks in baseline automatic selection. Keep capable generalists equally ranked so a family is not starved; reserve stricter ranks for genuine task-fit differences. `profileId` and `override` are explicit-user choices, not an agent budget shortcut.
+Shares only balance equal suitability ranks in baseline automatic selection. Keep capable generalists equally ranked so a family is not starved; reserve stricter ranks for genuine task-fit differences. `profileId` and `override` are explicit-user choices, not an agent budget shortcut. A `fallbackOnly` profile is reserved: never baseline- or budget-select it; it appears only as a configured fallback target or when the user explicitly names it. A `reasoningEffort` level is the exact launch effort (never above high); it does not cap the worker at runtime — verify the effective effort after launch.
 
 ### Budget-informed judgment
 
@@ -39,7 +39,7 @@ Static quota notes are not live balances; intelligence indices are not task-perf
 
 ## Launch and record
 
-Use the returned native argument array, verifying installed CLI syntax and quoting each argument if passed through a shell. Policy contains no executable templates. Ensure the target shell's `PI_HERDR_ORCHESTRATOR` is unset or `0`; `1` is an explicit orchestrator default, not a worker setting.
+Use the returned native argument array, verifying installed CLI syntax and quoting each argument if passed through a shell. Policy contains no executable templates. Effort flags (`--thinking`, `--effort`, `-c model_reasoning_effort=<level>`) come from the profile's `reasoningEffort`; never raise them above high. Ensure the target shell's `PI_HERDR_ORCHESTRATOR` is unset or `0`; `1` is an explicit orchestrator default, not a worker setting.
 
 Only after successful submission, call `herdr_route` with `action: "record"`, the returned `selectionId`, and worker `target`. This counts an actual assignment, not a preview or failed start, and is not proof of completion or ownership. Include the selected profile and any fallback in the worker report. Then arm the nonblocking watch as in the core loop.
 

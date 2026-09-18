@@ -15,6 +15,18 @@ function fixture() {
 	return { config, ready, quota, request };
 }
 
+function claudeReport(scopedUsed: number) {
+	const now = Date.now();
+	const sample = { attemptedAt: now, failed: false, sample: { observedAt: now, windows: [
+		{ id: "primary", usedPercent: 0, windowMinutes: 300, resetsAt: now + 3 * 3600000 },
+		{ id: "secondary", usedPercent: 51, windowMinutes: 10080, resetsAt: now + 25 * 3600000 },
+		{ id: "claude-weekly-scoped-fable", usedPercent: scopedUsed, windowMinutes: 10080, resetsAt: now + 25 * 3600000 },
+	] } };
+	const fable = { id: "fable", provider: "claude" as const, source: "cli" as const, profiles: ["claude-fable"], windows: ["primary", "secondary", "claude-weekly-scoped-fable"] };
+	const opus = { id: "opus", provider: "claude" as const, source: "cli" as const, profiles: ["claude-opus-5"] };
+	return { fable, opus, quota: { snapshotId: "claude-snapshot", checkedAt: now, binding: "configured", groups: [assessQuota(fable, sample, now), assessQuota(opus, sample, now)] } as QuotaReport };
+}
+
 describe("budget-informed routing", () => {
 	it("selects a suitable GLM worker with a reason without editing baseline policy", () => {
 		const { config, ready, quota, request } = fixture();
@@ -57,8 +69,43 @@ describe("budget-informed routing", () => {
 		assert.throws(() => selectRoute(config, { difficulty: "general", override: alias }, ready, [], quota), /exhausted/);
 		for (const id of ["pi-astra", "codex-astra"]) {
 			assert.throws(() => selectRoute(config, { difficulty: "general", profileId: id }, ready, [], quota), /exhausted/);
-			assert.throws(() => selectRoute(config, { ...request, budgetChoice: { ...request.budgetChoice, profileId: id } }, ready, [], quota), /exhausted/);
-			assert.match(routeBlock(config.profiles.find(p => p.id === id)!, { difficulty: "general" }, ready, quota)!, /exhausted/);
+			assert.throws(() => selectRoute(config, { ...request, budgetChoice: { ...request.budgetChoice, profileId: id } }, ready, [], quota), /reserved|exhausted/);
+			assert.match(routeBlock(config.profiles.find(p => p.id === id)!, { difficulty: "general" }, ready, quota, false, true)!, /exhausted/);
 		}
+	});
+});
+
+describe("scoped Claude allowance granularity", () => {
+	it("blocks only the Fable group when the scoped window is exhausted, keeping Opus on shared windows usable", () => {
+		const config = validateRoutingConfig(JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8")));
+		const ready: RouteAvailability[] = config.profiles.map(p => ({ harness: p.harness, provider: p.provider, model: p.model, available: true, authenticated: true, capabilities: p.capabilities, protection: p.protection, bypassPermissions: false }));
+		const { fable, opus, quota } = claudeReport(100);
+		assert.equal(quota.groups.find(g => g.id === "fable")!.exhausted, true);
+		assert.equal(quota.groups.find(g => g.id === "opus")!.exhausted, false);
+		assert.equal(quota.groups.find(g => g.id === "opus")!.modelScopedAllowanceUnknown, true);
+		assert.match(routeBlock(config.profiles.find(p => p.id === "claude-fable")!, { difficulty: "hardest" }, ready, quota)!, /exhausted/);
+		assert.equal(routeBlock(config.profiles.find(p => p.id === "claude-opus-5")!, { difficulty: "hardest" }, ready, quota, false, true), undefined);
+		assert.throws(() => selectRoute(config, { difficulty: "hardest", profileId: "claude-fable" }, ready, [], quota), /exhausted/);
+		const fallback = selectRoute(config, { difficulty: "hardest", profileId: "claude-fable", allowFallback: true }, ready, [], quota);
+		assert.equal(fallback.source, "fallback");
+		assert.equal(fallback.fallbackOf, "claude-fable");
+		assert.equal(fallback.profile.id, "claude-opus-5");
+		assert.equal(fallback.profile.reasoningEffort, "high");
+	});
+	it("keeps Fable usable when the scoped window has headroom, with the scoped window applied only to its group", () => {
+		const config = validateRoutingConfig(JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8")));
+		const ready: RouteAvailability[] = config.profiles.map(p => ({ harness: p.harness, provider: p.provider, model: p.model, available: true, authenticated: true, capabilities: p.capabilities, protection: p.protection, bypassPermissions: false }));
+		const { quota } = claudeReport(40);
+		assert.equal(quota.groups.find(g => g.id === "fable")!.exhausted, false);
+		assert.equal(quota.groups.find(g => g.id === "fable")!.modelScopedAllowanceUnknown, false);
+		assert.equal(selectRoute(config, { difficulty: "hardest" }, ready, [], quota).profile.id, "claude-fable");
+	});
+	it("rejects a budget choice for a reserved fallback-only route", () => {
+		const config = validateRoutingConfig(JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8")));
+		const ready: RouteAvailability[] = config.profiles.map(p => ({ harness: p.harness, provider: p.provider, model: p.model, available: true, authenticated: true, capabilities: p.capabilities, protection: p.protection, bypassPermissions: false }));
+		const now = Date.now();
+		const sol = { id: "sol", provider: "codex" as const, source: "oauth" as const, profiles: ["pi-sol", "codex-sol"], reservePercent: 10 };
+		const quota: QuotaReport = { snapshotId: "sol-snapshot", checkedAt: now, binding: "configured", groups: [assessQuota(sol, { attemptedAt: now, failed: false, sample: { observedAt: now, windows: [{ id: "secondary", usedPercent: 72, windowMinutes: 10080, resetsAt: now + 6 * 86400000 }] } }, now)] };
+		assert.throws(() => selectRoute(config, { difficulty: "general", budgetChoice: { profileId: "pi-astra", reason: "Trying to reserve-route via budget judgment is not a user choice.", snapshotId: quota.snapshotId } }, ready, [], quota), /reserved/);
 	});
 });

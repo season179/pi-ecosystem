@@ -61,6 +61,8 @@
         "preference": { "$ref": "#/$defs/rank" },
         "protection": { "enum": ["standard", "claude-auto", "codex-approve-for-me"] },
         "fallbacks": { "$ref": "#/$defs/labels" },
+        "fallbackOnly": { "type": "boolean", "description": "Reserved route: excluded from baseline and budget selection; reachable only as a configured fallback target or an explicit user choice." },
+        "reasoningEffort": { "enum": ["low", "medium", "high"], "description": "Exact launch effort level emitted as native effort flags; this policy never launches reasoning above high." },
         "planning": {
           "type": "object",
           "additionalProperties": false,

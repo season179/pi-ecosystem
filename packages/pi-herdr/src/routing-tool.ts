@@ -16,12 +16,14 @@ import type { QuotaMonitor } from "./quota.js";
 const ASSIGNMENT_TYPE = "pi-herdr-assignment";
 const Difficulty = StringEnum(["easy", "general", "hardest"] as const);
 const Protection = StringEnum(["standard", "claude-auto", "codex-approve-for-me"] as const);
+const ReasoningEffort = StringEnum(["low", "medium", "high"] as const);
 const Profile = Type.Object({
 	id: Type.String(), harness: StringEnum(["pi", "claude", "codex"] as const),
 	provider: Type.Optional(Type.String()), model: Type.String(), family: Type.String(),
 	enabled: Type.Boolean(), capabilities: Type.Array(Type.String()),
 	suitability: Type.Object({ easy: Type.Optional(Type.Number()), general: Type.Optional(Type.Number()), hardest: Type.Optional(Type.Number()) }),
 	preference: Type.Number(), protection: Protection, fallbacks: Type.Array(Type.String()),
+	fallbackOnly: Type.Optional(Type.Boolean()), reasoningEffort: Type.Optional(ReasoningEffort),
 });
 const Params = Type.Object({
 	action: StringEnum(["inspect", "select", "record", "exhausted"] as const),
@@ -89,14 +91,18 @@ export function routingGuidance(agentDir: string): string {
 
 /** Fixed native flags, not executable templates supplied by policy. Verify installed help first. */
 export function launchArguments(profile: RoutingProfile): string[] {
+	// A launch-time effort level, not a runtime cap: this policy never launches above high.
+	const effort = profile.reasoningEffort ?
+		profile.harness === "codex" ? ["-c", `model_reasoning_effort=${profile.reasoningEffort}`] : [profile.harness === "pi" ? "--thinking" : "--effort", profile.reasoningEffort]
+		: [];
 	if (profile.harness === "pi") {
 		if (!profile.provider) throw new Error("Pi routes require an exact provider and model ID; bare model matching is not reproducible.");
-		return ["--provider", profile.provider, "--model", profile.model];
+		return ["--provider", profile.provider, "--model", profile.model, ...effort];
 	}
-	if (profile.harness === "claude") return ["--model", profile.model, "--permission-mode", profile.protection === "claude-auto" ? "auto" : "manual"];
+	if (profile.harness === "claude") return ["--model", profile.model, "--permission-mode", profile.protection === "claude-auto" ? "auto" : "manual", ...effort];
 	return profile.protection === "codex-approve-for-me"
-		? ["--model", profile.model, "--approve-for-me"]
-		: ["--model", profile.model, "--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
+		? ["--model", profile.model, "--approve-for-me", ...effort]
+		: ["--model", profile.model, "--sandbox", "workspace-write", "--ask-for-approval", "on-request", ...effort];
 }
 
 export async function piAvailability(ctx: ExtensionContext, profiles: readonly RoutingProfile[]): Promise<RouteAvailability[]> {
