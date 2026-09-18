@@ -1,0 +1,72 @@
+{
+  "name": "@season179/pi-compaction",
+  "version": "26.9.0",
+  "description": "Pressure-aware, reversible pruning of stale tool calls and results for Pi, scored by Jev, deferring generated summaries while pruning suffices.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Season Saw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-compaction"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "compaction",
+    "context",
+    "jev",
+    "typesafe"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    "./extension": {
+      "types": "./dist/extensions/compaction.d.ts",
+      "import": "./dist/extensions/compaction.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extensions/compaction.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.85.1",
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  }
+}
