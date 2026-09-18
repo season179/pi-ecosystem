@@ -91,6 +91,27 @@ describe("pure route selection", () => {
 		assert.equal(selectRoute(c, { difficulty: "easy" }, a).profile.id, "pi-glm-flash");
 		for (const p of c.profiles) assert.equal(selectRoute(c, { ...general, profileId: p.id }, a).profile.id, p.id);
 	});
+	it("gives Claude a share of general work without an explicit override", () => {
+		const c = example(), a = ready(c.profiles);
+		const history: Array<{ family: string }> = [];
+		const selected = new Set<string>();
+		for (let i = 0; i < c.historyWindow; i++) {
+			const choice = selectRoute(c, general, a, history);
+			assert.equal(choice.source, "policy");
+			selected.add(choice.profile.id);
+			history.push({ family: choice.profile.family });
+		}
+		assert.deepEqual(selected, new Set(["pi-astra", "pi-glm", "claude-fable"]));
+	});
+	it("requires native readiness for an underused Claude route instead of assuming it", () => {
+		const c = example(), a = ready(c.profiles);
+		const history = [{ family: "astra" }, { family: "glm" }];
+		const unchecked = selectRoute(c, general, a.filter(p => p.harness !== "claude"), history);
+		assert.equal(unchecked.source, "fallback");
+		assert.equal(unchecked.fallbackOf, "claude-fable");
+		assert.match(unchecked.warnings.join(), /readiness unknown/);
+		assert.equal(selectRoute(c, general, a, history).profile.id, "claude-fable");
+	});
 	it("groups Codex/Pi Astra and both GLMs over the configurable rolling window", () => {
 		const c = example(), a = ready(c.profiles);
 		c.historyWindow = 2;
@@ -112,7 +133,7 @@ describe("pure route selection", () => {
 	});
 	it("requires image in both hints and runtime metadata, never fills shares with unsuitable GLM", () => {
 		const c = example(), a = ready(c.profiles);
-		assert.equal(selectRoute(c, { ...general, requiredCapabilities: ["image"] }, a, [{ family: "astra" }]).profile.id, "pi-astra");
+		assert.equal(selectRoute(c, { ...general, requiredCapabilities: ["image"] }, a, [{ family: "astra" }]).profile.id, "claude-fable");
 		assert.throws(() => selectRoute(c, { ...general, profileId: "pi-glm", requiredCapabilities: ["image"] }, a), /capability/);
 		a.find(p => p.model === "glm-5.3-flash")!.capabilities = ["text"];
 		assert.throws(() => selectRoute(c, { ...general, profileId: "pi-glm-flash", requiredCapabilities: ["image"] }, a), /not verified/);

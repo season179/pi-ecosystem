@@ -1,6 +1,6 @@
 # Routing decisions
 
-Read for a missing/invalid policy, external harness, image/risky task, fallback, explicit override, or policy edit. Ordinary configured Pi text dispatches use the core loop without loading this file.
+Read when policy includes an eligible external harness, or for missing/invalid policy, image/risky tasks, fallbacks, explicit overrides, or policy edits.
 
 ## Policy and selection
 
@@ -12,12 +12,14 @@ Choose in this order:
 3. Task difficulty, likely successful completion time, cost and quota **when actually known**.
 4. Soft family shares among otherwise suitable choices.
 
-Static quota notes are not live balances; intelligence indices are not task-performance guarantees. Never create work, delay urgent work, or choose an unsuitable model to fill a percentage. When task-specific judgment differs from configured ranks, use an explicit safe selection rather than silently editing policy.
+Shares only balance equal suitability ranks. Keep capable generalists equally ranked so a family is not starved; reserve stricter ranks for genuine task-fit differences. Use automatic selection unless the user specifies a route: `profileId` and `override` bypass share balancing.
+
+Static quota notes are not live balances; intelligence indices are not task-performance guarantees. Never create work, delay urgent work, or choose an unsuitable model to fill a percentage. If task fit contradicts configured ranks, report the mismatch rather than silently pinning a route or editing policy.
 
 ## Exceptional routes
 
 - **Missing/invalid policy:** report the actionable path/setup error returned by `herdr_route`. Do not invent defaults. An explicit one-off user choice can use a validated `override` after readiness checks; report the policy error without rewriting defaults.
-- **External harness:** check its current native model identifiers, auth readiness and supported permission flags. Supply non-secret evidence in `externalChecks`; these assertions are advisory, not proof of a live worker's settings. Verify effective protection after launch and before substantive work. Pi profiles use Pi's exact model/auth registry instead of a duplicate credential database.
+- **External harness:** check eligible candidates before first dispatch; do not confuse unchecked with unavailable. Check current native model identifiers, auth readiness and supported permission flags. Supply non-secret evidence in `externalChecks`; these assertions are advisory, not proof of a live worker's settings. Verify effective protection after launch and before substantive work. Pi profiles use Pi's exact model/auth registry instead of a duplicate credential database.
 - **Images:** verify actual image-input support on the selected route. A model label or configured capability hint alone is insufficient.
 - **Risky work:** request the required protections through `herdr_route`; never relabel risk to obtain a preferred model. Protection settings do not grant permission for the operation. A refusal must not be routed around.
 - **Fallback:** require the same task capability and protection constraints. Report the original route, substitute and reason. If none is eligible, surface the blocker; do not silently downgrade. An explicit user choice needs `allowFallback` before substitution.

@@ -10,15 +10,15 @@
       "family": "fable",
       "enabled": true,
       "capabilities": ["text", "image"],
-      "suitability": { "general": 1, "hardest": 0 },
+      "suitability": { "general": 0, "hardest": 0 },
       "preference": 2,
       "protection": "claude-auto",
       "fallbacks": ["codex-astra"],
       "planning": {
         "source": "User-supplied planning inputs; not independently verified benchmarks, prices, or live quota",
-        "date": "2026-09-17",
+        "date": "2026-09-18",
         "intelligenceIndex": 53,
-        "quotaNote": "Roughly one-fifth of Astra quota; reserve for hardest work. Remaining quota unknown."
+        "quotaNote": "Roughly one-fifth of Astra quota; prefer hardest and share general work. Remaining quota unknown."
       }
     },
     {
