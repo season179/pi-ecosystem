@@ -20,6 +20,7 @@ export interface WindowBudget extends QuotaWindow {
 	remainingHours?: number;
 	/** A pacing reference, not an assumed constant workload. */
 	evenPaceRemainingPercent?: number;
+	/** Two-sample descriptive burn; drives pressure only when pacing does not contradict it. */
 	burnPercentPerHour?: number;
 	projectedExhaustionHours?: number;
 }
@@ -33,6 +34,8 @@ export interface QuotaBudget {
 	reservePercent: number;
 	windows: WindowBudget[];
 	missingWindows: string[];
+	/** True when the provider has model-scoped allowances (Claude) but this reading reports none; aggregate windows are not model-specific headroom. */
+	modelScopedAllowanceUnknown: boolean;
 	exhausted: boolean;
 	pressure: "unknown" | "normal" | "conserve" | "surplus" | "low" | "exhausted";
 	warnings: string[];
@@ -117,13 +120,20 @@ export function assessQuota(group: QuotaGroup, cache: CacheEntry | undefined, no
 	let pressure: QuotaBudget["pressure"] = applicable.length ? "normal" : "unknown";
 	if (exhausted) pressure = "exhausted";
 	else if (applicable.some(w => w.usablePercent <= 10)) pressure = "low";
-	else if (applicable.some(w => (w.evenPaceRemainingPercent !== undefined && w.usablePercent + 10 < w.evenPaceRemainingPercent) || (w.projectedExhaustionHours !== undefined && w.remainingHours !== undefined && w.projectedExhaustionHours < w.remainingHours))) pressure = "conserve";
+	else if (applicable.some(w => w.evenPaceRemainingPercent !== undefined && w.usablePercent + 10 < w.evenPaceRemainingPercent)) pressure = "conserve";
+	// Measured burn may drive conserve only with a pacing reference, and only when the window
+	// is not clearly ahead of even pace: a burst inflated burn rate is descriptive there, not
+	// a deficit. Without windowMinutes there is no reference to corroborate burn at all.
+	else if (applicable.some(w => w.evenPaceRemainingPercent !== undefined && w.usablePercent <= w.evenPaceRemainingPercent + 10 && w.projectedExhaustionHours !== undefined && w.remainingHours !== undefined && w.projectedExhaustionHours < w.remainingHours)) pressure = "conserve";
 	else if (applicable.some(w => w.evenPaceRemainingPercent !== undefined && w.usablePercent > w.evenPaceRemainingPercent + 10)) pressure = "surplus";
 	const warnings: string[] = [];
 	if (["low", "conserve", "exhausted"].includes(pressure)) warnings.push(`${group.id}: ${pressure}; preserve orchestration capacity, shift suitable work, and tell the user if alternatives are constrained. Do not buy or enable another provider automatically.`);
 	if (state !== "fresh") warnings.push(`${group.id}: quota ${state}; check CodexBar authentication/source. Last readings are historical, not routing evidence.`);
 	if (windows.some(w => w.applicable && w.state === "reset-passed")) warnings.push(`${group.id}: reset passed; allowance unknown until the next scheduled check.`);
-	return { id: group.id, provider: group.provider, profiles: [...group.profiles], state, ...(current ? { observedAt: current.observedAt } : {}), ...(cache ? { attemptedAt: cache.attemptedAt } : {}), reservePercent: reserve, windows, missingWindows: applicableIds.filter(id => !windows.some(w => w.id === id && w.state === "fresh")), exhausted, pressure, warnings };
+	// Claude reports model-scoped weekly limits (e.g. Fable) only via oauth/web sources; a
+	// reading without any such window must not be presented as model-specific headroom.
+	const modelScopedAllowanceUnknown = group.provider === "claude" && windows.length > 0 && !windows.some(w => w.id !== "primary" && w.id !== "secondary");
+	return { id: group.id, provider: group.provider, profiles: [...group.profiles], state, ...(current ? { observedAt: current.observedAt } : {}), ...(cache ? { attemptedAt: cache.attemptedAt } : {}), reservePercent: reserve, windows, missingWindows: applicableIds.filter(id => !windows.some(w => w.id === id && w.state === "fresh")), modelScopedAllowanceUnknown, exhausted, pressure, warnings };
 }
 
 export class QuotaMonitor {
@@ -255,6 +265,6 @@ export function quotaSummary(report: QuotaReport): string {
 	if (!report.groups.length) return "Quota monitoring is not configured; no live subscription data. See docs/QUOTA.md.";
 	return report.groups.map(g => {
 		const windows = g.windows.filter(w => w.applicable).map(w => `${w.id} ${Math.round(w.remainingPercent)}% left${w.resetsAt === undefined ? ", reset unknown" : `, reset ${new Date(w.resetsAt).toISOString()}`}${w.state === "reset-passed" ? " (historical)" : ""}`).join("; ");
-		return `${g.id}: ${g.state}, ${g.pressure}; ${windows || "allowance unknown"}; reserve ${g.reservePercent}%; observed ${g.observedAt ? new Date(g.observedAt).toISOString() : "never"}${g.missingWindows.length ? `; missing ${g.missingWindows.join(",")}` : ""}`;
+		return `${g.id}: ${g.state}, ${g.pressure}; ${windows || "allowance unknown"}; reserve ${g.reservePercent}%; observed ${g.observedAt ? new Date(g.observedAt).toISOString() : "never"}${g.missingWindows.length ? `; missing ${g.missingWindows.join(",")}` : ""}${g.modelScopedAllowanceUnknown ? "; Claude model-scoped weekly limits (e.g. Fable) not reported by this source; shared windows are not model-specific headroom" : ""}`;
 	}).join("\n");
 }

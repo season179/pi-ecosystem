@@ -671,6 +671,13 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		const warningCount = () => pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").length;
 		assert.equal(warningCount(), 1);
 		assert.ok(pi.messages.every(m => m.options.triggerTurn === false));
+		// Exactly one user-visible surface: the notification. The steer message keeps model
+		// context without rendering a second transcript copy.
+		const quotaNotices = () => pi.notices.filter(n => /preserve orchestration capacity/.test(n.message));
+		assert.equal(quotaNotices().length, 1);
+		assert.equal(quotaNotices()[0]!.level, "warning");
+		assert.equal(pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").every(m => m.message.display === false), true);
+		assert.equal(pi.messages.filter(m => m.message.customType === "pi-herdr-limits").every(m => m.message.display === true), true, "/limits remains the displayed command surface");
 		await pi.commands.get("limits")!.handler("", pi.ctx);
 		assert.equal(warningCount(), 1, "reusing cache does not repeat warnings");
 		const contexts = await pi.emit("context", { messages: [] }) as Array<any>;
@@ -681,6 +688,7 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		assert.equal(warningCount(), 1, "generic rate limits are not exhaustion");
 		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit" } });
 		assert.equal(warningCount(), 2);
+		assert.equal(quotaNotices().length, 2, "exhaustion is notified once and steered once");
 		assert.match(pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").at(-1)!.message.content, /exhausted/);
 		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1, "exhaustion does not force polling");
 		await pi.commands.get("orchestrate")!.handler("off", pi.ctx);

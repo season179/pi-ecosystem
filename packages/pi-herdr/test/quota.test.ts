@@ -99,6 +99,53 @@ describe("budget evidence, not a model scheduler", () => {
 			assert.equal(b.windows[0]!.burnPercentPerHour, undefined);
 		}
 	});
+	it("replays the GLM screenshot: burst burn on an ahead-of-pace window is surplus, not conserve", () => {
+		const glm: QuotaGroup = { id: "glm", provider: "zai", source: "api", profiles: ["pi-glm", "pi-glm-flash"] };
+		const observed = Date.parse("2026-09-18T08:51:52Z");
+		const sample: QuotaSample = { observedAt: observed, accountKey: "g".repeat(64), windows: [
+			{ id: "primary", usedPercent: 20, resetsAt: Date.parse("2026-09-18T09:39:13Z"), windowMinutes: 300 },
+			{ id: "secondary", usedPercent: 23, resetsAt: Date.parse("2026-09-19T17:57:50Z"), windowMinutes: 10080 },
+			{ id: "zai-mcp", usedPercent: 0, resetsAt: 1790186270000, windowMinutes: 43200 },
+		] };
+		const previous: QuotaSample = { ...sample, observedAt: Date.parse("2026-09-18T08:18:37Z"), windows: sample.windows.map(w => ({ ...w, usedPercent: w.id === "primary" ? 5 : w.id === "secondary" ? 20 : 0 })) };
+		const b = assessQuota(glm, { attemptedAt: observed, sample, previous, failed: false }, observed);
+		assert.equal(b.pressure, "surplus", "both applicable windows are far ahead of even pace");
+		const weekly = b.windows.find(w => w.id === "secondary")!;
+		// Descriptive burst evidence survives; it just no longer overrides pacing.
+		assert.ok(Math.abs(weekly.burnPercentPerHour! - 5.41) < 0.01);
+		assert.ok(Math.abs(weekly.projectedExhaustionHours! - 14.22) < 0.02);
+		assert.ok(Math.abs(weekly.evenPaceRemainingPercent! - 19.7) < 0.05);
+		const primary = b.windows.find(w => w.id === "primary")!;
+		assert.ok(Math.abs(primary.burnPercentPerHour! - 27.07) < 0.01);
+		assert.ok(Math.abs(primary.evenPaceRemainingPercent! - 15.78) < 0.02);
+	});
+	it("still conserves on burn that would exhaust before reset when not ahead of even pace", () => {
+		const s = makeSample(60); s.windows[0]!.resetsAt = now + 58.8 * 3_600_000; // even pace 35% vs usable 40%: in band
+		const previous: QuotaSample = { ...s, observedAt: now - 1_800_000, windows: s.windows.map(w => ({ ...w, usedPercent: 30 })) };
+		const fable: QuotaGroup = { id: "fable", provider: "claude", source: "cli", profiles: ["claude-fable"] };
+		const b = assessQuota(fable, { ...entry(s), previous }, now);
+		assert.equal(b.windows[0]!.burnPercentPerHour, 60);
+		assert.equal(b.pressure, "conserve");
+	});
+	it("treats burn without a pacing reference as descriptive only, never pressure", () => {
+		const s = makeSample(40); s.windows[0] = { id: "secondary", usedPercent: 40, resetsAt: now + 10 * 3_600_000 };
+		const previous = { ...makeSample(10, now - 1_800_000), windows: [{ id: "secondary", usedPercent: 10, resetsAt: now + 10 * 3_600_000 }] };
+		const b = assessQuota({ ...group, reservePercent: 0 }, { ...entry(s), previous }, now);
+		assert.equal(b.windows[0]!.burnPercentPerHour, 60);
+		assert.equal(b.windows[0]!.projectedExhaustionHours, 1);
+		assert.equal(b.pressure, "normal");
+	});
+	it("discloses that Claude readings without model-scoped windows are not model-specific headroom", () => {
+		const fable: QuotaGroup = { id: "fable", provider: "claude", source: "cli", profiles: ["claude-fable"] };
+		const aggregate = assessQuota(fable, entry(), now);
+		assert.equal(aggregate.modelScopedAllowanceUnknown, true);
+		assert.match(quotaSummary({ snapshotId: "s", checkedAt: now, groups: [aggregate], binding: "" }), /model-scoped weekly limits \(e\.g\. Fable\) not reported/);
+		const s = makeSample(50);
+		s.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now + day, windowMinutes: 10080 });
+		const scoped = assessQuota(fable, entry(s), now);
+		assert.equal(scoped.modelScopedAllowanceUnknown, false);
+		assert.equal(assessQuota(group, entry(), now).modelScopedAllowanceUnknown, false, "non-Claude providers have no scoped-limit concept here");
+	});
 });
 
 describe("shared quota cache and lifecycle", () => {

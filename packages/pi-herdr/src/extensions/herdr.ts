@@ -251,9 +251,11 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				quotaWarnings.set(group.id, signature);
 				if (!group.warnings.length) continue;
 				const text = group.warnings.join("\n") + "\n" + quotaSummary({ ...report, groups: [group] });
+				// One user-visible surface: the notification. The steer message below keeps model
+				// context without rendering a second copy in the transcript.
 				notify(uiCtx, text, "warning");
 				try {
-					pi.sendMessage({ customType: "pi-herdr-quota-warning", content: text, display: true }, { deliverAs: "steer", triggerTurn: false });
+					pi.sendMessage({ customType: "pi-herdr-quota-warning", content: text, display: false }, { deliverAs: "steer", triggerTurn: false });
 				} catch { /* Never wake an idle model or fail orchestration for reporting. */ }
 			}
 		},
