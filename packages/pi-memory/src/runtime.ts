@@ -53,6 +53,7 @@ import {
 	type MemorySnapshot,
 	type StoreGuard,
 } from "./store.js";
+import { semanticRecallStatusLine, type SemanticRecallStatus } from "./semantic.js";
 
 export type MemoryScope = "project" | "legacy-global";
 export type RecallScope = MemoryScope | "all";
@@ -861,9 +862,14 @@ export interface MemoryStatusData {
 	/** What the last context hook actually sent (may lag the current render). */
 	lastAssembled: AssembledInjection | undefined;
 	configWarnings: string[];
+	/** Semantic recall availability at status time (config + key state only). */
+	semantic?: SemanticRecallStatus;
 }
 
-export async function gatherMemoryStatus(state: MemorySessionState): Promise<MemoryStatusData> {
+export async function gatherMemoryStatus(
+	state: MemorySessionState,
+	semantic?: SemanticRecallStatus,
+): Promise<MemoryStatusData> {
 	const [project, legacy] = await Promise.all([
 		collectStoreStatus(state, "project"),
 		collectStoreStatus(state, "legacy-global"),
@@ -899,6 +905,7 @@ export async function gatherMemoryStatus(state: MemorySessionState): Promise<Mem
 		catalog: projectInjection,
 		lastAssembled: state.lastAssembled,
 		configWarnings: [...state.config.warnings, ...state.effectiveMode.warnings],
+		...(semantic !== undefined ? { semantic } : {}),
 	};
 }
 
@@ -926,6 +933,7 @@ export function renderMemoryStatus(data: MemoryStatusData): string {
 	}
 	lines.push(`Project store: ${storeStatusLine(data.project)}`);
 	lines.push(`Legacy-global store: ${storeStatusLine(data.legacy)}`);
+	if (data.semantic !== undefined) lines.push(semanticRecallStatusLine(data.semantic));
 	lines.push("Eligible now (what the next request would carry):");
 	lines.push(...scopeInjectionLines("Project", data.injection.project, true).map((line) => `  ${line}`));
 	lines.push(...scopeInjectionLines("Legacy-global", data.injection.legacy, false).map((line) => `  ${line}`));

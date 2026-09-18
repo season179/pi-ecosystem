@@ -1,5 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { convertToLlm, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Fetch } from "@typesafe-ai/sdk";
 import { Type } from "typebox";
 import { formatMemoryError, isMemoryError } from "../errors.js";
 import {
@@ -31,6 +32,12 @@ import {
 	type MemorySessionState,
 	type ScopedMemory,
 } from "../runtime.js";
+import {
+	describeSemanticRecallStatus,
+	semanticRecall,
+	type SemanticFallbackReason,
+	type SemanticRecallStatus,
+} from "../semantic.js";
 import {
 	MEMORY_INJECTION_VALUES,
 	memoryInjectionOf,
@@ -97,6 +104,35 @@ const RecallParams = Type.Object({
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, default: 5 })),
 	includeDetails: Type.Optional(Type.Boolean({ default: true, description: "Include memory bodies in the result" })),
 });
+
+/** How the recall tool produced its matches; surfaced in tool details and status. */
+export type RecallRetrieval =
+	| { method: "semantic"; model: string; scored: number; batches: number; minRelevance: number }
+	| { method: "deterministic"; reason: SemanticFallbackReason | "exact" | "empty-query" };
+
+const RECALL_ABORTED_MESSAGE =
+	"[PI_MEMORY_RECALL_ABORTED] recall was cancelled before semantic matching completed; no results were published.";
+
+function semanticFallbackDetail(reason: SemanticFallbackReason, detail: string | undefined): string {
+	switch (reason) {
+		case "no-candidates":
+			return "no candidates to score";
+		case "config-absent":
+			return "no typesafe.json configured";
+		case "disabled":
+			return "semantic recall is disabled in typesafe.json";
+		case "malformed-config":
+			return "typesafe.json is malformed";
+		case "missing-key":
+			return "no API key configured (set TYPESAFE_API_KEY or apiKeyFile in typesafe.json)";
+		case "api-error":
+			return `semantic request failed${detail === undefined ? "" : ` (${detail})`}`;
+		case "timeout":
+			return "the whole-operation time budget was exceeded";
+		case "incomplete-response":
+			return "the response was incomplete or malformed";
+	}
+}
 
 /**
  * Compatibility shim shared by both tools; runs on every call and is
@@ -340,8 +376,18 @@ function collectScopeBlocks(
 	return { blocks, assembled: describeAssembledBlocks(render), exclusions: [] };
 }
 
-function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
-	const runtime = new MemoryRuntime({ agentDir });
+/** Injectable seams for tests and SDK embeddings; defaults use the process environment and global fetch. */
+export interface MemoryExtensionSeams {
+	env?: NodeJS.ProcessEnv;
+	/** Injectable transport tested at the real SDK boundary. */
+	fetch?: Fetch;
+	now?: () => number;
+}
+
+function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: MemoryExtensionSeams = {}): void {
+	const runtime = new MemoryRuntime({ agentDir, ...(seams.env !== undefined ? { env: seams.env } : {}) });
+	const semanticEnv = seams.env ?? process.env;
+	const semanticNow = seams.now;
 
 	// Session lifecycle: every start reason (startup/reload/new/resume/fork)
 	// replaces the state promise synchronously, orphaning in-flight stale
@@ -543,14 +589,15 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 		name: "recall",
 		label: "Recall",
 		description:
-			"Search durable memories by exact id/title or case-insensitive word overlap across title, tags, and cue. scope selects project, legacy-global, or all (both stores merged through one ranking and one limit); every result is labeled with its scope. Exact matches rank first, then overlap and recency. An empty query returns the most recently updated memories.",
+			"Search durable memories by exact id/title, or by meaning. When Jev semantic recall is configured (typesafe.json with memory.enabled), every allowed-scope candidate is scored for relevance to a non-exact query, so conceptually related memories are found even without shared keywords; results include only candidates at or above the configured relevance threshold. Without it, matching is case-insensitive word overlap across title, tags, and cue. Exact id/title lookups and empty queries are always resolved locally without network. scope selects project, legacy-global, or all (both stores merged through one ranking and one limit); every result is labeled with its scope.",
 		promptSnippet: "Search durable memories from prior Pi sessions",
 		parameters: RecallParams,
 		prepareArguments: prepareScopeArguments,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			try {
 				const state = await runtime.state(ctx.cwd);
 				const includeDetails = params.includeDetails ?? true;
+				const limit = params.limit ?? 5;
 				const candidates: ScopedMemory[] = [];
 				const notes: string[] = [];
 
@@ -568,7 +615,74 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 					for (const memory of snapshot.memories) candidates.push({ scope: "legacy-global", memory });
 				}
 
-				const matches = recallScoped(candidates, params.query, params.limit ?? 5);
+				// Exact id/title lookups and empty queries stay fully local and
+				// deterministic: exact requested entries are never hidden behind a
+				// relevance threshold, and no network is used.
+				const normalizedQuery = params.query.trim().toLocaleLowerCase();
+				const exactLookup =
+					normalizedQuery !== "" &&
+					candidates.some(
+						({ memory }) =>
+							memory.id.toLocaleLowerCase() === normalizedQuery ||
+							memory.title.toLocaleLowerCase() === normalizedQuery,
+					);
+
+				let matches: ScopedMemory[];
+				let retrieval: RecallRetrieval;
+				if (normalizedQuery === "" || candidates.length === 0 || exactLookup) {
+					matches = recallScoped(candidates, params.query, limit);
+					retrieval =
+						normalizedQuery === ""
+							? { method: "deterministic", reason: "empty-query" }
+							: candidates.length === 0
+								? { method: "deterministic", reason: "no-candidates" }
+								: { method: "deterministic", reason: "exact" };
+				} else {
+					const outcome = await semanticRecall(params.query, candidates, {
+						agentDir,
+						env: semanticEnv,
+						limit,
+						...(signal !== undefined ? { signal } : {}),
+						...(seams.fetch !== undefined ? { fetch: seams.fetch } : {}),
+						...(semanticNow !== undefined ? { now: semanticNow } : {}),
+					});
+					if (outcome.kind === "matches") {
+						matches = outcome.matches;
+						retrieval = {
+								method: "semantic",
+								model: outcome.model,
+								scored: outcome.scored,
+								batches: outcome.batches,
+								minRelevance: outcome.minRelevance,
+							};
+					} else if (outcome.kind === "aborted") {
+						// Cancellation is distinct from failure: publish nothing, never a
+						// late deterministic fallback with stale matches.
+						throw new Error(RECALL_ABORTED_MESSAGE);
+					} else {
+						matches = recallScoped(candidates, params.query, limit);
+						retrieval = { method: "deterministic", reason: outcome.reason };
+						// Absent config, explicit disable, and empty candidate sets are
+						// normal off states: quiet, no model-visible note. Only an
+						// attempted semantic recall that failed is diagnosed.
+						const attempted =
+							outcome.reason !== "config-absent" &&
+							outcome.reason !== "disabled" &&
+							outcome.reason !== "no-candidates";
+						if (attempted) {
+							diagnoseOnce(
+								state,
+								ctx,
+								`semantic-fallback:${outcome.reason}`,
+								`pi-memory: semantic recall unavailable — ${semanticFallbackDetail(outcome.reason, outcome.detail)}; recall used deterministic word-overlap matching.`,
+							);
+							notes.push(
+								`Note: semantic recall was unavailable (${semanticFallbackDetail(outcome.reason, outcome.detail)}); results use deterministic word-overlap matching.`,
+							);
+						}
+					}
+				}
+
 				const body =
 					matches.length === 0
 						? "No memories found."
@@ -578,6 +692,7 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 					details: {
 						scope: params.scope,
 						matches: matches.map((match) => structuredMemory(match, includeDetails)),
+						retrieval,
 						...(notes.length > 0 ? { notes } : {}),
 					},
 				};
@@ -645,7 +760,8 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 					// Current eligibility must reflect the current mode; lastAssembled
 					// stays the historical record of the previous request.
 					await runtime.refreshMode(state);
-					emitCommandOutput(ctx, renderMemoryStatus(await gatherMemoryStatus(state)));
+					const semantic = await describeSemanticRecallStatus(agentDir, semanticEnv);
+					emitCommandOutput(ctx, renderMemoryStatus(await gatherMemoryStatus(state, semantic)));
 					return;
 				}
 
@@ -688,8 +804,9 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string): void {
 }
 
 /** Factory for SDK embeddings whose session uses a non-process-global agentDir. */
-export function createMemoryExtension(options: { agentDir: string }): (pi: ExtensionAPI) => void {
-	return (pi) => registerMemoryExtension(pi, options.agentDir);
+export function createMemoryExtension(options: { agentDir: string } & MemoryExtensionSeams): (pi: ExtensionAPI) => void {
+	const { agentDir, ...seams } = options;
+	return (pi) => registerMemoryExtension(pi, agentDir, seams);
 }
 
 /** Standard Pi package entrypoint, bound to Pi's documented agent directory. */

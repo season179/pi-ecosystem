@@ -225,12 +225,75 @@ Recovery that still exceeds the injection cap returns
 - `recall`: search `project`, `legacy-global`, or `all`; results are scope-labeled.
 
 IDs are immutable (`m_aaaaaaaaaa`). Recall before updating or deleting so the
-ID and scope are known. Exact ID/title matches rank first, then word overlap
-across title, tags, and cue, then recency. An empty query returns recent entries.
-`includeDetails=false` omits bodies from recall results; it does not change the
-memory's injection classification. The default includes bodies. Search matches
-metadata, not body text. Recall and local show expose the normalized injection
-classification; remember results report selection and post-change scope budget usage.
+ID and scope are known. Exact ID/title matches and empty queries are always
+resolved locally: exact matches rank first, then word overlap across title,
+tags, and cue, then recency; an empty query returns recent entries. With Jev
+semantic recall configured (below), any other query scores **every**
+allowed-scope candidate for meaning — paraphrase and synonym matches are
+found even with zero shared keywords — and only candidates at or above the
+configured relevance threshold are returned; there is no lexical backfill
+below the threshold. `includeDetails=false` omits bodies from recall results;
+it does not change the memory's injection classification. The default includes
+bodies. Recall and local show expose the normalized injection classification;
+remember results report selection and post-change scope budget usage. Every
+recall result reports its retrieval method (`semantic` or `deterministic`) in
+the tool `details`.
+
+### Jev Semantic Recall (optional)
+
+When the shared `<agentDir>/typesafe.json` enables it, non-exact recall
+queries are scored by the TypeSafe Jev model through the official
+`@typesafe-ai/sdk`: each request carries the query plus bounded candidate
+views (title, tags, cue, and up to 1,200 characters of body) in batches of at
+most 16 candidates, one independent yes/no relevance question per candidate
+whose instructions name `state.candidates[i]` explicitly. All batches share
+one whole-operation deadline (`timeoutMs`, default 3000 ms) enforced by an
+abort signal plus a hard race; there are no SDK retries. A candidate scores
+its yes-probability; results keep candidates at or above `minRelevance`
+(default 0.5), ranked by relevance, then recency, then id, with scope as the
+final tie-break — the same ordering keys as deterministic matching. Duplicate
+ids in different scopes are scored and labeled independently.
+
+Configuration (`~/.pi/agent/typesafe.json` by default; the memory-related
+fields are shown, unrelated fields for other consumers are ignored):
+
+```json
+{
+  "model": "jev-1.13.0",
+  "timeoutMs": 3000,
+  "apiKeyFile": "typesafe.key",
+  "memory": { "enabled": true, "minRelevance": 0.5 }
+}
+
+```
+
+- `model` matches `/^[a-zA-Z0-9._-]{1,80}$/`; default `jev-1.13.0`.
+- `timeoutMs` is an integer 1–10000; default 3000. It bounds the **entire**
+  semantic operation, all batches included.
+- `minRelevance` is 0–1; default 0.5. `memory.enabled` defaults to false, so
+  the feature is off unless explicitly enabled — an absent config file leaves
+  recall fully deterministic and quiet.
+- The API key is read at call time from `TYPESAFE_API_KEY`, else the trimmed
+  contents of `apiKeyFile` (relative to the agent directory, or absolute).
+  Install a key file with `install -m 600 <key-file> <agentDir>/typesafe.key`;
+  never paste a real key into shell history or the config. No key is hardcoded.
+  Config and key are re-read on every recall, so installing the key file later
+  activates the feature without restarting (existing loaded code only — code
+  changes still need a rebuild plus reload or a new session).
+- Requests go only to the pinned official endpoint `https://api.typesafe.ai`
+(the SDK client sets it explicitly, so `TYPESAFE_BASE_URL` cannot redirect
+  memories or the key), with SDK logging explicitly off so
+  `TYPESAFE_LOG_LEVEL=debug` cannot log request bodies or headers.
+
+Failure behavior is always safe: a missing key, malformed config, provider
+error, exceeded deadline, or incomplete/malformed answer set falls back to
+the existing deterministic word-overlap ranking — semantic coverage is all
+candidates or none, never a silent partial claim — with a once-per-session
+bounded diagnostic and a note in the tool result. `/pi-memory status` shows
+the current semantic availability. User/session cancellation is distinct:
+aborted recalls publish nothing (no stale fallback matches). While enabled,
+semantic recall sends candidate titles, tags, cues, and bounded bodies to the
+TypeSafe provider in addition to what automatic injection already sends.
 
 ### Argument Schema
 
@@ -473,6 +536,12 @@ retention policy, redaction service, remote deletion, or cross-store deletion.
   leaves corrupt files untouched and currently has no repair/migration command.
 - **No tools:** confirm the package is installed and enabled, then build it and
   reload Pi. For local loading, use `pi -e ./packages/pi-memory` after building.
+- **Semantic recall never activates:** `/pi-memory status` shows the cause —
+  absent config, `memory.enabled` false, a malformed `typesafe.json`
+  (deterministic behavior with a visible warning), or a missing API key
+  (`TYPESAFE_API_KEY` or `apiKeyFile`). Recall results then report
+  `deterministic` retrieval in the tool details; cancellation reports
+  `PI_MEMORY_RECALL_ABORTED` and publishes nothing.
 
 ## Local Development
 
