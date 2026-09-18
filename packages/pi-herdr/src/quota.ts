@@ -34,8 +34,10 @@ export interface QuotaBudget {
 	reservePercent: number;
 	windows: WindowBudget[];
 	missingWindows: string[];
-	/** True when the provider has model-scoped allowances (Claude) but this reading reports none; aggregate windows are not model-specific headroom. */
+	/** True when the provider has model-scoped allowances (Claude) that no explicitly mapped, currently fresh scoped window covers; aggregate windows are not model-specific headroom. */
 	modelScopedAllowanceUnknown: boolean;
+	/** Recognized scoped window IDs present in the reading but not mapped for this group (explicit mapping is a user assertion). */
+	unmappedScopedWindows: string[];
 	exhausted: boolean;
 	pressure: "unknown" | "normal" | "conserve" | "surplus" | "low" | "exhausted";
 	warnings: string[];
@@ -49,6 +51,8 @@ export interface QuotaReport {
 }
 const MAX_CACHE_BYTES = 64 * 1024;
 const BINDING = "Subscription/profile bindings are explicitly configured, not inferred or verified from model names. Recheck bindings after account changes; native CLI and Pi account selection can differ.";
+/** Source-reported Claude model-scoped weekly window IDs; a generic tertiary window is not proof of model-scoped coverage. */
+const CLAUDE_SCOPED_WINDOW_ID = /^claude-weekly-scoped-[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 
 function readJson(path: string): unknown {
 	try {
@@ -130,10 +134,13 @@ export function assessQuota(group: QuotaGroup, cache: CacheEntry | undefined, no
 	if (["low", "conserve", "exhausted"].includes(pressure)) warnings.push(`${group.id}: ${pressure}; preserve orchestration capacity, shift suitable work, and tell the user if alternatives are constrained. Do not buy or enable another provider automatically.`);
 	if (state !== "fresh") warnings.push(`${group.id}: quota ${state}; check CodexBar authentication/source. Last readings are historical, not routing evidence.`);
 	if (windows.some(w => w.applicable && w.state === "reset-passed")) warnings.push(`${group.id}: reset passed; allowance unknown until the next scheduled check.`);
-	// Claude reports model-scoped weekly limits (e.g. Fable) only via oauth/web sources; a
-	// reading without any such window must not be presented as model-specific headroom.
-	const modelScopedAllowanceUnknown = group.provider === "claude" && windows.length > 0 && !windows.some(w => w.id !== "primary" && w.id !== "secondary");
-	return { id: group.id, provider: group.provider, profiles: [...group.profiles], state, ...(current ? { observedAt: current.observedAt } : {}), ...(cache ? { attemptedAt: cache.attemptedAt } : {}), reservePercent: reserve, windows, missingWindows: applicableIds.filter(id => !windows.some(w => w.id === id && w.state === "fresh")), modelScopedAllowanceUnknown, exhausted, pressure, warnings };
+	// Claude model-scoped allowance counts as known only through an explicit mapping to a
+	// source-reported fresh scoped window. Defaults, unmapped scoped readings, generic
+	// tertiary/extras, missing/reset-passed windows and absent samples all stay unknown.
+	const mappedScopedIds = group.provider === "claude" ? applicableIds.filter(id => CLAUDE_SCOPED_WINDOW_ID.test(id)) : [];
+	const modelScopedAllowanceUnknown = group.provider === "claude" && !windows.some(w => mappedScopedIds.includes(w.id) && w.state === "fresh");
+	const unmappedScopedWindows = group.provider === "claude" ? windows.filter(w => CLAUDE_SCOPED_WINDOW_ID.test(w.id) && !mappedScopedIds.includes(w.id)).map(w => w.id) : [];
+	return { id: group.id, provider: group.provider, profiles: [...group.profiles], state, ...(current ? { observedAt: current.observedAt } : {}), ...(cache ? { attemptedAt: cache.attemptedAt } : {}), reservePercent: reserve, windows, missingWindows: applicableIds.filter(id => !windows.some(w => w.id === id && w.state === "fresh")), modelScopedAllowanceUnknown, unmappedScopedWindows, exhausted, pressure, warnings };
 }
 
 export class QuotaMonitor {
@@ -261,10 +268,17 @@ export class QuotaMonitor {
 	}
 }
 
+function modelScopedNote(g: QuotaBudget): string {
+	if (!g.modelScopedAllowanceUnknown) return "";
+	return g.unmappedScopedWindows.length
+		? `; Claude model-scoped limits reported in this reading (${g.unmappedScopedWindows.join(",")}) are not mapped for this group; explicit mapping is a user assertion, and shared windows are not model-specific headroom`
+		: "; Claude model-scoped weekly limits (e.g. Fable) not reported in this reading; shared windows are not model-specific headroom";
+}
+
 export function quotaSummary(report: QuotaReport): string {
 	if (!report.groups.length) return "Quota monitoring is not configured; no live subscription data. See docs/QUOTA.md.";
 	return report.groups.map(g => {
 		const windows = g.windows.filter(w => w.applicable).map(w => `${w.id} ${Math.round(w.remainingPercent)}% left${w.resetsAt === undefined ? ", reset unknown" : `, reset ${new Date(w.resetsAt).toISOString()}`}${w.state === "reset-passed" ? " (historical)" : ""}`).join("; ");
-		return `${g.id}: ${g.state}, ${g.pressure}; ${windows || "allowance unknown"}; reserve ${g.reservePercent}%; observed ${g.observedAt ? new Date(g.observedAt).toISOString() : "never"}${g.missingWindows.length ? `; missing ${g.missingWindows.join(",")}` : ""}${g.modelScopedAllowanceUnknown ? "; Claude model-scoped weekly limits (e.g. Fable) not reported by this source; shared windows are not model-specific headroom" : ""}`;
+		return `${g.id}: ${g.state}, ${g.pressure}; ${windows || "allowance unknown"}; reserve ${g.reservePercent}%; observed ${g.observedAt ? new Date(g.observedAt).toISOString() : "never"}${g.missingWindows.length ? `; missing ${g.missingWindows.join(",")}` : ""}${modelScopedNote(g)}`;
 	}).join("\n");
 }

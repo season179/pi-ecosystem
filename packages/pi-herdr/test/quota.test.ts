@@ -135,15 +135,36 @@ describe("budget evidence, not a model scheduler", () => {
 		assert.equal(b.windows[0]!.projectedExhaustionHours, 1);
 		assert.equal(b.pressure, "normal");
 	});
-	it("discloses that Claude readings without model-scoped windows are not model-specific headroom", () => {
+	it("treats Claude model-scoped allowance as known only via an explicitly mapped, currently fresh scoped window", () => {
 		const fable: QuotaGroup = { id: "fable", provider: "claude", source: "cli", profiles: ["claude-fable"] };
+		const summary = (b: ReturnType<typeof assessQuota>) => quotaSummary({ snapshotId: "s", checkedAt: now, groups: [b], binding: "" });
+		const scopedSample = makeSample(50);
+		scopedSample.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now + day, windowMinutes: 10080 });
+		// Defaults with only shared windows: unknown, disclosed as not reported in this reading.
 		const aggregate = assessQuota(fable, entry(), now);
 		assert.equal(aggregate.modelScopedAllowanceUnknown, true);
-		assert.match(quotaSummary({ snapshotId: "s", checkedAt: now, groups: [aggregate], binding: "" }), /model-scoped weekly limits \(e\.g\. Fable\) not reported/);
-		const s = makeSample(50);
-		s.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now + day, windowMinutes: 10080 });
-		const scoped = assessQuota(fable, entry(s), now);
-		assert.equal(scoped.modelScopedAllowanceUnknown, false);
+		assert.match(summary(aggregate), /not reported in this reading/);
+		// Unrelated tertiary/extra windows are not proof of model-scoped coverage.
+		const unrelated = makeSample(50);
+		unrelated.windows.push({ id: "tertiary", usedPercent: 10, resetsAt: now + day, windowMinutes: 10080 }, { id: "some-other-extra", usedPercent: 0, resetsAt: now + day, windowMinutes: 43200 });
+		assert.equal(assessQuota(fable, entry(unrelated), now).modelScopedAllowanceUnknown, true);
+		// Scoped window reported but not mapped: stays unknown, disclosed as not mapped.
+		const unmapped = assessQuota(fable, entry(scopedSample), now);
+		assert.equal(unmapped.modelScopedAllowanceUnknown, true);
+		assert.deepEqual(unmapped.unmappedScopedWindows, ["claude-weekly-scoped-fable"]);
+		assert.match(summary(unmapped), /reported in this reading \(claude-weekly-scoped-fable\) are not mapped/);
+		// Mapped but absent from the reading, or reset-passed: unknown.
+		const mapped: QuotaGroup = { ...fable, windows: ["primary", "secondary", "claude-weekly-scoped-fable"] };
+		assert.equal(assessQuota(mapped, entry(makeSample(50)), now).modelScopedAllowanceUnknown, true);
+		const passed = makeSample(50);
+		passed.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now - 1, windowMinutes: 10080 });
+		assert.equal(assessQuota(mapped, entry(passed), now).modelScopedAllowanceUnknown, true);
+		// Explicitly mapped and currently fresh: known.
+		const fresh = assessQuota(mapped, entry(scopedSample), now);
+		assert.equal(fresh.modelScopedAllowanceUnknown, false);
+		assert.deepEqual(fresh.unmappedScopedWindows, []);
+		// No sample at all: unknown, not silently known.
+		assert.equal(assessQuota(fable, undefined, now).modelScopedAllowanceUnknown, true);
 		assert.equal(assessQuota(group, entry(), now).modelScopedAllowanceUnknown, false, "non-Claude providers have no scoped-limit concept here");
 	});
 });
