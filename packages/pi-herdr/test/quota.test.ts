@@ -153,12 +153,15 @@ describe("budget evidence, not a model scheduler", () => {
 		assert.equal(unmapped.modelScopedAllowanceUnknown, true);
 		assert.deepEqual(unmapped.unmappedScopedWindows, ["claude-weekly-scoped-fable"]);
 		assert.match(summary(unmapped), /reported in this reading \(claude-weekly-scoped-fable\) are not mapped/);
-		// Mapped but absent from the reading, or reset-passed: unknown.
+		// Mapped but absent from the reading, reset-passed, or in a stale sample: unknown.
 		const mapped: QuotaGroup = { ...fable, windows: ["primary", "secondary", "claude-weekly-scoped-fable"] };
 		assert.equal(assessQuota(mapped, entry(makeSample(50)), now).modelScopedAllowanceUnknown, true);
 		const passed = makeSample(50);
 		passed.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now - 1, windowMinutes: 10080 });
 		assert.equal(assessQuota(mapped, entry(passed), now).modelScopedAllowanceUnknown, true);
+		const staleScoped = makeSample(50);
+		staleScoped.windows.push({ id: "claude-weekly-scoped-fable", usedPercent: 84, resetsAt: now + day, windowMinutes: 10080 });
+		assert.equal(assessQuota(mapped, entry(staleScoped), now + QUOTA_INTERVAL_MS).modelScopedAllowanceUnknown, true, "a stale sample is not current model-scoped evidence");
 		// Explicitly mapped and currently fresh: known.
 		const fresh = assessQuota(mapped, entry(scopedSample), now);
 		assert.equal(fresh.modelScopedAllowanceUnknown, false);

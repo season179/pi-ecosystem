@@ -135,10 +135,11 @@ export function assessQuota(group: QuotaGroup, cache: CacheEntry | undefined, no
 	if (state !== "fresh") warnings.push(`${group.id}: quota ${state}; check CodexBar authentication/source. Last readings are historical, not routing evidence.`);
 	if (windows.some(w => w.applicable && w.state === "reset-passed")) warnings.push(`${group.id}: reset passed; allowance unknown until the next scheduled check.`);
 	// Claude model-scoped allowance counts as known only through an explicit mapping to a
-	// source-reported fresh scoped window. Defaults, unmapped scoped readings, generic
-	// tertiary/extras, missing/reset-passed windows and absent samples all stay unknown.
+	// scoped window in the currently fresh reading (budget-level freshness, not just a
+	// non-reset-passed window). Defaults, unmapped scoped readings, generic tertiary/extras,
+	// missing/reset-passed windows, stale samples and absent samples all stay unknown.
 	const mappedScopedIds = group.provider === "claude" ? applicableIds.filter(id => CLAUDE_SCOPED_WINDOW_ID.test(id)) : [];
-	const modelScopedAllowanceUnknown = group.provider === "claude" && !windows.some(w => mappedScopedIds.includes(w.id) && w.state === "fresh");
+	const modelScopedAllowanceUnknown = group.provider === "claude" && !applicable.some(w => mappedScopedIds.includes(w.id));
 	const unmappedScopedWindows = group.provider === "claude" ? windows.filter(w => CLAUDE_SCOPED_WINDOW_ID.test(w.id) && !mappedScopedIds.includes(w.id)).map(w => w.id) : [];
 	return { id: group.id, provider: group.provider, profiles: [...group.profiles], state, ...(current ? { observedAt: current.observedAt } : {}), ...(cache ? { attemptedAt: cache.attemptedAt } : {}), reservePercent: reserve, windows, missingWindows: applicableIds.filter(id => !windows.some(w => w.id === id && w.state === "fresh")), modelScopedAllowanceUnknown, unmappedScopedWindows, exhausted, pressure, warnings };
 }
