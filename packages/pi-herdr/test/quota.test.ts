@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
-import { assessQuota, QuotaMonitor, quotaSummary } from "../src/quota.js";
+import { assessQuota, QuotaMonitor, quotaEvidence, quotaSummary } from "../src/quota.js";
 import { parseCodexBar, validateQuotaConfig, QUOTA_INTERVAL_MS, type QuotaGroup, type QuotaSample } from "../src/quota-source.js";
 
 const now = Date.parse("2026-09-18T06:00:00Z");
@@ -169,6 +169,49 @@ describe("budget evidence, not a model scheduler", () => {
 		// No sample at all: unknown, not silently known.
 		assert.equal(assessQuota(fable, undefined, now).modelScopedAllowanceUnknown, true);
 		assert.equal(assessQuota(group, entry(), now).modelScopedAllowanceUnknown, false, "non-Claude providers have no scoped-limit concept here");
+	});
+});
+
+describe("compact quota evidence for inspect", () => {
+	const text = (budget: ReturnType<typeof assessQuota>, shared: string[] = []) => quotaEvidence(budget, shared).join("\n");
+	it("shows usable allowance, reset timing, pacing and burn only for fresh applicable windows", () => {
+		const previous = makeSample(58, now - 3_600_000);
+		const budget = assessQuota(group, { attemptedAt: now, failed: false, sample: makeSample(60), previous }, now);
+		const lines = text(budget, ["sol"]);
+		assert.match(lines, /^- astra \(codex; one subscription shared with sol\): fresh, pressure/m);
+		const window = lines.split("\n").find(l => l.trimStart().startsWith("secondary:"))!;
+		for (const fact of ["40% left", "30% usable after reserve", "resets 2026-09-24T06:00:00Z", "6.0d", "even-pace reference", "burn 2.0%/h", "15.0h"]) assert.ok(window.includes(fact), fact);
+		assert.match(lines, /missing windows \(unknown, not unlimited\): primary/);
+		assert.doesNotMatch(lines, /HISTORICAL/);
+	});
+	it("labels stale, reset-passed and unavailable readings historical without usable figures", () => {
+		const stale = text(assessQuota(group, entry(), now + QUOTA_INTERVAL_MS + 1));
+		assert.match(stale.split("\n")[0]!, /^- astra .*stale/);
+		assert.match(stale, /HISTORICAL/);
+		assert.match(stale, /was 40% left/);
+		assert.doesNotMatch(stale, /usable after reserve|burn|pressure/);
+		assert.match(stale, /! astra: quota stale/);
+		const passed = text(assessQuota(group, entry({ ...makeSample(), windows: [{ id: "secondary", usedPercent: 60, resetsAt: now - 1 }] }), now));
+		assert.match(passed, /HISTORICAL.*reset passed/);
+		assert.match(passed, /was 40% left/);
+		assert.match(passed, /missing windows .*secondary/);
+		assert.match(passed, /! astra: reset passed/);
+		const unavailable = text(assessQuota(group, { attemptedAt: now, failed: true, sample: makeSample() }, now));
+		assert.match(unavailable, /^- astra \(codex\): unavailable/m);
+		assert.match(unavailable, /HISTORICAL: unavailable reading/);
+		assert.match(text(assessQuota(group, undefined, now)), /^- astra \(codex\): unknown .*observed never/m);
+	});
+	it("keeps exhaustion, scoped-limit caveats and unapplied windows visible", () => {
+		const exhausted = text(assessQuota(group, entry(), now, true));
+		assert.match(exhausted, /EXHAUSTED/);
+		assert.match(exhausted, /! astra: exhausted/);
+		const opus: QuotaGroup = { id: "opus", provider: "claude", source: "cli", profiles: ["claude-opus-5"] };
+		const sample: QuotaSample = { observedAt: now, windows: [{ id: "primary", usedPercent: 10 }, { id: "claude-weekly-scoped-fable", usedPercent: 5 }, { id: "tertiary", usedPercent: 0 }] };
+		const lines = text(assessQuota(opus, entry(sample), now));
+		assert.match(lines, /reported but not applied to this group: claude-weekly-scoped-fable, tertiary/);
+		assert.match(lines, /not mapped for this group/);
+		assert.match(lines, /not model-specific headroom/);
+		assert.doesNotMatch(lines, /^  claude-weekly-scoped-fable:/m, "unmapped scoped windows are never presented as this group's allowance");
 	});
 });
 

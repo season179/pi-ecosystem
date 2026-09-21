@@ -29,8 +29,9 @@ export function questionsFor(candidate: Candidate): QuestionSet {
 			type: "noul",
 			instructions:
 				`The full output of tool call ${candidate.shortId} (${candidate.toolName}, ${candidate.resultChars} chars` +
-				`${candidate.isError ? ", error" : ""}) should stay in the history verbatim: the assistant still needs its ` +
-				`contents and re-running the tool would not do. When in doubt, answer yes.`,
+				`${candidate.isError ? ", error" : ""}) should stay in the history verbatim: keeping it is likely to help the ` +
+				`assistant's next steps. Consider whether its details remain necessary or are already captured elsewhere. ` +
+				`Being able to retrieve it again is not, by itself, a reason to remove it. When in doubt, answer yes.`,
 		},
 	};
 }

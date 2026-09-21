@@ -6,3 +6,16 @@ dist/
 .env.*
 .pi/
 .lavish/
+
+# Local credentials and machine-local tooling state (never committed)
+*.key
+*.pem
+.npmrc
+.claude/settings.local.json
+
+# Local audit reports containing session telemetry and personal workflow notes
+/packages/pi-compaction/docs/AUDIT-*.md
+
+# Test/build artifacts
+coverage/
+*.log

@@ -1,10 +1,25 @@
 # Orchestration validation
 
+## Compact routing responses — 2026-09-20
+
+- `herdr_route` inspect/select now return a compact model-facing summary by default with `verbosity: "full"` for the previous bounded JSON. Routing, validation, quota semantics, `details` and launch arguments are unchanged; **187 tests in 14 files** pass, `tsc --noEmit` and the bundle build succeed. No release bump or publish.
+- Measured through the tool's own `execute` path on the eight-profile example policy with all five quota groups fresh (Codex 26% left with a 2%/h burn sample, Claude shared and scoped windows at 100%, Z.ai at 99%) and native evidence for the four external routes. Exact UTF-8 bytes of the text sent to the model (`content[0].text`); token figures use Pi's `chars / 4` estimator:
+
+| Call | Before | After (compact) | `verbosity: "full"` |
+|---|---|---|---|
+| inspect (general) | 15,641 B / 502 lines (~3,911 tokens) — truncated at the 500-line cap, cutting the last candidate's eligibility | 4,966 B / 33 lines (~1,242 tokens), complete | 15,639 B, truncated with an explicit marker |
+| select (policy) | 1,186 B / 42 lines (~297 tokens) | 516 B / 5 lines (~129 tokens) | 1,182 B |
+| select (budgetChoice) | 1,474 B (~369 tokens) | 685 B (~172 tokens) | — |
+
+- Verified against installed Pi 0.86.0: tool-result `content` is what providers receive (`convertToolResult` in pi-ai's Anthropic path and `convertToolResultOutput` in the OpenAI Responses path read `msg.content` only; the token estimator counts `content` only), while `details` serve rendering and session state. Moving data into `details` alone therefore does not save model tokens; the compact text does.
+- New coverage: eight-profile compact inspect row/eligibility parity with `details`, shared-subscription and scoped-window caveats, stale/reset-passed/unavailable/unknown/unconfigured quota labelled historical or unknown, unchanged snapshot with changed task/readiness/policy/exhaustion, compact select/fallback/explicit/budget text carrying IDs and launch arrays, and a 400-profile policy where both compact and full output name their truncation and count surviving rows. Tests assert behavior and line contracts, not byte sizes.
+- Limitations: no live provider poll or paid worker launch; the running orchestrator session was not reloaded (a rebuilt bundle goes live only after `/reload` or a new session).
+
 ## Subscription quotas — 2026-09-18
 
 - Built and tested the existing local package: **165 tests in 13 files** pass. Package dry run includes new compiled collectors/cache, schema and quota documentation; `git diff --check` passes. No release version bump or publish.
 - New coverage: actual fake-executable boundary, output caps/abort/redaction, missing/malformed/stale windows, source validation, cross-monitor coalescing, 30-minute timer and failure cooldown, private cache, dead/empty/live lock behavior, account selectors, exhaustion between polls, budget-choice suitability/auth/image/protection checks, inspect → select → record reason, and explicit-alias exhaustion blocking.
-- Runtime integration tests cover inactive workers not polling, transient context snapshots, deduplicated warnings, no idle model wake, generic 429 vs confirmed exhaustion, and off/deactivation.
+- Runtime integration tests cover inactive workers not polling, transient context snapshots, UI-only quota warnings with persisted-warning scrubbing from outbound context (active, off, and no quota groups), no idle model wake, generic 429 vs confirmed exhaustion, and off/deactivation.
 - Verified installed CodexBar 0.56.6 supports all three sources. Codex OAuth and Z.ai API worked; Claude OAuth/web were unavailable, but native CLI `/usage` worked. No credentials were copied into Herdr configuration or cache.
 - Initial local binding check: saved Pi default Codex account ID matched native Codex; Pi's Z.ai key matched CodexBar's selected `default` token account. This checks saved defaults, not future account switches. Fable workers use the same native Claude source queried by CodexBar.
 - Real Pi 0.85.1 RPC smoke loaded the built extension, found `/limits`, activated a disposable orchestrator session, displayed fresh quotas for all three configured groups, reused the cache on a second `/limits`, and switched orchestration off. **Zero assistant/model turns and zero extension errors.** No workers, purchases or reset-credit consumption. Smoke process exited.

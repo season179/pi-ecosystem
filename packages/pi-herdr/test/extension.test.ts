@@ -668,30 +668,100 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		await pi.commands.get("orchestrate")!.handler("", pi.ctx);
 		await pi.commands.get("limits")!.handler("", pi.ctx);
 		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1);
-		const warningCount = () => pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").length;
-		assert.equal(warningCount(), 1);
-		assert.ok(pi.messages.every(m => m.options.triggerTurn === false));
-		// Exactly one user-visible surface: the notification. The steer message keeps model
-		// context without rendering a second transcript copy.
+		const warningMessages = () => pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning");
+		assert.equal(warningMessages().length, 0, "warnings never enter model context");
+		assert.ok(pi.messages.every(m => m.options.triggerTurn === false), "nothing starts an idle turn");
 		const quotaNotices = () => pi.notices.filter(n => /preserve orchestration capacity/.test(n.message));
-		assert.equal(quotaNotices().length, 1);
+		assert.equal(quotaNotices().length, 1, "the notification is the only warning surface");
 		assert.equal(quotaNotices()[0]!.level, "warning");
-		assert.equal(pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").every(m => m.message.display === false), true);
 		assert.equal(pi.messages.filter(m => m.message.customType === "pi-herdr-limits").every(m => m.message.display === true), true, "/limits remains the displayed command surface");
 		await pi.commands.get("limits")!.handler("", pi.ctx);
-		assert.equal(warningCount(), 1, "reusing cache does not repeat warnings");
+		assert.equal(quotaNotices().length, 1, "reusing cache does not repeat warnings");
 		const contexts = await pi.emit("context", { messages: [] }) as Array<any>;
 		assert.match(contexts.find(c => c?.messages)?.messages[0].content, /5% left/);
 		assert.doesNotMatch(JSON.stringify(pi.messages), /fixture-private@example/);
 		Object.assign(pi.ctx, { model: { provider: "openai-codex", id: "gpt-6-astra" } });
 		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 429 too many requests" } });
-		assert.equal(warningCount(), 1, "generic rate limits are not exhaustion");
+		assert.equal(quotaNotices().length, 1, "generic rate limits are not exhaustion");
 		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit" } });
-		assert.equal(warningCount(), 2);
-		assert.equal(quotaNotices().length, 2, "exhaustion is notified once and steered once");
-		assert.match(pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning").at(-1)!.message.content, /exhausted/);
+		assert.equal(quotaNotices().length, 2, "confirmed exhaustion is notified once");
+		assert.match(quotaNotices().at(-1)!.message, /exhausted/);
+		assert.equal(warningMessages().length, 0, "exhaustion is not steered into model context either");
 		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1, "exhaustion does not force polling");
 		await pi.commands.get("orchestrate")!.handler("off", pi.ctx);
-		assert.ok((await pi.emit("context", { messages: [] })).every(c => c === undefined));
+		const afterOff = (await pi.emit("context", { messages: [] }))[0] as any;
+		assert.deepEqual(afterOff?.messages, [], "off sessions still return the filtered context, not undefined");
+	});
+});
+
+describe.sequential("herdr quota context hygiene", () => {
+	const WARNING_TEXT =
+		"astra: low; preserve orchestration capacity, shift suitable work, and tell the user if alternatives are constrained. Do not buy or enable another provider automatically.";
+
+	/** A history shaped like an old session: persisted steer warnings plus lookalike traffic. */
+	function oldHistory(): any[] {
+		return [
+			{ role: "user", content: WARNING_TEXT, timestamp: 1 },
+			{ role: "custom", customType: "pi-herdr-quota-warning", content: `${WARNING_TEXT}\n5% left`, display: false, timestamp: 2 },
+			{ role: "custom", customType: "pi-herdr-watch", content: "watch #1 fired", display: true, timestamp: 3 },
+			{ role: "custom", customType: "pi-herdr-limits", content: "/limits output", display: true, timestamp: 4 },
+			{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "on it" }], timestamp: 5 },
+			{ role: "custom", customType: "pi-herdr-quota-context", content: "stale snapshot", display: false, timestamp: 6 },
+		];
+	}
+
+	const retained = (history: any[]): any[] =>
+		history.filter(m => m.customType !== "pi-herdr-quota-warning" && m.customType !== "pi-herdr-quota-context");
+
+	async function activateWithQuota(current: Harness): Promise<void> {
+		// The collector is the fake fixture: collection succeeds (95% used) without touching
+		// a real codexbar install. A deliberately missing binary is not an option here:
+		// aborting a pending spawn of one SIGKILLs the test process (Node child_process bug).
+		process.env.PI_HERDR_CODEXBAR = fileURLToPath(new URL("./fixtures/fake-codexbar.mjs", import.meta.url));
+		process.env.FAKE_CODEXBAR_LOG = join(current.dir, "quota-calls.jsonl");
+		const policy = JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8"));
+		policy.quota = { groups: [{ id: "astra", provider: "codex", source: "oauth", profiles: ["pi-astra", "codex-astra"], reservePercent: 10 }] };
+		writeFileSync(join(current.dir, "herdr-routing.json"), JSON.stringify(policy));
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
+	}
+
+	it("scrubs persisted quota messages and appends exactly one fresh snapshot while active", async () => {
+		const current = await createHarness(0, { promoted: false });
+		await activateWithQuota(current);
+		const history = oldHistory();
+		const before = JSON.parse(JSON.stringify(history));
+		const results = (await current.pi.emit("context", { messages: history })) as Array<{ messages?: any[] } | undefined>;
+		const out = results.find(r => r?.messages)?.messages;
+		assert.ok(out, "the active hook returns a message list");
+		assert.equal(out.filter(m => m.customType === "pi-herdr-quota-warning").length, 0, "persisted warnings are gone");
+		assert.equal(out.filter(m => m.customType === "pi-herdr-quota-context").length, 1, "exactly one snapshot remains");
+		const appended = out.at(-1)!;
+		assert.equal(appended.customType, "pi-herdr-quota-context", "the snapshot is appended last");
+		assert.match(appended.content, /Latest subscription snapshot/u);
+		assert.equal(appended.display, false);
+		assert.deepEqual(out.slice(0, -1), retained(before), "identical-prose user text, watch and /limits messages are retained in order");
+		assert.deepEqual(history, before, "the input history is not mutated");
+	});
+
+	it("still scrubs persisted quota messages without a snapshot when orchestration is off", async () => {
+		const current = await createHarness(0, { promoted: false });
+		const history = oldHistory();
+		const before = JSON.parse(JSON.stringify(history));
+		const results = (await current.pi.emit("context", { messages: history })) as Array<{ messages?: any[] } | undefined>;
+		const out = results.find(r => r?.messages)?.messages;
+		assert.ok(out, "the off hook filters instead of returning undefined");
+		assert.deepEqual(out, retained(before), "warnings and snapshots are dropped; user, watch, /limits and assistant messages stay");
+		assert.deepEqual(history, before, "the input history is not mutated");
+	});
+
+	it("appends no snapshot when active but no quota groups are configured", async () => {
+		const current = await createHarness(0, { promoted: false });
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
+		const results = (await current.pi.emit("context", { messages: oldHistory() })) as Array<{ messages?: any[] } | undefined>;
+		const out = results.find(r => r?.messages)?.messages;
+		assert.ok(out, "the no-groups hook filters instead of returning undefined");
+		assert.equal(out.some(m => m.customType === "pi-herdr-quota-context"), false, "no snapshot without configured groups");
+		assert.equal(out.some(m => m.customType === "pi-herdr-quota-warning"), false, "warnings are still scrubbed");
+		assert.equal(out.length, retained(oldHistory()).length, "unrelated messages are retained");
 	});
 });

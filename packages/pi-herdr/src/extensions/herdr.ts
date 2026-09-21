@@ -250,13 +250,11 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				if (quotaWarnings.get(group.id) === signature) continue;
 				quotaWarnings.set(group.id, signature);
 				if (!group.warnings.length) continue;
-				const text = group.warnings.join("\n") + "\n" + quotaSummary({ ...report, groups: [group] });
-				// One user-visible surface: the notification. The steer message below keeps model
-				// context without rendering a second copy in the transcript.
-				notify(uiCtx, text, "warning");
-				try {
-					pi.sendMessage({ customType: "pi-herdr-quota-warning", content: text, display: false }, { deliverAs: "steer", triggerTurn: false });
-				} catch { /* Never wake an idle model or fail orchestration for reporting. */ }
+				// The notification is the only quota-warning surface. Steering this text into
+				// model context persisted one custom message per change, and those replays
+				// accumulated on every later call; current data reaches the model through the
+				// transient snapshot in the context hook instead.
+				notify(uiCtx, group.warnings.join("\n") + "\n" + quotaSummary({ ...report, groups: [group] }), "warning");
 			}
 		},
 	});
@@ -272,11 +270,19 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("context", (event) => {
-		if (!promoted) return;
+		// Quota reporting stays out of the model's history: older versions persisted each
+		// warning as a steered custom message, and those replays accumulated on every call.
+		// Scrub the extension's persisted quota messages (exact customType matches only) from
+		// outbound context regardless of activation state; user text with identical wording,
+		// /limits output, watch messages and everything else pass through untouched.
+		const messages = event.messages.filter(m =>
+			!(m.role === "custom" &&
+				(m.customType === "pi-herdr-quota-warning" || m.customType === "pi-herdr-quota-context")));
+		if (!promoted) return { messages };
 		const report = quota.read();
-		if (!report.groups.length) return;
-		// Transient latest snapshot, not an ever-growing series of quota observations.
-		return { messages: [...event.messages, {
+		if (!report.groups.length) return { messages };
+		// Exactly one transient latest snapshot per call; appended copies are never persisted.
+		return { messages: [...messages, {
 			role: "custom" as const, customType: "pi-herdr-quota-context", display: false, timestamp: Date.now(),
 			content: "Latest subscription snapshot (supersedes historical quota messages):\n" + quotaSummary(report) +
 				"\nUse herdr_route inspect for candidate eligibility, reserve and burn details. Reconsider delegation when budgets change; warn if premium or economical alternatives are constrained. Unknown is not unlimited. " + report.binding,

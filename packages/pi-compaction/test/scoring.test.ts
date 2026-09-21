@@ -38,6 +38,19 @@ function fakeScorer(answer: (key: string) => number, options: { failOn?: number;
 }
 
 describe("questions", () => {
+	it("judges result retention by upcoming usefulness, not irretrievability", () => {
+		const { candidates } = fixture();
+		const candidate = candidates[0];
+		const question = questionsFor(candidate)[resultQuestionKey(candidate)];
+		expect(question.type).toBe("noul");
+		expect(question.instructions).toContain("should stay in the history verbatim");
+		expect(question.instructions).toContain("assistant's next steps");
+		expect(question.instructions).toContain("details remain necessary or are already captured elsewhere");
+		expect(question.instructions).toContain("Being able to retrieve it again is not, by itself, a reason to remove it.");
+		expect(question.instructions).toContain("When in doubt, answer yes.");
+		expect(question.instructions).not.toContain("re-running the tool would not do");
+	});
+
 	it("asks two keep questions per candidate and plans batches within the request budget", () => {
 		const { candidates } = fixture();
 		const questions = questionsFor(candidates[0]);

@@ -11,12 +11,14 @@ import {
 	type RoutingProfile,
 	type RouteSelection,
 } from "./routing.js";
-import type { QuotaMonitor } from "./quota.js";
+import { isoTime, quotaEvidence, type QuotaMonitor, type QuotaReport } from "./quota.js";
+import type { QuotaGroup } from "./quota-source.js";
 
 const ASSIGNMENT_TYPE = "pi-herdr-assignment";
 const Difficulty = StringEnum(["easy", "general", "hardest"] as const);
 const Protection = StringEnum(["standard", "claude-auto", "codex-approve-for-me"] as const);
 const ReasoningEffort = StringEnum(["low", "medium", "high"] as const);
+const Verbosity = StringEnum(["compact", "full"] as const, { description: "compact (default): bounded evidence summary with every candidate's eligibility. full: complete profile/quota JSON, bounded and marked when truncated." });
 const Profile = Type.Object({
 	id: Type.String(), harness: StringEnum(["pi", "claude", "codex"] as const),
 	provider: Type.Optional(Type.String()), model: Type.String(), family: Type.String(),
@@ -48,7 +50,10 @@ const Params = Type.Object({
 	})),
 	selectionId: Type.Optional(Type.String()),
 	target: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+	verbosity: Type.Optional(Verbosity),
 });
+const INSPECT_LIMITS = { maxBytes: 24_000, maxLines: 500 };
+const SELECT_LIMITS = { maxBytes: 16_000, maxLines: 300 };
 
 interface Assignment {
 	sessionId: string;
@@ -132,6 +137,23 @@ export async function piAvailability(ctx: ExtensionContext, profiles: readonly R
 	return results;
 }
 
+/** Groups on the same provider/source/account read one subscription; separate IDs are not separate headroom. */
+function sharedSubscriptions(groups: readonly QuotaGroup[]): Map<string, string[]> {
+	const key = (g: QuotaGroup): string => JSON.stringify([g.provider, g.source, g.account ?? null]);
+	return new Map(groups.map(g => [g.id, groups.filter(o => o.id !== g.id && key(o) === key(g)).map(o => o.id)]));
+}
+
+function candidateRow(p: RoutingProfile, blocked: string | null, quota: QuotaReport | undefined): string {
+	const fit = (["easy", "general", "hardest"] as const).filter(d => p.suitability[d] !== undefined).map(d => `${d}${p.suitability[d]}`).join(" ");
+	return `- ${p.id}: ${blocked ? `BLOCKED (${blocked})` : "eligible"} | ${p.harness} ${p.provider ? `${p.provider}/` : ""}${p.model}${p.reasoningEffort ? ` effort ${p.reasoningEffort}` : ""} | ${p.protection} | family ${p.family} pref ${p.preference}${p.fallbackOnly ? " reserved(fallback-only)" : ""}${p.enabled ? "" : " disabled"} | caps ${p.capabilities.join(",") || "none"} | fit ${fit || "none"} | fallbacks ${p.fallbacks.join(",") || "none"} | quota ${quota?.groups.find(g => g.profiles.includes(p.id))?.id ?? "unmonitored"}`;
+}
+
+/** Head-truncated like every Pi tool, but the cut is always named so partial text never reads as complete. */
+function bounded(text: string, limits: { maxBytes: number; maxLines: number }, incomplete: (content: string) => string): string {
+	const output = truncateHead(text, limits);
+	return output.truncated ? `${output.content}\n[TRUNCATED at ${limits.maxBytes / 1000}KB/${limits.maxLines} lines: ${incomplete(output.content)}]` : output.content;
+}
+
 export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () => boolean; quota?: QuotaMonitor }): void {
 	// Selections are previews, not assignments. Runtime reset deliberately invalidates them.
 	const pending = new Map<string, { sessionId: string; selection: RouteSelection }>();
@@ -139,7 +161,7 @@ export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () =>
 	pi.registerTool({
 		name: "herdr_route",
 		label: "Herdr Route",
-		description: "Inspect task candidates and cached subscription quotas, then select before EVERY dispatch. Use budgetChoice with inspect snapshotId and a task/budget reason to adjust preferences; this cannot bypass suitability, capabilities, auth, protection or exhaustion. profileId/override are reserved for explicit USER choices. Record selectionId + target only after successful dispatch. Use exhausted with profileId only after confirmed subscription exhaustion (not generic 429); no forced polling. Quotas refresh at most every 30 minutes. Pi readiness is checked through Pi; native externalChecks need current non-secret help/auth/model evidence. Native launchArgs are arrays, not shell commands; verify worker permissions. Never launches workers or proves ownership. Inspect text capped at 24KB/500 lines.",
+		description: "Inspect task candidates and cached subscription quotas, then select before EVERY dispatch. Use budgetChoice with inspect snapshotId and a task/budget reason to adjust preferences; this cannot bypass suitability, capabilities, auth, protection or exhaustion. profileId/override are reserved for explicit USER choices. Record selectionId + target only after successful dispatch. Use exhausted with profileId only after confirmed subscription exhaustion (not generic 429); no forced polling. Quotas refresh at most every 30 minutes. Pi readiness is checked through Pi; native externalChecks need current non-secret help/auth/model evidence. Native launchArgs are arrays, not shell commands; verify worker permissions. Never launches workers or proves ownership. Responses are compact by default; verbosity full returns bounded full profile/quota JSON (24KB/500 lines inspect, 16KB/300 select).",
 		parameters: Params,
 		executionMode: "sequential",
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -192,25 +214,46 @@ export function registerRoutingTool(pi: ExtensionAPI, options: { isActive: () =>
 				...(params.allowFallback === undefined ? {} : { allowFallback: params.allowFallback }),
 				...(params.budgetChoice ? { budgetChoice: params.budgetChoice } : {}),
 			};
+			const full = params.verbosity === "full";
 			if (params.action === "inspect") {
-				const details = { quota, candidates: profiles.map(profile => ({
-					profile,
-					blocked: routeBlock(profile, request, availability, quota) ?? null,
-				})), ...(configWarning ? { configWarning } : {}) };
-				const output = truncateHead(JSON.stringify(details, null, 2), { maxBytes: 24_000, maxLines: 500 });
-				return { content: [{ type: "text", text: output.content + (output.truncated ? "\n[Inspect output truncated; full policy is in herdr-routing.json.]" : "") + "\nChoose among eligible candidates using task needs, remaining allowance, reset time, observed burn and orchestration reserve. Pressure is advisory, not a forecast. Prefer expiring surplus for useful work, conserve scarce groups, warn when alternatives are constrained. No selection or worker was recorded." }], details };
+				const candidates = profiles.map(profile => ({ profile, blocked: routeBlock(profile, request, availability, quota) ?? null }));
+				const details = { quota, candidates, ...(configWarning ? { configWarning } : {}) };
+				const guidance = "\nWeigh task fit, usable allowance, reset timing, burn and reserve; pressure is advisory, not a forecast. Nothing selected or recorded. verbosity \"full\" returns bounded full profile/quota JSON.";
+				if (full) {
+					return { content: [{ type: "text", text: bounded(JSON.stringify(details, null, 2), INSPECT_LIMITS, () => "this JSON is incomplete (later quota groups, candidates or warnings are missing); the compact form is smaller and names its own truncation") + guidance }], details };
+				}
+				const shared = sharedSubscriptions(config?.quota?.groups ?? []);
+				const lines = [`snapshotId ${quota?.snapshotId ?? "none"}${quota ? ` (checked ${isoTime(quota.checkedAt)}; budgetChoice must cite this exact ID)` : ""}`];
+				if (configWarning) lines.push(`! policy: ${configWarning}`);
+				lines.push(quota?.groups.length ? `quota groups (${quota.groups.length}):` : "quota: not configured; no live subscription evidence (unknown is not unlimited)");
+				for (const group of quota?.groups ?? []) lines.push(...quotaEvidence(group, shared.get(group.id)));
+				lines.push(`candidates (${candidates.length}; ${candidates.filter(c => !c.blocked).length} eligible for ${params.difficulty}):`);
+				for (const candidate of candidates) lines.push(candidateRow(candidate.profile, candidate.blocked, quota));
+				const text = bounded(lines.join("\n"), INSPECT_LIMITS, content => `${(content.match(/^- \S+: (eligible|BLOCKED)/gm) ?? []).length} of ${candidates.length} candidate rows shown; everything after the cut is missing, so eligibility and warnings above are incomplete`);
+				return { content: [{ type: "text", text: text + guidance }], details };
 			}
 			const selection = selectRoute(config, request, availability, readAssignments(ctx), quota);
 			const selectionId = randomUUID();
 			// A bounded preview cache, not a persistent task ledger.
 			if (pending.size >= 100) pending.delete(pending.keys().next().value!);
 			pending.set(selectionId, { sessionId, selection });
-			const details = { selectionId, ...selection, launchArgs: launchArguments(selection.profile), ...(configWarning ? { configWarning } : {}) };
-			const output = truncateHead(JSON.stringify(details, null, 2), { maxBytes: 16_000, maxLines: 300 });
-			return {
-				content: [{ type: "text", text: output.content + (output.truncated ? `\n[Profile output truncated; full policy: ${getAgentDir()}/herdr-routing.json]` : "") + "\nNo worker launched. Verify native options/protection and worker environment (PI_HERDR_ORCHESTRATOR unset or 0), then dispatch without --wait, record selectionId + target, and arm herdr_watch. External evidence is agent-reported; selection does not prove a live worker's settings." }],
-				details,
-			};
+			const launchArgs = launchArguments(selection.profile);
+			const details = { selectionId, ...selection, launchArgs, ...(configWarning ? { configWarning } : {}) };
+			const duties = "\nNo worker launched. Verify native options/protection and worker environment (PI_HERDR_ORCHESTRATOR unset or 0), dispatch without --wait, record selectionId + target, then arm herdr_watch. External evidence is agent-reported; selection does not prove a live worker's settings.";
+			if (full) {
+				return { content: [{ type: "text", text: bounded(JSON.stringify(details, null, 2), SELECT_LIMITS, () => `selection JSON is incomplete (launch data or warnings may be cut); do not dispatch from truncated output. Policy: ${getAgentDir()}/herdr-routing.json`) + duties }], details };
+			}
+			const p = selection.profile;
+			const lines = [
+				`selectionId ${selectionId}`,
+				`route ${p.id} (family ${p.family}) source ${selection.source}${selection.fallbackOf ? ` fallbackOf ${selection.fallbackOf}` : ""}`,
+				`launch ${p.harness} ${p.provider ? `${p.provider}/` : ""}${p.model} protection ${p.protection}${p.reasoningEffort ? ` effort ${p.reasoningEffort}` : ""}${p.fallbackOnly ? " reserved(fallback-only)" : ""}`,
+				`launchArgs ${JSON.stringify(launchArgs)}`,
+				...(selection.budgetReason ? [`budgetReason ${selection.budgetReason}`] : []),
+				...selection.warnings.map(w => `! ${w}`),
+				...(configWarning ? [`! policy: ${configWarning}`] : []),
+			];
+			return { content: [{ type: "text", text: bounded(lines.join("\n"), SELECT_LIMITS, () => "launch data or warnings may be incomplete; do not dispatch from truncated output, select again with a smaller policy") + duties }], details };
 		},
 	});
 }

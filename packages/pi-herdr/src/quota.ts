@@ -276,6 +276,46 @@ function modelScopedNote(g: QuotaBudget): string {
 		: "; Claude model-scoped weekly limits (e.g. Fable) not reported in this reading; shared windows are not model-specific headroom";
 }
 
+export function isoTime(ms: number): string {
+	return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+function pct(value: number): string {
+	return value > 0 && value < 1 ? "<1%" : `${Math.round(value)}%`;
+}
+function span(hours: number): string {
+	return hours >= 48 ? `${(hours / 24).toFixed(1)}d` : `${hours.toFixed(1)}h`;
+}
+
+/**
+ * Compact per-group evidence for herdr_route inspect. Applicable windows carry usable
+ * allowance, reset timing, pacing reference and burn; anything not fresh is labelled
+ * historical and shown without usable/burn figures so stale capacity never reads as spendable.
+ */
+export function quotaEvidence(g: QuotaBudget, sharedWith: readonly string[] = []): string[] {
+	const live = g.state === "fresh";
+	const lines = [`- ${g.id} (${g.provider}${sharedWith.length ? `; one subscription shared with ${sharedWith.join(", ")}` : ""}): ${g.state}${live ? `, pressure ${g.pressure}` : " (readings below are historical, not routing evidence)"}, reserve ${g.reservePercent}%, observed ${g.observedAt === undefined ? "never" : isoTime(g.observedAt)}; profiles ${g.profiles.join(", ")}`];
+	for (const w of g.windows) {
+		if (!w.applicable) continue;
+		const reset = w.resetsAt === undefined ? "reset unknown" : w.remainingHours === undefined ? `reset ${isoTime(w.resetsAt)} already passed` : `resets ${isoTime(w.resetsAt)} in ${span(w.remainingHours)}`;
+		if (!live || w.state === "reset-passed") {
+			lines.push(`  ${w.id} [HISTORICAL: ${w.state === "reset-passed" ? "reset passed, allowance unknown until the next check" : `${g.state} reading`}]: was ${pct(w.remainingPercent)} left, ${reset}`);
+			continue;
+		}
+		const parts = [`${pct(w.remainingPercent)} left`, `${pct(w.usablePercent)} usable after reserve`, reset];
+		if (w.evenPaceRemainingPercent !== undefined) parts.push(`even-pace reference ${pct(w.evenPaceRemainingPercent)}`);
+		if (w.burnPercentPerHour !== undefined) parts.push(`burn ${w.burnPercentPerHour.toFixed(1)}%/h${w.projectedExhaustionHours === undefined ? "" : ` (usable allowance gone in ${span(w.projectedExhaustionHours)} at that rate)`}`);
+		lines.push(`  ${w.id}: ${parts.join(", ")}`);
+	}
+	const unapplied = g.windows.filter(w => !w.applicable).map(w => w.id);
+	if (unapplied.length) lines.push(`  reported but not applied to this group: ${unapplied.join(", ")}`);
+	if (g.missingWindows.length) lines.push(`  missing windows (unknown, not unlimited): ${g.missingWindows.join(", ")}`);
+	const scoped = modelScopedNote(g);
+	if (scoped) lines.push(`  ${scoped.slice(2)}`);
+	if (g.exhausted) lines.push("  EXHAUSTED: confirmed subscription exhaustion blocks every profile in this group");
+	for (const warning of g.warnings) lines.push(`  ! ${warning}`);
+	return lines;
+}
+
 export function quotaSummary(report: QuotaReport): string {
 	if (!report.groups.length) return "Quota monitoring is not configured; no live subscription data. See docs/QUOTA.md.";
 	return report.groups.map(g => {

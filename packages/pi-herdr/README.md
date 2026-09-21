@@ -52,7 +52,7 @@ Configuration edits affect the next selection without rebuilding or restarting a
 
 ### Subscription quotas
 
-Optional `quota.groups` binds profiles to CodexBar subscription sources for Codex, Claude and Z.ai. Active orchestrators refresh at activation and every **30 minutes**; a shared private cache coalesces checks across sessions. Workers never poll. `/limits` displays cached readings, reset times, pacing and reserves; `herdr_route inspect` also provides recent burn and candidate eligibility. Low/constrained/unknown readings warn without waking an idle model. Confirmed subscription exhaustion can be reported immediately without another poll.
+Optional `quota.groups` binds profiles to CodexBar subscription sources for Codex, Claude and Z.ai. Active orchestrators refresh at activation and every **30 minutes**; a shared private cache coalesces checks across sessions. Workers never poll. `/limits` displays cached readings, reset times, pacing and reserves; `herdr_route inspect` also provides recent burn and candidate eligibility in a compact summary (`verbosity: "full"` returns bounded full JSON). Low/constrained/unknown readings warn without waking an idle model. Confirmed subscription exhaustion can be reported immediately without another poll.
 
 Collection supplies facts; the orchestrator judges task needs and pending work. Capability/auth/protection/exhaustion checks stay in code. No automatic purchases, account switching, policy rewrites or work invented to consume quota. Account bindings are explicit configuration, not inferred from model names or synchronized with Pi's account picker. Missing model-specific windows are unknown—not a guessed multiplier.
 
