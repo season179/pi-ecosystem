@@ -42,7 +42,7 @@ Activation grants no operational permission beyond the user's request. No automa
 
 Worker selection is supplied by the user or an external system. Pi-herdr does not read routing policies, check model eligibility, poll providers, or inject quota snapshots. The former `herdr_route` tool and `/limits` command have been removed. Existing routing configuration and quota cache files are ignored. Resumed sessions still filter automatic quota messages persisted by older versions.
 
-A separate, strictly on-demand `codex_quota` tool (always active in managed panes) and `/codex-quota` command fetch current Codex (ChatGPT plan) usage directly from OpenAI's usage endpoint, authenticated with the local Codex CLI login. There is no polling, caching, account binding, or quota-based routing, and the OAuth token is never stored, logged, or returned — only the whitelisted usage numbers are.
+`codex_quota` (available in managed panes) and `/codex-quota` read current usage using `$CODEX_HOME/auth.json`, or `~/.codex/auth.json`. Each call queries OpenAI's internal endpoint with a ten-second timeout; tool calls support cancellation. Missing credentials, invalid responses, and request failures are reported as errors. There is no polling, cache, or token refresh.
 
 ## Watch Tools and Modes
 

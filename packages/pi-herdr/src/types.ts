@@ -106,11 +106,7 @@ export interface QuotaWindow {
 	resetAfterSeconds: number;
 }
 
-/**
- * Whitelisted view of one Codex usage observation. Built by `quota.ts`;
- * only these fields ever leave the fetch layer — response payload, headers,
- * and the OAuth token never do.
- */
+/** Usage fields safe to return from the Codex check. */
 export interface QuotaSnapshot {
 	checkedAt: string; // ISO 8601
 	allowed: boolean;

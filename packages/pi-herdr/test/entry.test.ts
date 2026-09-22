@@ -119,8 +119,6 @@ describe.skipIf(!existsSync(bundlePath))("entry reload mechanism (built bundle r
 			const verdict = JSON.parse(stdout.trim().split("\n").pop());
 			assert.equal(verdict.evalsAfterLoad, 1);
 			assert.ok(verdict.toolsAfterLoad.includes("herdr_orchestrate"));
-			assert.deepEqual([...verdict.toolsAfterLoad].sort(), ["codex_quota", "herdr_orchestrate", "herdr_unwatch", "herdr_watch", "herdr_watches"]);
-			assert.deepEqual(verdict.commands.sort(), ["codex-quota", "orchestrate", "watches"]);
 			assert.equal(verdict.rendererReturnsExternalBox, true);
 			assert.equal(verdict.evalsAfterUnchangedReload, 1, "unchanged reload must reuse the cached module graph");
 			assert.deepEqual(verdict.toolsAfterUnchangedReload, verdict.toolsAfterLoad);

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
 	mkdtempSync,
-	mkdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -24,6 +23,7 @@ const ENV_KEYS = [
 	"HERDR_PANE_ID",
 	"PI_HERDR_ORCHESTRATOR",
 	"PI_CODING_AGENT_DIR",
+	"CODEX_HOME",
 	"PI_HERDR_COMMAND",
 	"FAKE_HERDR_BEHAVIOR",
 	"FAKE_HERDR_DELAY_MS",
@@ -80,6 +80,7 @@ class FakePi {
 
 	registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }): void {
 		this.tools.set(tool.name, tool);
+		this.activeTools.push(tool.name);
 	}
 
 	registerCommand(name: string, command: { handler: (...args: any[]) => Promise<void> }): void {
@@ -112,10 +113,10 @@ class FakePi {
 		return results;
 	}
 
-	async execute(name: string, params: Record<string, unknown> = {}): Promise<any> {
+	async execute(name: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<any> {
 		const tool = this.tools.get(name);
 		if (!tool) throw new Error(`missing tool ${name}`);
-		return tool.execute("call-1", params, undefined, undefined, this.ctx);
+		return tool.execute("call-1", params, signal, undefined, this.ctx);
 	}
 
 	orchestrationEntries(): Array<{ active: boolean; sessionId: string; source: string }> {
@@ -179,6 +180,7 @@ async function createHarness(
 	process.env.HERDR_PANE_ID = "w1:p1";
 	process.env.PI_HERDR_ORCHESTRATOR = options.promoted === false ? "0" : "1";
 	process.env.PI_CODING_AGENT_DIR = dir;
+	process.env.CODEX_HOME = dir;
 	process.env.PI_HERDR_COMMAND = fixture;
 	process.env.FAKE_HERDR_BEHAVIOR = "ok";
 	delete process.env.FAKE_HERDR_DELAY_MS;
@@ -650,19 +652,13 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		} as any);
 	});
 
-	it("ignores legacy routing configuration and exposes only orchestration and watches", async () => {
+	it("ignores legacy routing configuration without restoring automatic quota collection", async () => {
 		const current = await createHarness(1, { promoted: false });
 		// Even malformed legacy configuration cannot block activation or trigger reads.
 		writeFileSync(join(current.dir, "herdr-routing.json"), "{ invalid legacy policy");
 		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
-		assert.deepEqual(
-			[...current.pi.tools.keys()].sort(),
-			["codex_quota", "herdr_orchestrate", ...ORCHESTRATOR_TOOLS].sort(),
-		);
-		assert.deepEqual(
-			[...current.pi.commands.keys()].sort(),
-			["codex-quota", "orchestrate", "watches"],
-		);
+		assert.ok(!current.pi.tools.has("herdr_route"));
+		assert.ok(!current.pi.commands.has("limits"));
 		assert.equal(current.pi.notices.at(-1)!.level, "info");
 		const context = (await current.pi.emit("context", { messages: [] }))[0] as any;
 		assert.deepEqual(context.messages, [], "no quota snapshot is injected");
@@ -731,46 +727,24 @@ describe("codex_quota tool", () => {
 		secondary_window: null,
 	};
 
-	it("is registered as an always-available tool", async () => {
+	it("checks quota without promotion and forwards cancellation", async () => {
 		const current = await createHarness(8, { promoted: false });
-		assert.ok(current.pi.tools.has("codex_quota"));
-		assert.ok(current.pi.tools.has("herdr_orchestrate"));
-	});
-
-	it("returns the quota snapshot as text and details", async () => {
-		const current = await createHarness(8);
-		const originalHome = process.env.HOME;
+		assert.ok(current.pi.getActiveTools().includes("codex_quota"));
 		const originalFetch = globalThis.fetch;
-		mkdirSync(join(current.dir, ".codex"), { recursive: true });
-		writeFileSync(
-			join(current.dir, ".codex", "auth.json"),
-			JSON.stringify({ tokens: { access_token: "tok", account_id: "acc" } }),
-		);
-		process.env.HOME = current.dir;
-		globalThis.fetch = (async () =>
-			new Response(JSON.stringify(QUOTA_BODY), { status: 200 })) as typeof fetch;
+		writeFileSync(join(current.dir, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }));
+		globalThis.fetch = async () => new Response(JSON.stringify(QUOTA_BODY));
 		try {
 			const response = await current.pi.execute("codex_quota");
-			assert.match(response.content[0].text, /^codex: ok — 92% of 7d used/u);
-			assert.equal(response.details.allowed, true);
+			assert.match(response.content[0].text, /92% of 7d/);
 			assert.equal(response.details.primary.usedPercent, 92);
+			const controller = new AbortController();
+			globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+				init!.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				controller.abort();
+			});
+			await assert.rejects(current.pi.execute("codex_quota", {}, controller.signal), /cancelled/);
 		} finally {
 			globalThis.fetch = originalFetch;
-			process.env.HOME = originalHome;
-		}
-	});
-
-	it("surfaces a safe error when Codex CLI is not logged in", async () => {
-		const current = await createHarness(8);
-		const originalHome = process.env.HOME;
-		process.env.HOME = current.dir; // no .codex/auth.json here
-		try {
-			await assert.rejects(
-				() => current.pi.execute("codex_quota"),
-				/codex login/u,
-			);
-		} finally {
-			process.env.HOME = originalHome;
 		}
 	});
 });

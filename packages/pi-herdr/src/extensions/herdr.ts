@@ -630,11 +630,11 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		name: "codex_quota",
 		label: "Codex Quota",
 		description:
-			"Check current Codex CLI (ChatGPT plan) rate-limit usage by querying OpenAI's usage endpoint with the OAuth token Codex CLI already stored locally. Returns allowed/limit-reached plus used percent, window length, and reset time for each reported window. Fresh read on every call; do NOT poll it in a loop — usage only moves when Codex work actually runs. Errors when Codex CLI is not logged in.",
+			"Check current Codex subscription usage using the local Codex CLI login. Returns allowed/limit-reached, usage percentages, window lengths, and reset delays. On demand only; do not poll in a loop.",
 		parameters: Type.Object({}),
 		executionMode: "sequential",
-		async execute() {
-			const snapshot = await fetchCodexQuota();
+		async execute(_toolCallId, _params, signal) {
+			const snapshot = await fetchCodexQuota({ signal });
 			return {
 				content: [{ type: "text", text: formatQuotaLine(snapshot) }],
 				details: snapshot,

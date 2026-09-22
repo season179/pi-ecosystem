@@ -1,14 +1,4 @@
-/**
- * Built-in Codex quota check: a thin, fresh read of the same usage endpoint
- * the Codex CLI itself calls, authenticated with the OAuth token Codex CLI
- * already stores on disk. Deliberately minimal — no cache, no background
- * polling, no refresh-token handling, no account binding, and no quota
- * arithmetic (the removed collector's mistakes are not repeated here).
- *
- * The access token exists in memory only for the duration of one call; it
- * never appears in snapshots, error messages, or telemetry. Errors are safe
- * to show: they carry status codes and remediation hints, never credentials.
- */
+/** On-demand Codex usage from the local CLI login; no polling or token refresh. */
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -25,6 +15,7 @@ export interface FetchCodexQuotaOptions {
 	url?: string;
 	/** Default 10 000 ms; the request aborts (and errors) past it. */
 	timeoutMs?: number;
+	signal?: AbortSignal;
 	/** Injectable for tests; defaults to global fetch. */
 	fetchImpl?: typeof fetch;
 }
@@ -80,16 +71,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeWindow(value: unknown): QuotaWindow | undefined {
-	if (!isRecord(value)) return undefined;
+	if (value === undefined || value === null) return undefined;
+	if (!isRecord(value)) throw new Error("Codex usage endpoint returned an invalid window");
 	const usedPercent = value.used_percent;
 	const windowSeconds = value.limit_window_seconds;
 	const resetAfterSeconds = value.reset_after_seconds;
 	if (
-		typeof usedPercent !== "number" ||
-		typeof windowSeconds !== "number" ||
-		typeof resetAfterSeconds !== "number"
+		typeof usedPercent !== "number" || !Number.isFinite(usedPercent) || usedPercent < 0 ||
+		typeof windowSeconds !== "number" || !Number.isFinite(windowSeconds) || windowSeconds <= 0 ||
+		typeof resetAfterSeconds !== "number" || !Number.isFinite(resetAfterSeconds) || resetAfterSeconds < 0
 	) {
-		return undefined;
+		throw new Error("Codex usage endpoint returned an invalid window");
 	}
 	return { usedPercent, windowSeconds, resetAfterSeconds };
 }
@@ -101,30 +93,37 @@ function normalizeUsage(payload: unknown, checkedAt: string): QuotaSnapshot {
 	const primary = normalizeWindow(rateLimit.primary_window);
 	const secondary = normalizeWindow(rateLimit.secondary_window);
 	const allowed = rateLimit.allowed;
-	if (typeof allowed !== "boolean" && primary === undefined && secondary === undefined) {
+	const limitReached = rateLimit.limit_reached;
+	if (typeof allowed !== "boolean" || typeof limitReached !== "boolean") {
 		throw new Error("Codex usage endpoint returned an unrecognized response shape");
 	}
 	const planType = root.plan_type;
 	return {
 		checkedAt,
-		allowed: allowed === true,
-		limitReached: rateLimit.limit_reached === true,
+		allowed,
+		limitReached,
 		...(primary !== undefined ? { primary } : {}),
 		...(secondary !== undefined ? { secondary } : {}),
 		...(typeof planType === "string" && planType.length > 0 ? { planType } : {}),
 	};
 }
 
-/**
- * Fetch and normalize one Codex quota observation. Throws plain `Error`s with
- * remediation hints; every message is safe to surface (no token contents).
- */
+/** Returns only usage fields; transport errors must not expose credentials. */
 export async function fetchCodexQuota(
 	options: FetchCodexQuotaOptions = {},
 ): Promise<QuotaSnapshot> {
 	const authPath = options.authPath ?? defaultAuthPath();
 	const url = options.url ?? DEFAULT_USAGE_URL;
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const timeout = AbortSignal.timeout(timeoutMs);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+	const interruption = (): Error | undefined => {
+		if (options.signal?.aborted) return new Error("Codex usage request cancelled");
+		if (timeout.aborted) return new Error(`Codex usage request timed out after ${timeoutMs}ms`);
+		return undefined;
+	};
+	const cancelled = interruption();
+	if (cancelled) throw cancelled;
 	const doFetch = options.fetchImpl ?? fetch;
 	const { accessToken, accountId } = readAuthTokens(authPath);
 
@@ -138,16 +137,11 @@ export async function fetchCodexQuota(
 					: {}),
 				Accept: "application/json",
 			},
-			signal: AbortSignal.timeout(timeoutMs),
+			signal,
 		});
-	} catch (error) {
-		const name = error instanceof Error ? error.name : "";
-		if (name === "TimeoutError" || name === "AbortError") {
-			throw new Error(`Codex usage request timed out after ${timeoutMs}ms`);
-		}
-		throw new Error(
-			`Codex usage request failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
+	} catch {
+		// Native header errors can quote the entire Authorization value.
+		throw interruption() ?? new Error("Codex usage request failed; check connectivity and Codex login");
 	}
 
 	if (response.status === 401 || response.status === 403) {
@@ -163,7 +157,7 @@ export async function fetchCodexQuota(
 	try {
 		payload = await response.json();
 	} catch {
-		throw new Error("Codex usage endpoint returned invalid JSON");
+		throw interruption() ?? new Error("Codex usage endpoint returned invalid JSON");
 	}
 	return normalizeUsage(payload, new Date().toISOString());
 }
