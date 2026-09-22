@@ -5,7 +5,11 @@
  */
 
 import type { DeliveryReason } from "./policy.js";
-import type { WatchOutcome, WatchRecordPublic } from "./types.js";
+import type {
+	QuotaSnapshot,
+	WatchOutcome,
+	WatchRecordPublic,
+} from "./types.js";
 
 export interface WatchCardDelivery {
 	reason: DeliveryReason;
@@ -190,4 +194,36 @@ export function formatStatusChip(
 		return wakesUsed > 0 ? `herdr: wakes ${wakesUsed}/${wakeBudget}` : undefined;
 	}
 	return `herdr: ${armedCount} ${armedCount === 1 ? "watch" : "watches"} · wakes ${wakesUsed}/${wakeBudget}`;
+}
+
+/** Compact window length: `604800` → `7d`, `18000` → `5h`, `5400` → `1h30m`. */
+export function formatWindowSeconds(seconds: number): string {
+	if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+	const hours = Math.floor(seconds / 3600);
+	if (seconds % 3600 === 0) return `${hours}h`;
+	if (hours > 0) return `${hours}h${Math.floor((seconds % 3600) / 60)}m`;
+	if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
+	return `${seconds}s`;
+}
+
+/** One compact human summary of a quota snapshot for tools and UI notices. */
+export function formatQuotaLine(snapshot: QuotaSnapshot): string {
+	const windows = [snapshot.primary, snapshot.secondary]
+		.filter((window) => window !== undefined)
+		.map((window) => {
+			const reset =
+				window.resetAfterSeconds > 0
+					? `, resets in ${formatWindowSeconds(window.resetAfterSeconds)}`
+					: "";
+			return `${window.usedPercent}% of ${formatWindowSeconds(window.windowSeconds)} used${reset}`;
+		});
+	const status = snapshot.limitReached
+		? "LIMIT REACHED"
+		: snapshot.allowed
+			? "ok"
+			: "blocked";
+	const plan = snapshot.planType !== undefined ? ` (${snapshot.planType})` : "";
+	const body =
+		windows.length > 0 ? windows.join("; ") : "no usage windows reported";
+	return `codex${plan}: ${status} — ${body}`;
 }

@@ -16,8 +16,10 @@ import {
 	parseOrchestrateArgs,
 	readOrchestrationState,
 } from "../orchestration-state.js";
+import { fetchCodexQuota } from "../quota.js";
 import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
+	formatQuotaLine,
 	formatStatusChip,
 	formatWatchCard,
 	formatWatchLine,
@@ -622,6 +624,24 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	// Always active (like herdr_orchestrate): a read-only quota peek is useful
+	// before and during orchestration, and leaks no orchestrator machinery.
+	pi.registerTool({
+		name: "codex_quota",
+		label: "Codex Quota",
+		description:
+			"Check current Codex CLI (ChatGPT plan) rate-limit usage by querying OpenAI's usage endpoint with the OAuth token Codex CLI already stored locally. Returns allowed/limit-reached plus used percent, window length, and reset time for each reported window. Fresh read on every call; do NOT poll it in a loop — usage only moves when Codex work actually runs. Errors when Codex CLI is not logged in.",
+		parameters: Type.Object({}),
+		executionMode: "sequential",
+		async execute() {
+			const snapshot = await fetchCodexQuota();
+			return {
+				content: [{ type: "text", text: formatQuotaLine(snapshot) }],
+				details: snapshot,
+			};
+		},
+	});
+
 	registerWatchesCommand(pi, {
 		list: () => manager?.list() ?? [],
 		stop: async (id) => {
@@ -670,6 +690,22 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 					: "orchestration already active for this session.",
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("codex-quota", {
+		description: "Show current Codex (ChatGPT plan) quota usage",
+		handler: async (_args, ctx) => {
+			try {
+				const snapshot = await fetchCodexQuota();
+				notify(ctx, formatQuotaLine(snapshot), "info");
+			} catch (error) {
+				notify(
+					ctx,
+					`codex quota unavailable: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+			}
 		},
 	});
 

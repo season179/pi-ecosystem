@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import {
 	formatDuration,
+	formatQuotaLine,
 	formatStatusChip,
 	formatWatchCard,
 	formatWatchLine,
+	formatWindowSeconds,
 } from "../src/render.js";
 import type {
 	CommandWatchSpec,
+	QuotaSnapshot,
 	WatchOutcome,
 	WatchRecordPublic,
 	WatchSpec,
@@ -358,5 +361,71 @@ describe("formatStatusChip", () => {
 	it("renders zero-budget states with and without watches", () => {
 		assert.equal(formatStatusChip(2, 0, 0), "herdr: 2 watches · wake off");
 		assert.equal(formatStatusChip(0, 0, 0), "herdr: wake off");
+	});
+});
+
+describe("formatWindowSeconds", () => {
+	it("formats exact days, hours, and mixed durations", () => {
+		assert.equal(formatWindowSeconds(604800), "7d");
+		assert.equal(formatWindowSeconds(18000), "5h");
+		assert.equal(formatWindowSeconds(5400), "1h30m");
+		assert.equal(formatWindowSeconds(158464), "44h1m");
+		assert.equal(formatWindowSeconds(90), "1m");
+		assert.equal(formatWindowSeconds(45), "45s");
+	});
+});
+
+describe("formatQuotaLine", () => {
+	function snapshot(
+		overrides: Partial<QuotaSnapshot> = {},
+	): QuotaSnapshot {
+		return {
+			checkedAt: "2026-09-22T10:00:00.000Z",
+			allowed: true,
+			limitReached: false,
+			...overrides,
+		};
+	}
+
+	it("summarizes the primary window and reset", () => {
+		assert.equal(
+			formatQuotaLine(
+				snapshot({
+					primary: {
+						usedPercent: 92,
+						windowSeconds: 604800,
+						resetAfterSeconds: 158464,
+					},
+				}),
+			),
+			"codex: ok — 92% of 7d used, resets in 44h1m",
+		);
+	});
+
+	it("includes plan, both windows, and limit-reached state", () => {
+		const line = formatQuotaLine(
+			snapshot({
+				planType: "pro",
+				allowed: false,
+				limitReached: true,
+				primary: {
+					usedPercent: 100,
+					windowSeconds: 18000,
+					resetAfterSeconds: 900,
+				},
+				secondary: {
+					usedPercent: 41,
+					windowSeconds: 604800,
+					resetAfterSeconds: 86400,
+				},
+			}),
+		);
+		assert.match(line, /^codex \(pro\): LIMIT REACHED — /u);
+		assert.match(line, /100% of 5h used, resets in 15m/u);
+		assert.match(line, /41% of 7d used, resets in 1d/u);
+	});
+
+	it("handles a snapshot with no windows", () => {
+		assert.equal(formatQuotaLine(snapshot()), "codex: ok — no usage windows reported");
 	});
 });

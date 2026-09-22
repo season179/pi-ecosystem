@@ -99,5 +99,26 @@ export interface HerdrConfig {
 	telemetryPath: string; // default "~/.pi/agent/herdr-telemetry.jsonl", "" disables
 }
 
+/** One reported rate-limit window (5-hour, weekly, …) as OpenAI shaped it. */
+export interface QuotaWindow {
+	usedPercent: number;
+	windowSeconds: number;
+	resetAfterSeconds: number;
+}
+
+/**
+ * Whitelisted view of one Codex usage observation. Built by `quota.ts`;
+ * only these fields ever leave the fetch layer — response payload, headers,
+ * and the OAuth token never do.
+ */
+export interface QuotaSnapshot {
+	checkedAt: string; // ISO 8601
+	allowed: boolean;
+	limitReached: boolean;
+	primary?: QuotaWindow;
+	secondary?: QuotaWindow;
+	planType?: string;
+}
+
 /** Thrown by `loadHerdrConfig` for unknown keys, wrong types, or bad JSON. */
 export class ConfigError extends Error {}

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
 	mkdtempSync,
+	mkdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -654,8 +655,14 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		// Even malformed legacy configuration cannot block activation or trigger reads.
 		writeFileSync(join(current.dir, "herdr-routing.json"), "{ invalid legacy policy");
 		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
-		assert.deepEqual([...current.pi.tools.keys()].sort(), ["herdr_orchestrate", ...ORCHESTRATOR_TOOLS].sort());
-		assert.deepEqual([...current.pi.commands.keys()].sort(), ["orchestrate", "watches"]);
+		assert.deepEqual(
+			[...current.pi.tools.keys()].sort(),
+			["codex_quota", "herdr_orchestrate", ...ORCHESTRATOR_TOOLS].sort(),
+		);
+		assert.deepEqual(
+			[...current.pi.commands.keys()].sort(),
+			["codex-quota", "orchestrate", "watches"],
+		);
 		assert.equal(current.pi.notices.at(-1)!.level, "info");
 		const context = (await current.pi.emit("context", { messages: [] }))[0] as any;
 		assert.deepEqual(context.messages, [], "no quota snapshot is injected");
@@ -710,4 +717,60 @@ describe.sequential("herdr quota context hygiene", () => {
 		assert.deepEqual(history, before, "the input history is not mutated");
 	});
 
+});
+
+describe("codex_quota tool", () => {
+	const QUOTA_BODY = {
+		allowed: true,
+		limit_reached: false,
+		primary_window: {
+			used_percent: 92,
+			limit_window_seconds: 604800,
+			reset_after_seconds: 158464,
+		},
+		secondary_window: null,
+	};
+
+	it("is registered as an always-available tool", async () => {
+		const current = await createHarness(8, { promoted: false });
+		assert.ok(current.pi.tools.has("codex_quota"));
+		assert.ok(current.pi.tools.has("herdr_orchestrate"));
+	});
+
+	it("returns the quota snapshot as text and details", async () => {
+		const current = await createHarness(8);
+		const originalHome = process.env.HOME;
+		const originalFetch = globalThis.fetch;
+		mkdirSync(join(current.dir, ".codex"), { recursive: true });
+		writeFileSync(
+			join(current.dir, ".codex", "auth.json"),
+			JSON.stringify({ tokens: { access_token: "tok", account_id: "acc" } }),
+		);
+		process.env.HOME = current.dir;
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify(QUOTA_BODY), { status: 200 })) as typeof fetch;
+		try {
+			const response = await current.pi.execute("codex_quota");
+			assert.match(response.content[0].text, /^codex: ok — 92% of 7d used/u);
+			assert.equal(response.details.allowed, true);
+			assert.equal(response.details.primary.usedPercent, 92);
+		} finally {
+			globalThis.fetch = originalFetch;
+			process.env.HOME = originalHome;
+		}
+	});
+
+	it("surfaces a safe error when Codex CLI is not logged in", async () => {
+		const current = await createHarness(8);
+		const originalHome = process.env.HOME;
+		process.env.HOME = current.dir; // no .codex/auth.json here
+		try {
+			await assert.rejects(
+				() => current.pi.execute("codex_quota"),
+				/codex login/u,
+			);
+		} finally {
+			process.env.HOME = originalHome;
+		}
+	});
 });

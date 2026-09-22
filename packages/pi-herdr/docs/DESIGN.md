@@ -11,6 +11,8 @@ not the entire surface. See **Status and evidence** below.
 
 Quota collection and worker routing have been removed. Pi-herdr provides session-owned orchestration activation, workflow guidance, and nonblocking watches. Worker selection belongs to the user or an external system. The old routing tool, `/limits`, CodexBar adapter, cache, model checks and quota snapshots are no longer part of the package. A small context filter still suppresses automatic quota messages persisted by older versions.
 
+**Built-in Codex quota check (2026-09-22).** A single on-demand read replaces none of the removed collector's machinery: `quota.ts` fetches the same OpenAI usage endpoint the Codex CLI itself calls, authenticated from the local Codex CLI login (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`). The `codex_quota` tool exposes a whitelisted snapshot to the model (always active in managed panes, like `herdr_orchestrate`); `/codex-quota` shows the same summary line to the user. No cache, no polling, no refresh-token handling, no account binding, no arithmetic; the token is read per call and never stored, logged, or returned. The endpoint is undocumented, so normalization is a strict whitelist and unknown shapes fail loudly instead of growing an adapter layer. The collector removal above stands.
+
 The routing and quota sections below record earlier designs, not current behavior.
 
 ## Conversational workflow and routing (2026-09-17, historical)
