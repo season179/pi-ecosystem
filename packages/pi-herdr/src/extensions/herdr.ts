@@ -15,11 +15,7 @@ import {
 	ORCHESTRATION_ENTRY_TYPE,
 	parseOrchestrateArgs,
 	readOrchestrationState,
-	summarizeRoutingStatus,
 } from "../orchestration-state.js";
-import { registerRoutingTool, routingGuidance } from "../routing-tool.js";
-import { loadRoutingConfig } from "../routing.js";
-import { QuotaMonitor, quotaSummary } from "../quota.js";
 import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
 	formatStatusChip,
@@ -32,13 +28,12 @@ import type { WatchOutcome, WatchRecordPublic, WatchSpec } from "../types.js";
 import { WatchManager } from "../watches.js";
 
 const WATCH_MESSAGE_TYPE = "pi-herdr-watch";
-const WATCH_TOOL_NAMES = [
+/** Tools that become active only while orchestration is explicitly on. */
+const ORCHESTRATOR_TOOL_NAMES = [
 	"herdr_watch",
 	"herdr_unwatch",
 	"herdr_watches",
 ] as const;
-/** Tools that become active only while orchestration is explicitly on. */
-const ORCHESTRATOR_TOOL_NAMES = [...WATCH_TOOL_NAMES, "herdr_route"] as const;
 const ORCHESTRATOR_TOOL_NAME_SET: ReadonlySet<string> = new Set(
 	ORCHESTRATOR_TOOL_NAMES,
 );
@@ -239,64 +234,12 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		}
 	};
 
-	const quotaWarnings = new Map<string, string>();
-	const quota = new QuotaMonitor({
-		agentDir,
-		config: () => loadRoutingConfig(agentDir).quota,
-		onUpdate: (report) => {
-			if (!promoted) return;
-			for (const group of report.groups) {
-				const signature = JSON.stringify([group.state, group.pressure, group.windows.filter(w => w.applicable).map(w => [w.id, w.resetsAt, w.state])]);
-				if (quotaWarnings.get(group.id) === signature) continue;
-				quotaWarnings.set(group.id, signature);
-				if (!group.warnings.length) continue;
-				// The notification is the only quota-warning surface. Steering this text into
-				// model context persisted one custom message per change, and those replays
-				// accumulated on every later call; current data reaches the model through the
-				// transient snapshot in the context hook instead.
-				notify(uiCtx, group.warnings.join("\n") + "\n" + quotaSummary({ ...report, groups: [group] }), "warning");
-			}
-		},
-	});
-
-	pi.registerCommand("limits", {
-		description: "Show Herdr subscription quotas (shared 30-minute cache; does not force a refresh)",
-		handler: async (_args, ctx) => {
-			const report = promoted ? await quota.refresh() : quota.read();
-			const text = quotaSummary(report) + "\n" + report.binding;
-			if (!ctx.hasUI) return;
-			pi.sendMessage({ customType: "pi-herdr-limits", content: text, display: true }, { triggerTurn: false });
-		},
-	});
-
 	pi.on("context", (event) => {
-		// Quota reporting stays out of the model's history: older versions persisted each
-		// warning as a steered custom message, and those replays accumulated on every call.
-		// Scrub the extension's persisted quota messages (exact customType matches only) from
-		// outbound context regardless of activation state; user text with identical wording,
-		// /limits output, watch messages and everything else pass through untouched.
-		const messages = event.messages.filter(m =>
+		// Older versions persisted automatic quota messages. Keep them out of resumed
+		// context without removing user text, historical /limits output or watch reports.
+		return { messages: event.messages.filter(m =>
 			!(m.role === "custom" &&
-				(m.customType === "pi-herdr-quota-warning" || m.customType === "pi-herdr-quota-context")));
-		if (!promoted) return { messages };
-		const report = quota.read();
-		if (!report.groups.length) return { messages };
-		// Exactly one transient latest snapshot per call; appended copies are never persisted.
-		return { messages: [...messages, {
-			role: "custom" as const, customType: "pi-herdr-quota-context", display: false, timestamp: Date.now(),
-			content: "Latest subscription snapshot (supersedes historical quota messages):\n" + quotaSummary(report) +
-				"\nUse herdr_route inspect for candidate eligibility, reserve and burn details. Reconsider delegation when budgets change; warn if premium or economical alternatives are constrained. Unknown is not unlimited. " + report.binding,
-		}] };
-	});
-
-	pi.on("message_end", (event, ctx) => {
-		if (!promoted || event.message.role !== "assistant" || event.message.stopReason !== "error") return;
-		// Ordinary HTTP 429 can be a transient throughput limit, not plan exhaustion.
-		if (!/usage_limit_reached|hit your ChatGPT usage limit|subscription quota exhausted/i.test(event.message.errorMessage ?? "")) return;
-		try {
-			const profile = loadRoutingConfig(agentDir).profiles.find(p => p.harness === "pi" && p.provider === ctx.model?.provider && p.model === ctx.model?.id);
-			if (profile) quota.reportExhausted(profile.id);
-		} catch { /* Unmapped route: do not guess a subscription. */ }
+				(m.customType === "pi-herdr-quota-warning" || m.customType === "pi-herdr-quota-context"))) };
 	});
 
 	const persistActivation = (
@@ -320,7 +263,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	): boolean => {
 		const changed = !promoted;
 		promoted = true;
-		quota.start();
 		setOrchestratorToolsActive(true);
 		updateFooter();
 		if (changed && options.persist) persistActivation(ctx, true, source);
@@ -332,19 +274,11 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		const stopped = manager ? (await manager.stop("all")).length : 0;
 		const changed = promoted;
 		promoted = false;
-		quota.stop();
-		quotaWarnings.clear();
 		recoveryNote = undefined;
 		setOrchestratorToolsActive(false);
 		updateFooter();
 		if (changed) persistActivation(ctx, false, "command");
 		return stopped;
-	};
-
-	/** Concise routing status for notifications; reads/validates the policy now. */
-	const routingStatus = (): { line: string; ready: boolean } => {
-		const line = summarizeRoutingStatus(routingGuidance(agentDir));
-		return { line, ready: line.startsWith("Routing ready") };
 	};
 
 	const OFF_DISCLOSURE =
@@ -362,7 +296,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			body,
 			"",
 			"## Runtime status",
-			`- ${routingGuidance(agentDir)}`,
 			"- Armed watches never survive reload, resume, new session, or fork; re-arm only after reconciling what is actually running.",
 			...(recoveryNote ? [`- ${recoveryNote}`] : []),
 			`- \`/orchestrate off\` removes this guidance and stops armed watches only; ${OFF_DISCLOSURE}`,
@@ -549,7 +482,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		name: "herdr_orchestrate",
 		label: "Herdr Orchestrate",
 		description:
-			"Activate herdr orchestration for this session: enables herdr_watch/herdr_unwatch/herdr_watches/herdr_route and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
+			"Activate herdr orchestration for this session: enables herdr_watch/herdr_unwatch/herdr_watches and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
 		parameters: Type.Object({}),
 		executionMode: "sequential",
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -564,8 +497,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			};
 		},
 	});
-
-	registerRoutingTool(pi, { isActive: () => promoted, quota });
 
 	pi.registerMessageRenderer(
 		WATCH_MESSAGE_TYPE,
@@ -732,15 +663,12 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			const changed = activate(ctx, "command", { persist: true });
-			const routing = routingStatus();
 			notify(
 				ctx,
-				`${
-					changed
-						? "orchestration active for this session: workflow guidance and herdr_watch/herdr_route enabled; no workers started. Restored on reload/resume, not on fork."
-						: "orchestration already active for this session."
-				} ${routing.line}.`,
-				routing.ready ? "info" : "warning",
+				changed
+					? "orchestration active for this session: workflow guidance and watch tools enabled; no workers started. Restored on reload/resume, not on fork."
+					: "orchestration already active for this session.",
+				"info",
 			);
 		},
 	});
@@ -779,7 +707,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 			promoted = state.own.active;
 			setOrchestratorToolsActive(promoted);
 			if (promoted) {
-				quota.start();
 				recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone and workers dispatched earlier are not being supervised until you verify them and re-arm.`;
 				if (firstNotice) {
 					notify(
@@ -799,11 +726,10 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		if (envActivation && !forked) {
 			activate(ctx, "env", { persist: true });
 			if (firstNotice) {
-				const routing = routingStatus();
 				notify(
 					ctx,
-					`orchestration active from PI_HERDR_ORCHESTRATOR=1 for this session; no workers started. ${routing.line}.`,
-					routing.ready ? "info" : "warning",
+					"orchestration active from PI_HERDR_ORCHESTRATOR=1 for this session; no workers started.",
+					"info",
 				);
 			}
 			return;
@@ -822,8 +748,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		uiCtx = ctx;
-		quota.stop();
-		quotaWarnings.clear();
 		agentBusy = false;
 		wakesUsed = 0;
 		exhaustionNotified = false;
@@ -854,8 +778,6 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		quota.stop();
-		quotaWarnings.clear();
 		uiCtx = ctx;
 		agentBusy = false;
 		sessionGeneration += 1;

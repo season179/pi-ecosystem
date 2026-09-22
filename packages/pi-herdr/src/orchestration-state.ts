@@ -102,13 +102,6 @@ export const ORCHESTRATION_SKILL_URL = new URL(
 	import.meta.url,
 );
 
-/** First clause of the routing guidance, short enough for a notification. */
-export function summarizeRoutingStatus(guidance: string): string {
-	const firstSentence = /^(.*?[^.]\.)(?:\s|$)/u.exec(guidance)?.[1] ?? guidance;
-	const trimmed = firstSentence.replace(/\.$/u, "");
-	return trimmed.length > 160 ? `${trimmed.slice(0, 157)}...` : trimmed;
-}
-
 /** Strip YAML frontmatter so only the skill body is injected. */
 export function stripFrontmatter(markdown: string): string {
 	const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/u.exec(markdown);

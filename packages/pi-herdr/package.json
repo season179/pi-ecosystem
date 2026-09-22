@@ -1,7 +1,7 @@
 {
   "name": "@season179/pi-herdr",
   "version": "26.8.0",
-  "description": "Conversational Herdr orchestration with editable worker routing and non-blocking watches.",
+  "description": "Conversational Herdr orchestration with non-blocking watches.",
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",

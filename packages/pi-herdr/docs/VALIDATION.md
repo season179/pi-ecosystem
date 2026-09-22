@@ -1,5 +1,13 @@
 # Orchestration validation
 
+## Quota and routing removal — 2026-09-22
+
+- Removed quota collection/cache, subscription checks, model routing and assignment recording, `herdr_route`, `/limits`, and automatic quota snapshots. The earlier routing/quota sections below are historical evidence for features no longer shipped.
+- Baseline: **190 tests in 14 files** passed. After removing feature-specific tests and updating activation/context coverage, **114 tests in 9 files** pass. Clean TypeScript/bundle build and package dry run pass; the package contains no quota/routing modules, schema, examples or setup guides.
+- A fresh installed Pi RPC process loaded this local package with a deliberately malformed legacy routing file. `/orchestrate` and `/orchestrate off` succeeded. The only Herdr tools were `herdr_orchestrate`, `herdr_watch`, `herdr_unwatch` and `herdr_watches`; `/limits` was absent. **Zero model turns and zero extension errors.** The smoke process exited.
+- Existing watch delivery, wake limits, lifecycle and rebuilt-bundle reload tests remain covered. Legacy automatic quota messages are still filtered from resumed model context; user text, watch reports and historical `/limits` output remain intact.
+- The locally installed package points at this checkout and has been rebuilt. Existing sessions need `/reload` to stop their old collector and load the removal. No replacement routing system, release bump or publication is included.
+
 ## Compact routing responses — 2026-09-20
 
 - `herdr_route` inspect/select now return a compact model-facing summary by default with `verbosity: "full"` for the previous bounded JSON. Routing, validation, quota semantics, `details` and launch arguments are unchanged; **187 tests in 14 files** pass, `tsc --noEmit` and the bundle build succeed. No release bump or publish.

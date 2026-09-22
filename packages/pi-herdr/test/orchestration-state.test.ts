@@ -7,7 +7,6 @@ import {
 	parseOrchestrateArgs,
 	readOrchestrationState,
 	stripFrontmatter,
-	summarizeRoutingStatus,
 } from "../src/orchestration-state.js";
 
 const entry = (active: boolean, sessionId: string) => ({
@@ -38,12 +37,6 @@ describe("orchestration state helpers", () => {
 		assert.deepEqual(parseOrchestrateArgs("off now"), { kind: "unknown", argument: "off now" });
 	});
 
-	it("summarizes routing guidance to its first sentence", () => {
-		assert.equal(summarizeRoutingStatus("Routing ready: 5 enabled profiles; call herdr_route. Policy: x."), "Routing ready: 5 enabled profiles; call herdr_route");
-		assert.equal(summarizeRoutingStatus("Routing setup required: Cannot read /a/herdr-routing.json (ENOENT). Review docs."), "Routing setup required: Cannot read /a/herdr-routing.json (ENOENT)");
-		assert.equal(summarizeRoutingStatus("no period"), "no period");
-	});
-
 	it("loads the bundled skill body without frontmatter", () => {
 		assert.equal(stripFrontmatter("---\nname: x\n---\nbody\n"), "body");
 		assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
@@ -59,15 +52,12 @@ describe("orchestration state helpers", () => {
 		const skill = loadOrchestrationSkill();
 		assert.ok("body" in skill);
 		assert.match(skill.body, /Do not load all references by default/);
-		assert.match(skill.body, /verify eligible external harnesses before first dispatch/);
-		assert.match(skill.body, /select` with `budgetChoice`/);
-		assert.match(skill.body, /Otherwise use baseline automatic selection/);
-		assert.match(skill.body, /Reserve `profileId`\/`override` for explicit user choices/);
+		assert.match(skill.body, /Follow the user's model and harness choices and permission requirements/);
+		assert.doesNotMatch(skill.body, /herdr_route|budgetChoice|quota|references\/routing\.md/);
 		assert.match(skill.body, /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/);
-		assert.match(skill.body, /missing\/invalid policy.*read \[Routing decisions\]/);
 		assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);
 		const links = [...skill.body.matchAll(/\]\((references\/[^)]+)\)/g)].map((m) => m[1]!);
-		assert.deepEqual(links, ["references/routing.md", "references/recovery.md"]);
+		assert.deepEqual(links, ["references/recovery.md"]);
 		for (const link of links) {
 			const reference = readFileSync(resolve(skill.directory, link), "utf8");
 			assert.ok(reference.startsWith("# "), `${link} readable from the supplied directory`);

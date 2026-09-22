@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
 	mkdtempSync,
-	existsSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -25,9 +24,6 @@ const ENV_KEYS = [
 	"PI_HERDR_ORCHESTRATOR",
 	"PI_CODING_AGENT_DIR",
 	"PI_HERDR_COMMAND",
-	"PI_HERDR_CODEXBAR",
-	"FAKE_CODEXBAR_LOG",
-	"FAKE_CODEXBAR_MODE",
 	"FAKE_HERDR_BEHAVIOR",
 	"FAKE_HERDR_DELAY_MS",
 	"FAKE_HERDR_NOTIFICATION_LOG",
@@ -214,7 +210,6 @@ const ORCHESTRATOR_TOOLS = [
 	"herdr_watch",
 	"herdr_unwatch",
 	"herdr_watches",
-	"herdr_route",
 ];
 
 function activeOrchestratorTools(current: Harness): string[] {
@@ -500,7 +495,8 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		assert.deepEqual(activeOrchestratorTools(current), []);
 		assert.deepEqual(current.pi.orchestrationEntries(), []);
 		assert.equal(await injectedPrompt(current), undefined);
-		assert.ok(current.pi.tools.has("herdr_route"), "herdr_route is registered but inactive");
+		assert.equal(current.pi.tools.has("herdr_route"), false);
+		assert.equal(current.pi.commands.has("limits"), false);
 	});
 
 	it("/orchestrate activates once, persists a session-owned entry, and injects the bundled skill", async () => {
@@ -514,17 +510,16 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 			{ active: true, sessionId: "session-a", source: "command", at: current.pi.orchestrationEntries()[0]!.at },
 		] as any);
 		assert.match(current.pi.notices.at(-1)!.message, /no workers started/u);
-		assert.match(current.pi.notices.at(-1)!.message, /Routing setup required: Cannot read .*herdr-routing\.json/u, "missing routing policy reported at activation");
-		assert.equal(current.pi.notices.at(-1)!.level, "warning");
+		assert.equal(current.pi.notices.at(-1)!.level, "info");
 
 		const prompt = await injectedPrompt(current);
 		assert.ok(prompt?.startsWith("BASE PROMPT\n\n# Herdr orchestration"));
 		assert.match(prompt!, /Own the outcome, not every pane/u, "skill body injected");
 		assert.ok(prompt!.includes(`Skill directory: ${fileURLToPath(new URL("../skills/orchestration/", import.meta.url))}`));
-		assert.match(prompt!, /references\/routing\.md/);
-		assert.doesNotMatch(prompt!, /^# Routing decisions|^# Recovery and handoff/m, "reference bodies stay on demand");
+		assert.match(prompt!, /references\/recovery\.md/);
+		assert.doesNotMatch(prompt!, /^# Recovery and handoff/m, "reference bodies stay on demand");
 		assert.doesNotMatch(prompt!, /^---\nname:/mu, "frontmatter stripped");
-		assert.match(prompt!, /Routing (ready|setup required)/u, "routing status included");
+		assert.doesNotMatch(prompt!, /herdr_route|Routing (ready|setup required)|budgetChoice|CodexBar/u);
 		assert.match(prompt!, /Armed watches never survive/u);
 
 		await command.handler("  ", current.pi.ctx);
@@ -576,7 +571,7 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		assert.match(notice, /^orchestration off: stopped 1 armed watch \(their child processes were terminated\)/u);
 		assert.match(notice, /workers were NOT stopped and conversation history is unchanged/u);
 		assert.equal(await injectedPrompt(current), undefined);
-		await assert.rejects(current.pi.execute("herdr_route", { action: "select", difficulty: "easy" }), /Activate orchestration explicitly/u);
+		assert.equal(current.pi.tools.has("herdr_route"), false);
 
 		await command.handler("off", current.pi.ctx);
 		assert.equal(current.pi.orchestrationEntries().length, 2, "repeated off appends nothing");
@@ -654,43 +649,20 @@ describe.sequential("herdr orchestration activation lifecycle", () => {
 		} as any);
 	});
 
-	it("collects only for active orchestration, injects current quota, and warns without idle wakes", async () => {
+	it("ignores legacy routing configuration and exposes only orchestration and watches", async () => {
 		const current = await createHarness(1, { promoted: false });
-		const { pi, dir } = current;
-		process.env.PI_HERDR_CODEXBAR = fileURLToPath(new URL("./fixtures/fake-codexbar.mjs", import.meta.url));
-		process.env.FAKE_CODEXBAR_LOG = join(dir, "quota-calls.jsonl");
-		delete process.env.FAKE_CODEXBAR_MODE;
-		const policy = JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8"));
-		policy.quota = { groups: [{ id: "astra", provider: "codex", source: "oauth", profiles: ["pi-astra", "codex-astra"], reservePercent: 10 }] };
-		writeFileSync(join(dir, "herdr-routing.json"), JSON.stringify(policy));
-		await pi.commands.get("limits")!.handler("", pi.ctx);
-		assert.equal(existsSync(process.env.FAKE_CODEXBAR_LOG!), false, "inactive sessions/workers do not poll");
-		await pi.commands.get("orchestrate")!.handler("", pi.ctx);
-		await pi.commands.get("limits")!.handler("", pi.ctx);
-		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1);
-		const warningMessages = () => pi.messages.filter(m => m.message.customType === "pi-herdr-quota-warning");
-		assert.equal(warningMessages().length, 0, "warnings never enter model context");
-		assert.ok(pi.messages.every(m => m.options.triggerTurn === false), "nothing starts an idle turn");
-		const quotaNotices = () => pi.notices.filter(n => /preserve orchestration capacity/.test(n.message));
-		assert.equal(quotaNotices().length, 1, "the notification is the only warning surface");
-		assert.equal(quotaNotices()[0]!.level, "warning");
-		assert.equal(pi.messages.filter(m => m.message.customType === "pi-herdr-limits").every(m => m.message.display === true), true, "/limits remains the displayed command surface");
-		await pi.commands.get("limits")!.handler("", pi.ctx);
-		assert.equal(quotaNotices().length, 1, "reusing cache does not repeat warnings");
-		const contexts = await pi.emit("context", { messages: [] }) as Array<any>;
-		assert.match(contexts.find(c => c?.messages)?.messages[0].content, /5% left/);
-		assert.doesNotMatch(JSON.stringify(pi.messages), /fixture-private@example/);
-		Object.assign(pi.ctx, { model: { provider: "openai-codex", id: "gpt-6-astra" } });
-		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 429 too many requests" } });
-		assert.equal(quotaNotices().length, 1, "generic rate limits are not exhaustion");
-		await pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit" } });
-		assert.equal(quotaNotices().length, 2, "confirmed exhaustion is notified once");
-		assert.match(quotaNotices().at(-1)!.message, /exhausted/);
-		assert.equal(warningMessages().length, 0, "exhaustion is not steered into model context either");
-		assert.equal(readFileSync(process.env.FAKE_CODEXBAR_LOG!, "utf8").trim().split("\n").length, 1, "exhaustion does not force polling");
-		await pi.commands.get("orchestrate")!.handler("off", pi.ctx);
-		const afterOff = (await pi.emit("context", { messages: [] }))[0] as any;
-		assert.deepEqual(afterOff?.messages, [], "off sessions still return the filtered context, not undefined");
+		// Even malformed legacy configuration cannot block activation or trigger reads.
+		writeFileSync(join(current.dir, "herdr-routing.json"), "{ invalid legacy policy");
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
+		assert.deepEqual([...current.pi.tools.keys()].sort(), ["herdr_orchestrate", ...ORCHESTRATOR_TOOLS].sort());
+		assert.deepEqual([...current.pi.commands.keys()].sort(), ["orchestrate", "watches"]);
+		assert.equal(current.pi.notices.at(-1)!.level, "info");
+		const context = (await current.pi.emit("context", { messages: [] }))[0] as any;
+		assert.deepEqual(context.messages, [], "no quota snapshot is injected");
+		await current.pi.emit("message_end", { message: { role: "assistant", stopReason: "error", errorMessage: "subscription quota exhausted" } });
+		assert.deepEqual(current.pi.messages, [], "no quota messages are generated");
+		const delivered = await arm(current);
+		assert.equal(delivered.message.message.customType, "pi-herdr-watch");
 	});
 });
 
@@ -713,33 +685,17 @@ describe.sequential("herdr quota context hygiene", () => {
 	const retained = (history: any[]): any[] =>
 		history.filter(m => m.customType !== "pi-herdr-quota-warning" && m.customType !== "pi-herdr-quota-context");
 
-	async function activateWithQuota(current: Harness): Promise<void> {
-		// The collector is the fake fixture: collection succeeds (95% used) without touching
-		// a real codexbar install. A deliberately missing binary is not an option here:
-		// aborting a pending spawn of one SIGKILLs the test process (Node child_process bug).
-		process.env.PI_HERDR_CODEXBAR = fileURLToPath(new URL("./fixtures/fake-codexbar.mjs", import.meta.url));
-		process.env.FAKE_CODEXBAR_LOG = join(current.dir, "quota-calls.jsonl");
-		const policy = JSON.parse(readFileSync(new URL("../docs/herdr-routing.example.json", import.meta.url), "utf8"));
-		policy.quota = { groups: [{ id: "astra", provider: "codex", source: "oauth", profiles: ["pi-astra", "codex-astra"], reservePercent: 10 }] };
-		writeFileSync(join(current.dir, "herdr-routing.json"), JSON.stringify(policy));
-		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
-	}
-
-	it("scrubs persisted quota messages and appends exactly one fresh snapshot while active", async () => {
+	it("scrubs persisted quota messages without appending a snapshot while active", async () => {
 		const current = await createHarness(0, { promoted: false });
-		await activateWithQuota(current);
+		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
 		const history = oldHistory();
 		const before = JSON.parse(JSON.stringify(history));
 		const results = (await current.pi.emit("context", { messages: history })) as Array<{ messages?: any[] } | undefined>;
 		const out = results.find(r => r?.messages)?.messages;
 		assert.ok(out, "the active hook returns a message list");
 		assert.equal(out.filter(m => m.customType === "pi-herdr-quota-warning").length, 0, "persisted warnings are gone");
-		assert.equal(out.filter(m => m.customType === "pi-herdr-quota-context").length, 1, "exactly one snapshot remains");
-		const appended = out.at(-1)!;
-		assert.equal(appended.customType, "pi-herdr-quota-context", "the snapshot is appended last");
-		assert.match(appended.content, /Latest subscription snapshot/u);
-		assert.equal(appended.display, false);
-		assert.deepEqual(out.slice(0, -1), retained(before), "identical-prose user text, watch and /limits messages are retained in order");
+		assert.equal(out.filter(m => m.customType === "pi-herdr-quota-context").length, 0, "no snapshot is appended");
+		assert.deepEqual(out, retained(before), "identical-prose user text, watch and historical /limits messages are retained in order");
 		assert.deepEqual(history, before, "the input history is not mutated");
 	});
 
@@ -754,14 +710,4 @@ describe.sequential("herdr quota context hygiene", () => {
 		assert.deepEqual(history, before, "the input history is not mutated");
 	});
 
-	it("appends no snapshot when active but no quota groups are configured", async () => {
-		const current = await createHarness(0, { promoted: false });
-		await current.pi.commands.get("orchestrate")!.handler("", current.pi.ctx);
-		const results = (await current.pi.emit("context", { messages: oldHistory() })) as Array<{ messages?: any[] } | undefined>;
-		const out = results.find(r => r?.messages)?.messages;
-		assert.ok(out, "the no-groups hook filters instead of returning undefined");
-		assert.equal(out.some(m => m.customType === "pi-herdr-quota-context"), false, "no snapshot without configured groups");
-		assert.equal(out.some(m => m.customType === "pi-herdr-quota-warning"), false, "warnings are still scrubbed");
-		assert.equal(out.length, retained(oldHistory()).length, "unrelated messages are retained");
-	});
 });
