@@ -44,6 +44,8 @@ Worker selection is supplied by the user or an external system. Pi-herdr does no
 
 `codex_quota` (available in managed panes) and `/codex-quota` read current usage using `$CODEX_HOME/auth.json`, or `~/.codex/auth.json`. Each call queries OpenAI's internal endpoint with a ten-second timeout; tool calls support cancellation. Missing credentials, invalid responses, and request failures are reported as errors. There is no polling, cache, or token refresh.
 
+`claude_quota` and `/claude-quota` similarly report Claude's five-hour, weekly, and scoped model limits with absolute reset times. The default macOS login is read from Keychain (`Claude Code-credentials`); other platforms and custom `CLAUDE_CONFIG_DIR` profiles use `.credentials.json`. Custom profiles require that file and never fall back to the default account. Checks time out after ten seconds (Keychain reads after five), support tool cancellation, and report rate-limited requests as unavailable. No polling or token refresh.
+
 ## Watch Tools and Modes
 
 `herdr_watch` defaults to `mode: "agent"`. Every mode accepts optional `note` and `wake` fields; `wake` defaults to `true`. A wake-disabled watch still delivers a card but never starts an idle turn.

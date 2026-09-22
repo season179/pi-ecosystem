@@ -24,6 +24,7 @@ const ENV_KEYS = [
 	"PI_HERDR_ORCHESTRATOR",
 	"PI_CODING_AGENT_DIR",
 	"CODEX_HOME",
+	"CLAUDE_CONFIG_DIR",
 	"PI_HERDR_COMMAND",
 	"FAKE_HERDR_BEHAVIOR",
 	"FAKE_HERDR_DELAY_MS",
@@ -181,6 +182,7 @@ async function createHarness(
 	process.env.PI_HERDR_ORCHESTRATOR = options.promoted === false ? "0" : "1";
 	process.env.PI_CODING_AGENT_DIR = dir;
 	process.env.CODEX_HOME = dir;
+	process.env.CLAUDE_CONFIG_DIR = dir;
 	process.env.PI_HERDR_COMMAND = fixture;
 	process.env.FAKE_HERDR_BEHAVIOR = "ok";
 	delete process.env.FAKE_HERDR_DELAY_MS;
@@ -713,6 +715,33 @@ describe.sequential("herdr quota context hygiene", () => {
 		assert.deepEqual(history, before, "the input history is not mutated");
 	});
 
+});
+
+describe("claude_quota tool", () => {
+	it("reports scoped usage without promotion and forwards cancellation", async () => {
+		const current = await createHarness(8, { promoted: false });
+		assert.ok(current.pi.getActiveTools().includes("claude_quota"));
+		writeFileSync(join(current.dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token" } }));
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = async () => new Response(JSON.stringify({
+			limits: [{ kind: "weekly_scoped", percent: 89, resets_at: "2026-09-26T16:00:00Z", scope: { model: { display_name: "Fable" } } }],
+		}));
+		try {
+			const result = await current.pi.execute("claude_quota");
+			assert.match(result.content[0].text, /Fable.*89%/);
+			assert.equal(result.details.windows[0].usedPercent, 89);
+			await current.pi.commands.get("claude-quota")!.handler("", current.pi.ctx);
+			assert.match(current.pi.notices.at(-1)!.message, /Fable.*89%/);
+			const controller = new AbortController();
+			globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+				init!.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				controller.abort();
+			});
+			await assert.rejects(current.pi.execute("claude_quota", {}, controller.signal), /cancelled/);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });
 
 describe("codex_quota tool", () => {

@@ -11,7 +11,7 @@ not the entire surface. See **Status and evidence** below.
 
 Automatic quota collection and worker routing were removed. Pi-herdr provides session-owned orchestration, workflow guidance, and nonblocking watches. Worker selection belongs to the user or an external system; legacy routing configuration and caches are ignored, and automatic quota messages from older sessions are filtered out.
 
-`codex_quota` and `/codex-quota` provide an on-demand usage check using the local Codex login. This does not restore polling, caching, or routing. See the [README](../README.md) for usage and failure behavior.
+`codex_quota` / `/codex-quota` and `claude_quota` / `/claude-quota` provide on-demand usage checks using the respective local CLI logins. This does not restore polling, caching, or routing. See the [README](../README.md) for usage and failure behavior.
 
 The routing and quota sections below record earlier designs, not current behavior.
 

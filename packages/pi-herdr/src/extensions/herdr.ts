@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { fetchClaudeQuota, formatClaudeQuota } from "../claude-quota.js";
 import { registerWatchesCommand } from "../commands.js";
 import { loadHerdrConfig } from "../config.js";
 import { runHerdr } from "../herdr-cli.js";
@@ -642,6 +643,22 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerTool({
+		name: "claude_quota",
+		label: "Claude Quota",
+		description:
+			"Check Claude subscription usage using the local Claude Code login. Returns five-hour, weekly, and reported model-specific weekly windows with usage percentages and absolute reset times. Missing windows are unknown, not zero usage. On demand only; do not poll in a loop.",
+		parameters: Type.Object({}),
+		executionMode: "sequential",
+		async execute(_toolCallId, _params, signal) {
+			const snapshot = await fetchClaudeQuota({ signal });
+			return {
+				content: [{ type: "text", text: formatClaudeQuota(snapshot) }],
+				details: snapshot,
+			};
+		},
+	});
+
 	registerWatchesCommand(pi, {
 		list: () => manager?.list() ?? [],
 		stop: async (id) => {
@@ -705,6 +722,17 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 					`codex quota unavailable: ${error instanceof Error ? error.message : String(error)}`,
 					"error",
 				);
+			}
+		},
+	});
+
+	pi.registerCommand("claude-quota", {
+		description: "Show current Claude subscription usage",
+		handler: async (_args, ctx) => {
+			try {
+				notify(ctx, formatClaudeQuota(await fetchClaudeQuota()), "info");
+			} catch (error) {
+				notify(ctx, `claude quota unavailable: ${errorMessage(error)}`, "error");
 			}
 		},
 	});
