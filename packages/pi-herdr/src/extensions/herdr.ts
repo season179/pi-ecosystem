@@ -29,6 +29,7 @@ import {
 import { appendTelemetry } from "../telemetry.js";
 import type { WatchOutcome, WatchRecordPublic, WatchSpec } from "../types.js";
 import { WatchManager } from "../watches.js";
+import { fetchZaiQuota, formatZaiQuota } from "../zai-quota.js";
 
 const WATCH_MESSAGE_TYPE = "pi-herdr-watch";
 /** Tools that become active only while orchestration is explicitly on. */
@@ -659,6 +660,22 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerTool({
+		name: "zai_quota",
+		label: "Z.ai Quota",
+		description:
+			"Check personal Z.ai Coding Plan usage using Pi's configured zai API key. Returns coding and MCP quota windows with reported usage percentages and absolute reset times. Shared subscription limits are not per-model headroom. On demand only; do not poll in a loop.",
+		parameters: Type.Object({}),
+		executionMode: "sequential",
+		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+			const snapshot = await fetchZaiQuota({ getApiKey: () => ctx.modelRegistry.getApiKeyForProvider("zai"), signal });
+			return {
+				content: [{ type: "text", text: formatZaiQuota(snapshot) }],
+				details: snapshot,
+			};
+		},
+	});
+
 	registerWatchesCommand(pi, {
 		list: () => manager?.list() ?? [],
 		stop: async (id) => {
@@ -733,6 +750,18 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 				notify(ctx, formatClaudeQuota(await fetchClaudeQuota()), "info");
 			} catch (error) {
 				notify(ctx, `claude quota unavailable: ${errorMessage(error)}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("zai-quota", {
+		description: "Show current personal Z.ai Coding Plan usage",
+		handler: async (_args, ctx) => {
+			try {
+				const snapshot = await fetchZaiQuota({ getApiKey: () => ctx.modelRegistry.getApiKeyForProvider("zai") });
+				notify(ctx, formatZaiQuota(snapshot), "info");
+			} catch (error) {
+				notify(ctx, `z.ai quota unavailable: ${errorMessage(error)}`, "error");
 			}
 		},
 	});

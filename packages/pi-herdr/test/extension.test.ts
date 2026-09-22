@@ -717,6 +717,43 @@ describe.sequential("herdr quota context hygiene", () => {
 
 });
 
+describe("zai_quota tool", () => {
+	it("uses Pi's zai credentials for tool and command, and forwards cancellation", async () => {
+		const current = await createHarness(8, { promoted: false });
+		assert.ok(current.pi.getActiveTools().includes("zai_quota"));
+		const ctx = {
+			...current.pi.ctx,
+			modelRegistry: { getApiKeyForProvider: async (provider: string) => {
+				assert.equal(provider, "zai");
+				return "test-zai-key";
+			} },
+		};
+		const tool = current.pi.tools.get("zai_quota")!;
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = async (_url, init) => {
+			assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer test-zai-key");
+			return new Response(JSON.stringify({ success: true, code: 200, data: { limits: [
+				{ type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 12 },
+			] } }));
+		};
+		try {
+			const result = await tool.execute("test", {}, undefined, undefined, ctx);
+			assert.match(result.content[0].text, /1 week.*12%/);
+			assert.equal(result.details.windows[0].usedPercent, 12);
+			await current.pi.commands.get("zai-quota")!.handler("", ctx);
+			assert.match(current.pi.notices.at(-1)!.message, /1 week.*12%/);
+			const controller = new AbortController();
+			globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+				init!.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				controller.abort();
+			});
+			await assert.rejects(tool.execute("test", {}, controller.signal, undefined, ctx), /cancelled/);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+});
+
 describe("claude_quota tool", () => {
 	it("reports scoped usage without promotion and forwards cancellation", async () => {
 		const current = await createHarness(8, { promoted: false });

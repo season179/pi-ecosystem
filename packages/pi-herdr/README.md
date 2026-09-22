@@ -46,6 +46,8 @@ Worker selection is supplied by the user or an external system. Pi-herdr does no
 
 `claude_quota` and `/claude-quota` similarly report Claude's five-hour, weekly, and scoped model limits with absolute reset times. The default macOS login is read from Keychain (`Claude Code-credentials`); other platforms and custom `CLAUDE_CONFIG_DIR` profiles use `.credentials.json`. Custom profiles require that file and never fall back to the default account. Checks time out after ten seconds (Keychain reads after five), support tool cancellation, and report rate-limited requests as unavailable. No polling or token refresh.
 
+`zai_quota` and `/zai-quota` read personal Z.ai Coding Plan usage from `api.z.ai`, using Pi's configured `zai` credentials. Coding windows and monthly MCP calls are reported separately, with server percentages and absolute reset times. The ten-second check supports tool cancellation; failed requests remain unavailable. No polling, caching, or team/China endpoint support.
+
 ## Watch Tools and Modes
 
 `herdr_watch` defaults to `mode: "agent"`. Every mode accepts optional `note` and `wake` fields; `wake` defaults to `true`. A wake-disabled watch still delivers a card but never starts an idle turn.
