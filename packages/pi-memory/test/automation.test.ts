@@ -66,7 +66,7 @@ interface Services {
 	jev: Fetch;
 	hindsight: HindsightFetch;
 	jevCalls: JevCall[];
-	recalls: Array<{ query: string; tag_groups?: TagGroup[]; tags?: unknown }>;
+	recalls: Array<{ query: string; tag_groups?: TagGroup[]; tags?: unknown; prefer_observations?: unknown }>;
 	retains: RetainBody[];
 }
 
@@ -242,6 +242,8 @@ describe("automatic memory through a real Pi SDK session", () => {
 		assert.ok(context.includes("(user-wide preference; stated in project other-repo)"));
 		assert.ok(!JSON.stringify(rig.harness.captures[0].context.systemPrompt).includes(MEMORY_TEXT));
 		assert.deepEqual(services.recalls.map((recall) => recall.query), [PROMPT]);
+		// Duplication guard: the server must drop raw facts superseded by observations.
+		assert.equal(services.recalls[0].prefer_observations, true, "recall must ask the server to prefer observations");
 		assert.deepEqual(services.jevCalls[0].questions, ["recall", "scope_0", "unit_0"]);
 
 		assert.equal(services.retains.length, 1);

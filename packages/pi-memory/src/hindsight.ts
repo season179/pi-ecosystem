@@ -133,6 +133,9 @@ export async function hindsightRecall(
 			max_tokens: params.maxTokens,
 			// Chunks and source facts are not tag-filtered server-side: never request them.
 			include: { entities: null, chunks: null, source_facts: null },
+			// Observations supersede the raw facts they were consolidated from, so the
+			// same content is not recalled (and injected) twice; freed slots backfill.
+			prefer_observations: true,
 			...(params.tagGroups !== undefined ? { tag_groups: params.tagGroups } : {}),
 		},
 		options,

@@ -168,6 +168,10 @@ ownership-tagged.
 - **Chunks and source facts are not tag-filtered**
   (`memory_engine.py:9646,9260`). They are explicitly disabled in the request
   (`include: {entities: null, chunks: null, source_facts: null}`).
+- **`prefer_observations: true`** makes recall drop any raw fact consolidated
+  into an observation in the results, backfilling the freed slots
+  (`memory_engine.py` step 4.8), so fact-plus-own-observation duplicates are
+  not returned or injected.
 - **Retrying the same `operation_id`** returns the original operation, so no
   duplicate work is created.
 
@@ -312,12 +316,16 @@ Feedback loops are cut in three ways:
   - Real-Jev robustness data point: an assistant's acknowledgment ("Understood,
     I will keep release notes concise") was labeled `user_preference` 0.60 but
     correctly demoted to project-local by the deterministic user-role guard.
-  - Known limitation observed: extraction of one retained item yielded both a
-    fact and an observation, and recall returned both, so the same preference
-    was injected twice with different provenance labels ("stated in project X"
-    and "stated in an earlier session"). There is no recall-side dedup today;
-    duplicates cost injection budget (2 of 8 item slots here) and would grow
-    with bank size. Bounded by the 8-item cap; not fixed in this change.
+  - Duplication observed in the first run (fixed the same day): extraction of
+    one retained item yielded both a fact and an observation, and recall
+    returned both, injecting the same preference twice. **Resolved narrowly**:
+    every recall now sends `prefer_observations: true` (Hindsight 0.10.1
+    `RecallRequest`), so the server drops raw facts consolidated into a
+    returned observation and backfills the freed slots; a regression test
+    pins the wire option, and a rerun of the live probe showed the preference
+    recalled and injected exactly once (same-project and cross-project). This
+    is not a semantic-dedup guarantee: distinct facts that were never
+    consolidated together can still coexist in results.
   Limits: synthetic one-off traffic only — this is wiring evidence, not an
   evaluation of classification quality on real conversations, and it says
   nothing about long-run bank growth or consolidation behaviour.
