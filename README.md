@@ -4,6 +4,8 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 
 ## Packages
 
+- [`@season179/pi-accounts`](./packages/pi-accounts) — Unpublished. OAuth account manager fork with quota-aware ChatGPT primary/fallback switching.
+
 - [`@season179/pi-buddy`](./packages/pi-buddy) — Published. Read-only sparring partner for requested consultations and automatic review.
 - [`@season179/pi-herdr`](./packages/pi-herdr) — Pre-release. Non-blocking watch/wake bridge for a Pi orchestrator already operating through Herdr.
 - [`@season179/pi-guard`](./packages/pi-guard) — Pre-release. Intent reviewer that blocks unauthorized or unrelated tool actions.

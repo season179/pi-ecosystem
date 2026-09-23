@@ -1,0 +1,64 @@
+{
+  "name": "@season179/pi-accounts",
+  "version": "26.9.0",
+  "description": "OAuth account manager with quota-aware ChatGPT priority and fallback switching.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "accounts",
+    "oauth",
+    "codex",
+    "anthropic",
+    "claude",
+    "github-copilot",
+    "kimi",
+    "openrouter",
+    "radius",
+    "xai",
+    "grok"
+  ],
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "UPSTREAM.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "node scripts/build-runtime.mjs",
+    "check": "npm run build && npm run typecheck && npm test",
+    "test": "vitest run --root ../.. packages/pi-accounts/test",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@narumitw/pi-tui-kit": "^0.59.0",
+    "proper-lockfile": "^4.1.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": ">=0.87.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "esbuild": "0.28.2",
+    "typescript": "^5.9.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/season179/pi-ecosystem",
+    "directory": "packages/pi-accounts"
+  }
+}

@@ -20,7 +20,8 @@
     "pack:model-fallback": "npm pack --workspace @season179/pi-model-fallback",
     "pack:memory": "npm pack --workspace @season179/pi-memory",
     "pack:compaction": "npm pack --workspace @season179/pi-compaction",
-    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-herdr --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run && npm pack --workspace @season179/pi-model-fallback --dry-run && npm pack --workspace @season179/pi-memory --dry-run && npm pack --workspace @season179/pi-compaction --dry-run"
+    "pack:accounts": "npm pack --workspace @season179/pi-accounts",
+    "validate": "npm run build && npm pack --workspace @season179/pi-worktree --dry-run && npm pack --workspace @season179/pi-skills-status --dry-run && npm pack --workspace @season179/pi-readbeam --dry-run && npm pack --workspace @season179/pi-buddy --dry-run && npm pack --workspace @season179/pi-herdr --dry-run && npm pack --workspace @season179/pi-delegate --dry-run && npm pack --workspace @season179/pi-guard --dry-run && npm pack --workspace @season179/pi-model-fallback --dry-run && npm pack --workspace @season179/pi-memory --dry-run && npm pack --workspace @season179/pi-compaction --dry-run && npm pack --workspace @season179/pi-accounts --dry-run"
   },
   "engines": {
     "node": ">=22"

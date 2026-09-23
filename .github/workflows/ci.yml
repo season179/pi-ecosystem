@@ -17,6 +17,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run check --workspace @season179/pi-accounts
+      - run: npm pack --workspace @season179/pi-accounts --dry-run
       - run: npm test --workspace @season179/pi-memory
       - run: npm test --workspace @season179/pi-buddy
       - run: npm test --workspace @season179/pi-herdr
