@@ -29,7 +29,7 @@ An agent becomes the orchestrator when you explicitly ask it, for example:
 
 > You are the orchestrator — dispatch this to the workers.
 
-Use `/orchestrate` as the single entry point. It activates the bundled [workflow](skills/orchestration/SKILL.md), `herdr_watch`, `herdr_unwatch`, and `herdr_watches`, without starting a model turn or launching workers. Repeating it is idempotent. Unknown arguments are rejected.
+Use `/orchestrate` as the single entry point. It activates the bundled [workflow](skills/orchestration/SKILL.md), `herdr_select`, `herdr_watch`, `herdr_unwatch`, and `herdr_watches`, without starting a model turn or launching workers. Repeating it is idempotent. Unknown arguments are rejected.
 
 Natural-language requests use the always-active `herdr_orchestrate` tool through the same activation path; this depends on the model following its explicit-request instruction. The tool returns immediate workflow guidance; subsequent agent runs receive scoped system-prompt guidance while active. The skill is hidden from automatic model invocation so installation does not assign every worker the orchestrator role. It uses progressive disclosure: only the compact core workflow is injected; recovery procedures live in a `references/` file with explicit read-when triggers. Injected guidance includes the skill's absolute directory so reference links work from any project cwd. Reference bodies are never eagerly injected.
 
@@ -40,7 +40,34 @@ Natural-language requests use the always-active `herdr_orchestrate` tool through
 
 Activation grants no operational permission beyond the user's request. No automatic worker launch, Git integration, task restart, push, or deployment is implemented.
 
-Worker selection is supplied by the user or an external system. Pi-herdr does not read routing policies, check model eligibility, poll providers, or inject quota snapshots. The former `herdr_route` tool and `/limits` command have been removed. Existing routing configuration and quota cache files are ignored. Resumed sessions still filter automatic quota messages persisted by older versions.
+## Worker Selection
+
+The active orchestrator calls `herdr_select` before choosing between inline work and delegation, and again before each new worker launch. The tool launches nothing. It does not poll or cache quota.
+
+Two TypeSafe Jev requests decide:
+
+1. A task profile: difficulty, quick-inline probability, and whether the task needs images.
+2. An allocation choice across inline work, every valid worker, `cannot_select`, and `needs_context`.
+
+Jev weighs the tradeoffs: task fit, user preferences, capacity, reset timing, and the context cost of inline work. Code does four things only:
+
+- It supplies exact facts.
+- It checks Jev's answers.
+- It enforces hard constraints: explicit `allowedOptions`, a known vision requirement, a missing catalog entry or auth, a missing `claude` executable, confirmed quota exhaustion, and the same model as the work under review/discussion/debate.
+- It maps the chosen option to a launch model.
+
+There is no score or pacing formula. `cannot_select` and `needs_context` are valid answers. Only a `failed` outcome allows a manual choice, for example when Jev is unavailable or the tool has a bug.
+
+The workers are:
+
+- Defaults: Pi + `openai-codex/gpt-6-sol` and Claude Code + `claude-opus-5-5`.
+- Other options: Claude Code + `claude-fable-5-1` (preferred for hard work), Pi + `openai-codex/gpt-6-astra`, `zai/glm-5.3`, and `zai/glm-5.3-flash` (vision).
+
+A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively.
+
+Jev settings follow the shared `~/.pi/agent/typesafe.json` convention (`model`, default `jev-1.13.0`; `timeoutMs`, default 3000 and at most 10000; `apiKeyFile`). `TYPESAFE_API_KEY` takes precedence. Requests go only to `https://api.typesafe.ai/v1/systemone` with bounded bodies and at most one retry. The whole call has a 30-second deadline and supports cancellation. Error messages are fixed and never include keys or provider bodies.
+
+Routing policies, `herdr_route`, `/limits` and quota caches were removed. Legacy files are ignored. Resumed sessions still filter automatic quota messages persisted by older versions.
 
 `codex_quota` (available in managed panes) and `/codex-quota` read current usage using `$CODEX_HOME/auth.json`, or `~/.codex/auth.json`. Each call queries OpenAI's internal endpoint with a ten-second timeout; tool calls support cancellation. Missing credentials, invalid responses, and request failures are reported as errors. There is no polling, cache, or token refresh.
 
@@ -131,7 +158,7 @@ npm pack --workspace @season179/pi-herdr --dry-run
 
 ## Security
 
-Pi extensions and watched commands execute with your user permissions. Agent/output targets, notes, outcomes, and bounded evidence may be persisted in Pi sessions and local telemetry. Command text/output is excluded from telemetry but can appear in persisted cards as described above. Watches are orchestration aids, not a sandbox or authorization boundary.
+Pi extensions and watched commands execute with your user permissions. Agent/output targets, notes, outcomes, and bounded evidence may be persisted in Pi sessions and local telemetry. Command text/output is excluded from telemetry but can appear in persisted cards as described above. Watches are orchestration aids, not a sandbox or authorization boundary. `herdr_select` sends a bounded excerpt of the task and context, model labels, and quota percentages and reset times to TypeSafe. It never sends credentials.
 
 ## License
 

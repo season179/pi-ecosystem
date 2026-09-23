@@ -6,6 +6,8 @@ export interface ZaiQuotaWindow {
 	label: string;
 	usedPercent: number;
 	resetsAt: string | null;
+	/** Window length when the reported period is a fixed duration. */
+	windowSeconds?: number;
 	limit?: number;
 	used?: number;
 	remaining?: number;
@@ -54,9 +56,11 @@ function normalizeUsage(payload: unknown): ZaiQuotaSnapshot {
 			(typeof reset !== "number" || !Number.isSafeInteger(reset) || reset <= 0 || !Number.isFinite(new Date(reset).getTime()))) {
 			throw new Error("Z.ai usage endpoint returned an invalid reset time");
 		}
+		const unitSeconds: Record<number, number> = { 1: 86_400, 3: 3_600, 5: 60, 6: 604_800 };
 		const window: ZaiQuotaWindow = {
 			type: raw.type, label: `${category} (${period})`, usedPercent: raw.percentage,
 			resetsAt: typeof reset === "number" ? new Date(reset).toISOString() : null,
+			...(!monthlyMcp && unitSeconds[raw.unit] ? { windowSeconds: raw.number * unitSeconds[raw.unit]! } : {}),
 		};
 		for (const [source, target] of [["usage", "limit"], ["currentValue", "used"], ["remaining", "remaining"]] as const) {
 			const value = raw[source];

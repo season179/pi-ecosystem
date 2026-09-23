@@ -9,11 +9,49 @@ not the entire surface. See **Status and evidence** below.
 
 ## Current scope (2026-09-22)
 
-Automatic quota collection and worker routing were removed. Pi-herdr provides session-owned orchestration, workflow guidance, and nonblocking watches. Worker selection belongs to the user or an external system; legacy routing configuration and caches are ignored, and automatic quota messages from older sessions are filtered out.
+Automatic quota collection and worker routing were removed. Pi-herdr provides session-owned orchestration, workflow guidance, and nonblocking watches. Worker selection is `herdr_select` (below); legacy routing configuration and caches are ignored, and automatic quota messages from older sessions are filtered out.
 
 On-demand `codex_quota`, `claude_quota`, and `zai_quota` tools (with corresponding hyphenated commands) use local CLI logins or Pi's provider credentials. This does not restore polling, caching, or routing. See the [README](../README.md) for usage and failure behavior.
 
-The routing and quota sections below record earlier designs, not current behavior.
+The routing and quota sections below record earlier designs, not current behavior. Jev-based selection (2026-09-23) is described next.
+
+## Jev worker selection (2026-09-23)
+
+`herdr_select` puts the inline-vs-delegate and worker-choice judgment in TypeSafe Jev, not in a formula. This replaces the rejected designs: static policy ranking, weighted scores, and deterministic pacing.
+
+The work is split between code and Jev.
+
+- **Code (`select.ts`)** does four things:
+  - It computes facts Jev handles poorly: remaining percent, absolute reset times, time until reset, and elapsed share of each window.
+  - It applies only explicit or confirmed hard constraints.
+  - It validates Choice answers: an exact label set, finite probabilities that sum to about 1, and a choice that is the argmax.
+  - It maps the answer to `pi|claude --model <id>`.
+- **Jev** weighs task fit, user preferences, spare capacity, reset timing, parallel demand, and the cost of inline work in the orchestrator's context.
+- **Premium models are not limited to hard work.** Difficulty is one input, not a ceiling.
+- **No reasons are attributed to Jev.** Output uses fixed templates plus probabilities.
+
+The call makes two requests.
+
+1. A batched profile: a difficulty Choice that includes `insufficient_context`, a quick-inline Noul, and a visual Noul only when the need for images is unknown.
+2. An allocation Choice. Its state includes the profile probabilities and one option per surviving candidate, plus `cannot_select` and `needs_context`. Each option carries its harness, model, capabilities, user-stated preference, applicable quota windows, and active workers on that model. The inline option also carries the orchestrator's context usage.
+
+The task is framed as data, and state is limited to relevant facts, because literal readings and distractors are documented Jev failure modes.
+
+Quota facts follow these rules.
+
+- Windows are shared per provider group: Codex covers both GPT candidates, Z.ai covers both GLM candidates, and Claude covers both Claude Code candidates.
+- A Claude scoped weekly window applies only to the model it names. A scoped window that matches no candidate applies to none.
+- A failed check, or a scoped window with no data, is reported as unknown.
+- Only confirmed exhaustion excludes a candidate. That means 100% used with the reset still in the future, or an access-blocked flag.
+
+For review, discussion, and debate, the purpose and provenance are required facts.
+
+- Missing provenance returns code-level `needs_context` before Jev is called. The caller may instead state that provenance is unknown, and it stays unknown.
+- Model identity strips harness and provider prefixes, `[1m]`-style and `:variant` suffixes, date stamps, and vendor words. It excludes the same model even across harnesses and inline. It also excludes an ambiguous alias ("opus", "claude-latest", "sol") that might name the candidate.
+- Known distinct catalog models stay distinct.
+- A shared model family is only a soft fact for Jev.
+
+For safety, TypeSafe settings and keys are re-read per call. The endpoint and destination are pinned (redirects are rejected), request and response bytes are capped, SDK logging is off, and each attempt has its own timeout with at most one retry. A 30-second deadline and the caller's signal cover the whole call. Every await is raced against that signal so a hung transport cannot pin the tool. In-flight quota checks are aborted in `finally`, and late results are ignored. User cancellation throws; all other failures return `failed` with `overrideAllowed`.
 
 ## Conversational workflow and routing (2026-09-17, historical)
 

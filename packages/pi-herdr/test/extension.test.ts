@@ -31,6 +31,7 @@ const ENV_KEYS = [
 	"FAKE_HERDR_NOTIFICATION_LOG",
 	"FAKE_HERDR_NOTIFICATION_DELAY_MS",
 	"FAKE_HERDR_NOTIFICATION_EXIT_CODE",
+	"TYPESAFE_API_KEY",
 ] as const;
 
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown;
@@ -212,6 +213,7 @@ async function injectedPrompt(current: Harness): Promise<string | undefined> {
 }
 
 const ORCHESTRATOR_TOOLS = [
+	"herdr_select",
 	"herdr_watch",
 	"herdr_unwatch",
 	"herdr_watches",
@@ -715,6 +717,61 @@ describe.sequential("herdr quota context hygiene", () => {
 		assert.deepEqual(history, before, "the input history is not mutated");
 	});
 
+});
+
+describe("herdr_select tool", () => {
+	it("asks Jev from the agent-dir config with the session's model and registry facts", async () => {
+		const current = await createHarness(8);
+		delete process.env.TYPESAFE_API_KEY;
+		writeFileSync(join(current.dir, "typesafe.json"), JSON.stringify({ apiKeyFile: "typesafe.key" }));
+		writeFileSync(join(current.dir, "typesafe.key"), "ts-test-key");
+		const models = [
+			{ provider: "openai-codex", id: "gpt-6-sol", input: ["text", "image"], auth: true },
+			{ provider: "zai", id: "glm-5.3", input: ["text"], auth: false },
+		];
+		const ctx = {
+			...current.pi.ctx,
+			model: models[0],
+			getContextUsage: () => ({ tokens: 1000, contextWindow: 100_000, percent: 1 }),
+			modelRegistry: {
+				find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+				hasConfiguredAuth: (model: { auth: boolean }) => model.auth,
+				getAll: () => models,
+				getApiKeyForProvider: async () => undefined,
+			},
+		};
+		const states: any[] = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = async (url, init) => {
+			if (String(url) !== "https://api.typesafe.ai/v1/systemone") return new Response("{}", { status: 500 });
+			const body = JSON.parse(String(init?.body));
+			states.push(body.state);
+			const labels = Object.keys(body.questions.allocation?.criteria ?? {});
+			const probabilities = (pick: string, all: string[]) =>
+				Object.fromEntries(all.map((label) => [label, label === pick ? 1 - 0.01 * (all.length - 1) : 0.01]));
+			const answers = body.questions.allocation
+				? { allocation: { type: "choice", choice: "pi_gpt_6_sol", confidence: 0.9, probabilities: probabilities("pi_gpt_6_sol", labels) } }
+				: {
+					difficulty: { type: "choice", choice: "easy", confidence: 0.9, probabilities: probabilities("easy", ["easy", "medium", "hard", "insufficient_context"]) },
+					quick_inline: { type: "noul", noul: 0.1 },
+					visual: { type: "noul", noul: 0.1 },
+				};
+			return new Response(JSON.stringify({ model: "jev-1.13.0", answers, usage: { input_tokens: 10, output_tokens: 2 } }));
+		};
+		try {
+			const tool = current.pi.tools.get("herdr_select")!;
+			const result = await tool.execute("test", { task: "Rename a variable" }, undefined, undefined, ctx);
+			assert.equal(result.details.outcome, "selected");
+			assert.deepEqual(result.details.selection.launch, ["pi", "--model", "openai-codex/gpt-6-sol"]);
+			assert.equal(states[0].orchestrator.model, "openai-codex/gpt-6-sol");
+			// Registry facts: missing catalog entries and missing auth exclude Pi candidates.
+			assert.ok(!("pi_glm_5_3" in states[1].options) && !("pi_gpt_6_astra" in states[1].options));
+			assert.ok("pi_gpt_6_sol" in states[1].options);
+			assert.ok(!JSON.stringify(result).includes("ts-test-key"));
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });
 
 describe("zai_quota tool", () => {

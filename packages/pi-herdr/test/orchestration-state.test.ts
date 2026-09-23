@@ -52,7 +52,9 @@ describe("orchestration state helpers", () => {
 		const skill = loadOrchestrationSkill();
 		assert.ok("body" in skill);
 		assert.match(skill.body, /Do not load all references by default/);
-		assert.match(skill.body, /Follow the user's model and harness choices and permission requirements/);
+		assert.match(skill.body, /before every new worker launch, call `herdr_select`/);
+		assert.match(skill.body, /Only a `failed` outcome .* permits a manual choice/);
+		assert.match(skill.body, /Launch the selected harness and model with the user's permission requirements/);
 		assert.doesNotMatch(skill.body, /herdr_route|budgetChoice|quota|references\/routing\.md/);
 		assert.match(skill.body, /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/);
 		assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);

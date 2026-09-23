@@ -11,10 +11,10 @@
 // through import.meta.url, and those relative paths must keep pointing at the
 // package root's docs/ and skills/ directories.
 //
-// packages: "external" keeps every node_modules import external (the package
-// has no runtime dependencies; its pi/typebox peers resolve at load time from
-// the host), so bundled code shares module identities with the host process
-// instead of vendoring second copies.
+// packages: "external" keeps every node_modules import external: pi/typebox
+// peers resolve at load time from the host, so bundled code shares module
+// identities with the host process instead of vendoring second copies, and the
+// one runtime dependency (@typesafe-ai/sdk) resolves from node_modules.
 import { build } from "esbuild";
 
 await build({

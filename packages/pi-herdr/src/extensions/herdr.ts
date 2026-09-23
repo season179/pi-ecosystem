@@ -6,6 +6,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
 import { fetchClaudeQuota, formatClaudeQuota } from "../claude-quota.js";
 import { registerWatchesCommand } from "../commands.js";
 import { loadHerdrConfig } from "../config.js";
@@ -17,6 +19,7 @@ import {
 	parseOrchestrateArgs,
 	readOrchestrationState,
 } from "../orchestration-state.js";
+import { createJevOpener } from "../jev.js";
 import { fetchCodexQuota } from "../quota.js";
 import { decideDelivery, type DeliveryDecision } from "../policy.js";
 import {
@@ -26,6 +29,14 @@ import {
 	formatWatchLine,
 	summarizeCommand,
 } from "../render.js";
+import {
+	formatSelection,
+	runSelection,
+	SELECT_PURPOSES,
+	SelectCancelledError,
+	type SelectEnvironment,
+	type SelectRequest,
+} from "../select.js";
 import { appendTelemetry } from "../telemetry.js";
 import type { WatchOutcome, WatchRecordPublic, WatchSpec } from "../types.js";
 import { WatchManager } from "../watches.js";
@@ -34,6 +45,7 @@ import { fetchZaiQuota, formatZaiQuota } from "../zai-quota.js";
 const WATCH_MESSAGE_TYPE = "pi-herdr-watch";
 /** Tools that become active only while orchestration is explicitly on. */
 const ORCHESTRATOR_TOOL_NAMES = [
+	"herdr_select",
 	"herdr_watch",
 	"herdr_unwatch",
 	"herdr_watches",
@@ -85,6 +97,56 @@ const UnwatchParams = Type.Object({
 	id: Type.Optional(Type.Number({ description: "Watch ID to stop" })),
 	all: Type.Optional(Type.Boolean({ description: "Stop every armed watch" })),
 });
+
+const SELECT_DESCRIPTION =
+	"Ask Jev who should do a piece of work: you inline, or a new worker (harness + model). Call it BEFORE deciding to do a task inline or delegate it, and before EVERY new worker launch. Supply facts only: the task brief, relevant context, purpose, and for review/discussion/debate the models that authored the work or position (provenance). Follow the result. Override only when outcome is 'failed' (Jev unavailable, tool error); cannot_select and needs_context are valid answers, not failures. Starts no worker and polls nothing. Never include secrets.";
+
+const SelectParams = Type.Object({
+	task: Type.String({ description: "Factual brief of the work: outcome wanted, scope, constraints, checks. No secrets." }),
+	context: Type.Optional(Type.String({ description: "Relevant known facts (repo, files, current state). Not a transcript; no secrets." })),
+	purpose: Type.Optional(StringEnum(SELECT_PURPOSES, { description: "work (default), review, discussion or debate. The last three require provenance." })),
+	provenance: Type.Optional(Type.Array(Type.String(), { description: "Models that authored the work being reviewed or the position being challenged, as known facts, e.g. openai-codex/gpt-6-sol. Do not guess." })),
+	provenanceUnknown: Type.Optional(Type.Boolean({ description: "true when the authoring model is genuinely unknown" })),
+	requiresVision: Type.Optional(Type.Boolean({ description: "Known fact only: the task needs images/screenshots interpreted (true) or is text-only (false). Omit when unknown." })),
+	allowedOptions: Type.Optional(Type.Array(Type.String(), { description: "Only when the user explicitly restricted choices: allowed option ids (inline, pi_gpt_6_sol, claude_code_opus_5_5, claude_code_fable_5_1, pi_gpt_6_astra, pi_glm_5_3, pi_glm_5_3_flash)." })),
+	activeWorkers: Type.Optional(Type.Array(Type.String(), { description: "Models of workers currently running, if known (e.g. claude-opus-5-5). Omit when unknown." })),
+	queuedDemand: Type.Optional(Type.String({ description: "Known upcoming work that will need workers, if any. Omit when unknown." })),
+	userPreferences: Type.Optional(Type.String({ description: "The user's explicit preferences relevant to this choice, stated faithfully." })),
+});
+
+function executableOnPath(name: string): boolean {
+	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+		if (!dir) continue;
+		try {
+			accessSync(join(dir, name), constants.X_OK);
+			return true;
+		} catch {
+			// Try the next PATH entry.
+		}
+	}
+	return false;
+}
+
+function selectEnvironment(ctx: ExtensionContext): SelectEnvironment {
+	const registry = ctx.modelRegistry;
+	let usage: SelectEnvironment["contextUsage"];
+	try {
+		const current = ctx.getContextUsage();
+		if (current) usage = { tokens: current.tokens, contextWindow: current.contextWindow, percent: current.percent };
+	} catch {
+		// Context usage is an optional fact.
+	}
+	return {
+		...(ctx.model ? { orchestrator: { provider: ctx.model.provider, id: ctx.model.id, input: ctx.model.input } } : {}),
+		...(usage ? { contextUsage: usage } : {}),
+		lookupModel: (provider, id) => {
+			const model = registry.find(provider, id);
+			return model ? { input: model.input, authConfigured: registry.hasConfiguredAuth(model) } : undefined;
+		},
+		knownModels: registry.getAll().map((model) => `${model.provider}/${model.id}`),
+		harnessInstalled: (harness) => harness === "pi" || executableOnPath("claude"),
+	};
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -486,7 +548,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 		name: "herdr_orchestrate",
 		label: "Herdr Orchestrate",
 		description:
-			"Activate herdr orchestration for this session: enables herdr_watch/herdr_unwatch/herdr_watches and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
+			"Activate herdr orchestration for this session: enables herdr_select/herdr_watch/herdr_unwatch/herdr_watches and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
 		parameters: Type.Object({}),
 		executionMode: "sequential",
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -623,6 +685,40 @@ export default function herdrExtension(pi: ExtensionAPI): void {
 						config.wakeBudget > 0 && wakesUsed >= config.wakeBudget,
 				},
 			};
+		},
+	});
+
+	const openJev = createJevOpener({ agentDir });
+
+	pi.registerTool({
+		name: "herdr_select",
+		label: "Herdr Select",
+		description: SELECT_DESCRIPTION,
+		promptSnippet: "Ask Jev whether to work inline or which worker harness/model to launch",
+		promptGuidelines: [
+			"Call herdr_select before deciding to do a task inline or delegate it, and before every new worker launch; follow its result.",
+			"Override a herdr_select result only when its outcome is failed; cannot_select and needs_context are valid answers.",
+		],
+		parameters: SelectParams,
+		executionMode: "sequential",
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			try {
+				const result = await runSelection(params as SelectRequest, selectEnvironment(ctx), {
+					openJev,
+					fetchCodexQuota: (quotaSignal) => fetchCodexQuota({ signal: quotaSignal }),
+					fetchClaudeQuota: (quotaSignal) => fetchClaudeQuota({ signal: quotaSignal }),
+					fetchZaiQuota: (quotaSignal) => fetchZaiQuota({
+						getApiKey: () => ctx.modelRegistry.getApiKeyForProvider("zai"),
+						signal: quotaSignal,
+					}),
+				}, signal);
+				return { content: [{ type: "text", text: formatSelection(result) }], details: result };
+			} catch (error) {
+				if (error instanceof SelectCancelledError) throw error;
+				// Parameter errors carry fixed text; anything else stays generic.
+				throw new Error(error instanceof Error && /^(task is required|unknown allowedOptions)/u.test(error.message)
+					? error.message : "herdr_select failed unexpectedly");
+			}
 		},
 	});
 

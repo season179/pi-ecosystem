@@ -22,6 +22,7 @@ describe("fetchZaiQuota", () => {
 			["MCP calls (monthly)", 0], ["Coding (5 hours)", 1], ["Coding (1 week)", 12], ["Coding credits (5 hours)", 8],
 		]);
 		assert.equal(result.windows[0]?.limit, 4000);
+		assert.deepEqual(result.windows.map(w => w.windowSeconds), [undefined, 18_000, 604_800, 18_000]);
 		assert.equal(result.windows[0]?.resetsAt, null);
 		assert.equal(result.windows[1]?.resetsAt, new Date(RESET).toISOString());
 		assert.match(formatZaiQuota(result), /MCP calls \(monthly\).*0\/4000/);
