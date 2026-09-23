@@ -1,8 +1,9 @@
 # Automatic memory: Jev gating + local Hindsight
 
-Status: implemented, tested, **not activated**. No live bank data exists or was
-touched during development. The feature stays off until
-`<agentDir>/pi-memory/automation.json` exists.
+Status: implemented, tested, and **activated** (shared bank `pi-memory` configured after
+user approval; first use creates the bank lazily). No real-conversation bank data exists:
+development used no live banks, and the one live validation (below) used a disposable
+synthetic bank that was deleted afterwards.
 
 ## What it does
 
@@ -283,3 +284,40 @@ Feedback loops are cut in three ways:
   - injected memory was excluded from the retain;
   - `agent_settled` fired and the run-end check (no recall question) retained
     the final assistant reply, with still exactly one provider request.
+- **Live synthetic validation (2026-09-23, activation evidence):** one bounded
+  end-to-end run against the real Jev API (`jev-1.13.0`) and real local
+  Hindsight 0.10.1, through the built package's production automation loaded
+  into an installed Pi 0.87.1 SDK session with a fake main provider capturing
+  the assembled request. All service calls were real; only the chat model was
+  faked. Isolated temp `agentDir`/cwds and a one-off disposable bank
+  (`test-pi-memory-20260923-…`, verified absent first, deleted after).
+  Results:
+  - 8 real Jev gate calls (prompt + run-end per turn) produced well-formed
+    judgments; a first-prompt recall abstention (0.47 < 0.5) correctly meant no
+    recall, and task-chatter units were judged `not_durable` and not stored.
+  - 4 async retains (fresh `document_id`, provenance metadata, stable tags
+    only) were accepted; polling their `operation_id` in the test harness
+    showed every operation `completed`. The first retain created the bank
+    lazily; production code does not poll.
+  - Tags and scope survived Hindsight extraction server-side: the retained
+    user-wide preference came back tagged `pi-memory:user-wide` only, and
+    project facts came back with `project-fact` + the source project key.
+  - Cross-project isolation held on the wire: a second project's recall
+    (its own key in `tag_groups`) returned only user-wide items — the other
+    project's facts were excluded server-side and never injected.
+  - The production assembler injected the recalled block (untrusted advisory,
+    per-item applicability labels) into the capturing provider request; nothing
+    recalled was persisted to session history, and no block was injected while
+    the bank was empty.
+  - Real-Jev robustness data point: an assistant's acknowledgment ("Understood,
+    I will keep release notes concise") was labeled `user_preference` 0.60 but
+    correctly demoted to project-local by the deterministic user-role guard.
+  - Known limitation observed: extraction of one retained item yielded both a
+    fact and an observation, and recall returned both, so the same preference
+    was injected twice with different provenance labels ("stated in project X"
+    and "stated in an earlier session"). There is no recall-side dedup today;
+    duplicates cost injection budget (2 of 8 item slots here) and would grow
+    with bank size. Bounded by the 8-item cap; not fixed in this change.
+  Limits: synthetic one-off traffic only — this is wiring evidence, not an
+  evaluation of classification quality on real conversations, and it says
+  nothing about long-run bank growth or consolidation behaviour.
