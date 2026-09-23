@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { convertToLlm, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, getAgentDir, type AgentEndEvent, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
 import { Type } from "typebox";
 import { automationStatusLines, MemoryAutomation } from "../automation.js";
@@ -296,7 +296,7 @@ function warnOnce(state: MemorySessionState, ctx: ExtensionContext, key: string,
  * Capacity/injection diagnostics must reach the user in every mode: notify
  * with a UI, otherwise stderr in print AND json mode (stdout belongs to Pi).
  */
-function emitDiagnostic(ctx: ExtensionContext, text: string, type: "warning" | "error"): void {
+function emitDiagnostic(ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void {
 	// Best effort: a failing notify must never cost otherwise valid blocks.
 	if (ctx.hasUI) {
 		try {
@@ -313,7 +313,13 @@ function emitDiagnostic(ctx: ExtensionContext, text: string, type: "warning" | "
 	}
 }
 
-function diagnoseOnce(state: MemorySessionState, ctx: ExtensionContext, key: string, message: string, type: "warning" | "error" = "warning"): void {
+function diagnoseOnce(
+	state: MemorySessionState,
+	ctx: ExtensionContext,
+	key: string,
+	message: string,
+	type: "info" | "warning" | "error" = "warning",
+): void {
 	if (state.emittedDiagnostics.has(key)) return;
 	state.emittedDiagnostics.add(key);
 	emitDiagnostic(ctx, message, type);
@@ -401,6 +407,9 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 	const automations = new WeakMap<MemorySessionState, MemoryAutomation>();
 	let activeAutomation: MemoryAutomation | undefined;
 	let diagnosticContext: ExtensionContext | undefined;
+	// New messages of the current user run, collected across agent_end events
+	// (an automatic retry emits one per attempt) and judged once at agent_settled.
+	let runMessages: AgentEndEvent["messages"] = [];
 	const automationFor = (state: MemorySessionState): MemoryAutomation => {
 		let automation = automations.get(state);
 		if (automation === undefined) {
@@ -412,7 +421,7 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 				hindsightFetch: seams.hindsightFetch ?? ((input, init) => fetch(input, init)),
 				now: seams.now ?? Date.now,
 				diagnose: (key, message, type) => {
-					if (diagnosticContext !== undefined) diagnoseOnce(state, diagnosticContext, key, message, type === "info" ? "warning" : type);
+					if (diagnosticContext !== undefined) diagnoseOnce(state, diagnosticContext, key, message, type);
 				},
 			});
 			automations.set(state, automation);
@@ -450,8 +459,8 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 		activeAutomation = undefined;
 		runtime.shutdown();
 		if (automation !== undefined) {
-			// Bounded: give an in-flight retain a moment, never block exit.
-			await automation.flush(1_500).catch(() => undefined);
+			// Bounded: give the run-end judgment and its retain a moment, never block exit.
+			await automation.flush(3_000).catch(() => undefined);
 			automation.dispose();
 		}
 	});
@@ -466,6 +475,7 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 		}
 		// New user run: reset the committed-mutation cap and automatic recall.
 		state.commits.used = 0;
+		runMessages = [];
 		try {
 			automationFor(state).beginRun();
 		} catch {
@@ -485,6 +495,38 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 		if (!eligible) return undefined;
 		const appended = appendMemoryPolicy(event.systemPrompt, mode);
 		return appended === undefined ? undefined : { systemPrompt: appended };
+	});
+
+	pi.on("agent_end", (event) => {
+		const seen = new Set(runMessages);
+		runMessages = [...runMessages, ...event.messages.filter((message) => !seen.has(message))];
+	});
+
+	// Completed-run capture: the final user/assistant messages of a settled run
+	// (no retry or continuation follows) are judged for retention only. Runs in
+	// the background with its own deadline; never recalls, injects, or continues.
+	pi.on("agent_settled", async (_event, ctx) => {
+		const messages = runMessages;
+		runMessages = [];
+		if (messages.length === 0) return;
+		try {
+			const state = await runtime.state(ctx.cwd);
+			const mode = (await runtime.refreshMode(state)).mode;
+			diagnosticContext = ctx;
+			void automationFor(state)
+				.onRunSettled(messages, {
+					mode,
+					identity: state.identity,
+					memoryRoot: state.root?.root,
+					containment: state.containment,
+					signal: undefined,
+					currentMode: async () => (await runtime.refreshMode(state)).mode,
+					sessionId: ctx.sessionManager.getSessionId(),
+				})
+				.catch(() => undefined);
+		} catch {
+			// automatic memory never fails the session
+		}
 	});
 
 	// Transient injection on every ordinary provider request: project always

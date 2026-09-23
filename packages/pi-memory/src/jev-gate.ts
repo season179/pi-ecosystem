@@ -10,10 +10,13 @@ import type { TranscriptEntry } from "./transcript.js";
 // ---------------------------------------------------------------------------
 // Jev memory gate over one bounded excerpt:
 //
-//   unit_<i> — one choice per NEW message (a bounded original source unit):
-//              user-wide preference, project-specific fact, transferable
-//              lesson, or not durable. Each unit is judged on its own, so one
-//              preference never makes a mixed transcript user-wide.
+//   unit_<k>  — one choice per source unit (a verbatim span of a NEW message,
+//               shown inside its whole message): user-wide preference,
+//               project-specific fact, transferable lesson, or not durable.
+//   scope_<k> — is that span portable ALONE: no project-specific detail and
+//               no condition/exception from elsewhere in the message lost?
+//               Broad storage needs both a broad label and a yes here, so one
+//               preference never widens the rest of a mixed message.
 //   recall   — would the current work benefit from memories of earlier sessions?
 //
 // Jev only judges; it never writes the query or the memory text. The shared
@@ -25,9 +28,10 @@ import type { TranscriptEntry } from "./transcript.js";
 export interface GateInput {
 	/** Context already evaluated for retention (or none). */
 	earlier: readonly TranscriptEntry[];
-	/** Messages not yet judged for retention (newest GATE_MAX_UNITS are judged); empty skips retention. */
+	/** Messages not yet judged for retention; shown whole as context for their units. */
 	fresh: readonly TranscriptEntry[];
-	askRetain: boolean;
+	/** Spans to judge (index into `fresh` plus verbatim text); empty skips retention. */
+	units: ReadonlyArray<{ message: number; text: string }>;
 	askRecall: boolean;
 }
 
@@ -35,12 +39,18 @@ export const APPLICABILITY_LABELS = ["user_preference", "project_fact", "transfe
 export type ApplicabilityLabel = (typeof APPLICABILITY_LABELS)[number];
 export type UnitProbabilities = Record<ApplicabilityLabel, number>;
 
-/** Per-unit judgments are only asked for the newest units. */
-export const GATE_MAX_UNITS = 6;
+/** At most this many units are judged per request (callers select the newest). */
+export const GATE_MAX_UNITS = 12;
+
+export interface UnitJudgment {
+	probabilities: UnitProbabilities;
+	/** Probability that the span is portable on its own (see scope question). */
+	portable: number;
+}
 
 export interface GateDecision {
-	/** One entry per judged fresh unit (same order), or undefined when retention was not asked. */
-	units: UnitProbabilities[] | undefined;
+	/** One judgment per requested unit (same order), or undefined when retention was not asked. */
+	units: UnitJudgment[] | undefined;
 	recall: number | undefined;
 	model: string;
 }
@@ -63,11 +73,25 @@ export interface GateOptions {
 
 function unitInstructions(index: number): string {
 	return (
-		`Classify ONLY state.fresh_messages[${index}] of a coding-agent conversation; every other message is context and must not affect the label. ` +
-		"Would this one message still be useful to the agent in a future, separate session, and where would it apply? " +
+		`Classify ONLY state.units[${index}].text, a verbatim span of state.fresh_messages[state.units[${index}].message] in a coding-agent conversation. ` +
+		"The rest of that message and all other messages are context only. " +
+		"Would this span still be useful to the agent in a future, separate session, and where would it apply? " +
 		"Routine task requests, progress chatter, and facts obvious from the code are not durable. When unsure whether something applies beyond this project, prefer project_fact."
 	);
 }
+
+function scopeInstructions(index: number): string {
+	return (
+		`Suppose state.units[${index}].text were stored ALONE and later shown to the agent while working in a DIFFERENT project. ` +
+		`Would it be accurate and complete there? Answer no if it contains anything specific to this project (names, paths, hosts, credentials, internal conventions), ` +
+		`or if state.fresh_messages[state.units[${index}].message] attaches a condition, exception, or scope limit to it that the span alone leaves out.`
+	);
+}
+
+const SCOPE_CRITERIA = {
+	true: "The span alone is portable: no project-specific detail, and nothing elsewhere in the message qualifies or limits it",
+	false: "The span contains project-specific detail, or other parts of the message qualify, limit, or change its meaning",
+} as const;
 
 const UNIT_CRITERIA = {
 	user_preference:
@@ -117,11 +141,11 @@ export async function runMemoryGate(input: GateInput, options: GateOptions): Pro
 	if (apiKey === undefined) return { kind: "unavailable", reason: "missing-key" };
 	if (options.signal?.aborted) return { kind: "aborted" };
 
-	const fresh = input.fresh.slice(-GATE_MAX_UNITS);
-	const unitKeys = input.askRetain ? fresh.map((_entry, index) => `unit_${index}`) : [];
+	const units = input.units.slice(-GATE_MAX_UNITS);
 	const questions: Record<string, Question> = {};
-	unitKeys.forEach((key, index) => {
-		questions[key] = choice(unitInstructions(index), UNIT_CRITERIA);
+	units.forEach((_unit, index) => {
+		questions[`unit_${index}`] = choice(unitInstructions(index), UNIT_CRITERIA);
+		questions[`scope_${index}`] = noul(scopeInstructions(index), SCOPE_CRITERIA);
 	});
 	if (input.askRecall) questions.recall = noul(RECALL_INSTRUCTIONS, RECALL_CRITERIA);
 	if (Object.keys(questions).length === 0) {
@@ -158,7 +182,11 @@ export async function runMemoryGate(input: GateInput, options: GateOptions): Pro
 		});
 		const request = client.systemOne(
 			{
-				state: { earlier_messages: view(input.earlier), fresh_messages: view(fresh) },
+				state: {
+					earlier_messages: view(input.earlier),
+					fresh_messages: view(input.fresh),
+					units: units.map((unit) => ({ message: unit.message, text: unit.text })),
+				},
 				questions,
 				model: settings.model,
 			},
@@ -168,16 +196,17 @@ export async function runMemoryGate(input: GateInput, options: GateOptions): Pro
 		const result = await Promise.race([request, wall]);
 		if (options.signal?.aborted) return { kind: "aborted" };
 		const answers: unknown = (result as { answers?: unknown }).answers;
-		const units = unitKeys.map((key) => extractUnitProbabilities(answers, key));
-		const recall = questions.recall === undefined ? undefined : extractNoulProbability(answers, "recall");
-		// Any missing or malformed judgment voids the whole decision: nothing is guessed.
-		if (units.some((unit) => unit === undefined) || (questions.recall !== undefined && recall === undefined)) {
-			return { kind: "unavailable", reason: "incomplete-response" };
+		const judgments: UnitJudgment[] = [];
+		for (let index = 0; index < units.length; index += 1) {
+			const probabilities = extractUnitProbabilities(answers, `unit_${index}`);
+			const portable = extractNoulProbability(answers, `scope_${index}`);
+			// Any missing or malformed judgment voids the whole decision: nothing is guessed.
+			if (probabilities === undefined || portable === undefined) return { kind: "unavailable", reason: "incomplete-response" };
+			judgments.push({ probabilities, portable });
 		}
-		return {
-			kind: "decision",
-			decision: { units: unitKeys.length > 0 ? (units as UnitProbabilities[]) : undefined, recall, model: settings.model },
-		};
+		const recall = questions.recall === undefined ? undefined : extractNoulProbability(answers, "recall");
+		if (questions.recall !== undefined && recall === undefined) return { kind: "unavailable", reason: "incomplete-response" };
+		return { kind: "decision", decision: { units: units.length > 0 ? judgments : undefined, recall, model: settings.model } };
 	} catch (error) {
 		if (options.signal?.aborted) return { kind: "aborted" };
 		if (timedOut) return { kind: "unavailable", reason: "timeout" };

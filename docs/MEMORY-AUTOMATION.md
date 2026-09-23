@@ -10,7 +10,8 @@ pi-memory can now remember and recall across sessions without the agent calling
 `remember`/`recall`:
 
 - **Jev** (TypeSafe `systemOne`) decides *whether* to recall. It also classifies
-  each new message: worth keeping or not, and where it applies.
+  each new source unit (a verbatim span of a message): worth keeping or not,
+  and where it applies.
 - **Code** builds the recall query and the tags deterministically.
 - **Hindsight** (local, loopback-only HTTP API 0.10.x) extracts facts, stores
   them, and ranks recall results.
@@ -23,9 +24,23 @@ The local file stores, their injection and their tools are unchanged.
 | --- | --- | --- | --- |
 | prompt | First provider request carrying a new user message (including steering/queued messages) | Yes, bounded by 4 s total | Same request |
 | periodic | Every `periodicEveryRequests` (default 4) tool-loop continuations of one run; at most one check in flight | No | First request after it completes |
+| run-end | `agent_settled` (fires once, after retries), over the messages collected from `agent_end` | No; bounded by 8 s | Retain only: no recall, no extra model request |
+
+The run-end check judges only messages not already judged, so the final
+assistant completion (and a last user correction) is captured without waiting
+for another prompt.
 
 Retention is asynchronous. At most one retain request is in flight, and at
-most one coalesced job waits behind it. Recalled memory is scoped to the run:
+most one coalesced job waits behind it. At `session_shutdown`, `flush` waits at
+most **3 s in total** for the run-end judgment and then drains the whole retain
+chain, including the coalesced pending job. Whatever is still unfinished at
+the deadline is reported in one warning, not silently dropped:
+
+- judged units never sent;
+- a retain cancelled in flight (outcome unknown);
+- final messages not judged in time.
+
+Recalled memory is scoped to the run:
 
 - it is re-injected transiently into each request of that run;
 - it never enters session history;
@@ -38,10 +53,25 @@ every project. Projects are not given separate banks: a project entry can
 only opt out, and a per-project `bank` is rejected. Other banks, such as
 Hermes's and any existing stores, are never read or written.
 
-**Units.** Each fresh user or assistant message is one *source unit*, bounded
-to 1,500 characters and secret-redacted on a best-effort basis. Only the
-newest 6 units per check are judged. Jev answers one `choice` question per
-unit, and every other message is context only.
+**Units.** Each fresh user or assistant message (bounded to 1,500 characters,
+secret-redacted on a best-effort basis) is split into verbatim *source units*:
+lines first, then sentences. Code fences stay whole. A message with more than 8
+spans stays one whole unit. Nothing is rewritten, so no corrected preference
+is ever fabricated.
+
+For each unit, Jev answers two questions, and sees the full message and
+recent conversation as context:
+
+- `unit_k` (`choice`): which label applies to this span.
+- `scope_k` (`noul`): does this span hold on its own, in any project, with no
+  project-specific name, path, host, secret or convention and no condition
+  elsewhere in the message that it omits?
+
+At most 12 units are judged per check. Messages are taken **oldest first**, and
+only those that fit are marked judged. The rest are deferred to the next check
+(bounded catch-up within the 12-message transcript window). A deferred message
+that leaves the window before any check could judge it is counted as
+`dropped unjudged` in status.
 
 | Jev label | Stored as | Tags (stable only) |
 | --- | --- | --- |
@@ -55,24 +85,35 @@ unit, and every other message is context only.
 **Conservative policy** (`classifyUnit`):
 
 - A unit is kept only if `1 − p(not_durable) ≥ retainThreshold` (0.6).
-- A broad label (user-wide or transferable) needs its own probability to be at
-  least 0.7.
+- A broad label (user-wide or transferable) needs all of:
+  - its own probability ≥ 0.7;
+  - portability (`scope_k`) ≥ 0.8;
+  - a *narrow* span. A span is not narrow if the message was truncated, the
+    whole-message fallback was used, it exceeds 600 characters, it or the next
+    span starts with a qualifier (`except`, `unless`, `but`, `only`, `if`,
+    `when`…), or the previous span ends with `:`. So a rule is never split
+    from its exception;
+  - no deterministic project marker: `[REDACTED]`, a URL, a path or file name,
+    or the project's name.
 - User-wide also requires that the *user* wrote the unit.
 - Anything else that is durable is stored project-local.
 - A missing or malformed judgment for any unit voids the whole decision, so
   nothing is stored or recalled.
 - Nothing becomes broad by default.
 
-**Items.** Every unit is its own Hindsight item, with its own tags and a fresh
-random `document_id`. One preference therefore never makes a mixed exchange
-user-wide. Provenance goes into metadata, never tags:
+**Items.** A broad unit is its own Hindsight item. Adjacent project-local units
+of one message are merged back into one verbatim substring. Every item has its
+own tags and a fresh random `document_id`. A user-wide item therefore carries
+only its own span, never project text from the same message. Provenance goes
+into metadata, never tags:
 
 - `applicability`
 - `source_project`, `source_project_hash`
-- `source_role`
+- `source_role`, `source_span`
 - `source_session`
-- `jev_label` (Jev's original top label, before the policy was applied)
-- `jev_probabilities`
+- `jev_label` (Jev's original top label per span, `;`-joined, before the
+  policy was applied)
+- `jev_probabilities` (including `portable=`)
 - `jev_model`
 
 **Recall scope.** The server filters with this `tag_groups`:
@@ -142,7 +183,7 @@ The task always fails open. Scope and writes always fail closed.
 | Retain timeout, 5xx or malformed ack | Counted `unknown`, **never resent** (it may have been accepted) |
 | Retain refused (unreachable, 4xx) | Counted `failed`; its units become judgeable again |
 | Stale work (new run, cancellation, session replaced) | Result discarded; the previous run's recall never leaks into the next |
-| Mode `read-only` | Recall only; units are not even judged |
+| Mode `read-only` | Recall only; units are not judged. The messages are sent once as recall context and marked considered, so they become `earlier` context and are **never retained later**, even after a switch to `read-write` |
 | Mode `off`, config absent/disabled/malformed, non-loopback URL, identity unavailable | Zero service calls |
 | Mode changed after the decision | Re-read at submit time; the write happens only in `read-write` |
 
@@ -175,24 +216,29 @@ Feedback loops are cut in three ways:
 - **Jev settings:** model, timeout and key come from the shared `typesafe.json`
   (via `TYPESAFE_API_KEY` or `apiKeyFile`).
 - **Status:** `/pi-memory status` shows the configuration, per-service health,
-  the last check, the current run's recall, and retain counts. Accepted retains
-  are reported as "queued; not yet confirmed stored".
+  the last check, the current run's recall, and retain counts (accepted,
+  unknown, failed, dropped unjudged). Accepted retains are reported as "queued;
+  not yet confirmed stored". "Reachable again" recovery notices render as info.
 
 ## Proposed defaults (tunable, not user-approved individually)
 
-- `retainThreshold` is 0.6, `recallThreshold` is 0.5, and the broad-scope
-  confidence floor is 0.7.
-- Periodic checks run every 4 continuations; at most 6 units are judged per
+- `retainThreshold` is 0.6, `recallThreshold` is 0.5, the broad-scope
+  confidence floor is 0.7, and the portability floor is 0.8.
+- Periodic checks run every 4 continuations; at most 12 units are judged per
   check.
-- Prompt deadline 4 s; periodic 8 s; retain 5 s.
+- Prompt deadline 4 s; periodic and run-end 8 s; retain 5 s; shutdown flush
+  3 s total.
 
 ## Limitations
 
-- **Unjudged messages:** the last exchange before exit is never judged, and
-  unjudged units older than the newest 6 are dropped.
-- **Unit granularity is one message.** A single message that mixes a preference
-  with a project fact is labelled as a whole. Broad labels still need
-  confidence, and assistant messages cannot be user-wide.
+- **Bounded capture:** the run-end judgment and final retain get at most 3 s at
+  shutdown; what misses it is reported, not stored. A backlog that overflows
+  the 12-message window (for example, during a long outage cooldown) is counted
+  as dropped, not recovered.
+- **Splitting is lexical.** Span boundaries are lines and sentences, and the
+  broad-scope checks are heuristics plus Jev judgment. A project detail stated
+  with no marker and judged portable could still be stored user-wide.
+  Qualified or long spans fall back to project-local.
 - **No confirmation of storage:** retain is async and the operation is not
   polled.
 - **Privacy:** every prompt check sends a bounded, redacted transcript excerpt
@@ -206,16 +252,26 @@ Feedback loops are cut in three ways:
 
 ## Evidence
 
-- **Package tests:** 318 tests pass across 18 files. New coverage is in
+- **Package tests:** 324 tests pass across 18 files. New coverage is in
   `packages/pi-memory/test/automation.test.ts`:
   - real Pi SDK sessions with fake Jev, Hindsight and provider;
   - unit tests of `MemoryAutomation` for applicability, provenance, scope,
-    outages and stale work.
+    outages and stale work;
+  - a single mixed-scope message, a rule with its exception, run-end capture
+    with no later prompt, backlog catch-up and dropped accounting, read-only
+    to read-write, and shutdown drain and reporting.
 - **Mutation checks:**
   - removing the client-side scope check,
   - removing the user-role requirement,
   - removing the tag filter,
-  - or removing the confidence floor
+  - removing the confidence floor,
+  - removing the portability check or the qualifier guard,
+  - disabling run-end capture,
+  - newest-first selection or marking unjudged messages judged,
+  - not marking read-only messages considered,
+  - removing dropped accounting,
+  - flushing only the in-flight retain,
+  - or silencing the shutdown report
 
   each fails a test.
 - **Installed Pi 0.87.1 probe** loaded the package from its local path, with
@@ -224,4 +280,6 @@ Feedback loops are cut in three ways:
   - `tag_groups` carried the current project key;
   - the retain was async with an `operation_id`, a fresh `document_id`,
     project-fact tags and provenance metadata;
-  - injected memory was excluded from the retain.
+  - injected memory was excluded from the retain;
+  - `agent_settled` fired and the run-end check (no recall question) retained
+    the final assistant reply, with still exactly one provider request.

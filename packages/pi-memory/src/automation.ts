@@ -15,9 +15,9 @@ import {
 } from "./hindsight.js";
 import type { ProjectIdentity } from "./identity.js";
 import { escapeInjectionInline, PI_MEMORY_OWNER, tagInjectionBlock, type TaggedTextBlock } from "./injection.js";
-import { runMemoryGate, type ApplicabilityLabel, type GateOutcome, type UnitProbabilities } from "./jev-gate.js";
+import { GATE_MAX_UNITS, runMemoryGate, type ApplicabilityLabel, type GateOutcome, type UnitJudgment } from "./jev-gate.js";
 import { assertContainedRegularPath, type StoreContainment } from "./paths.js";
-import { buildRecallQuery, buildTranscript, type TranscriptEntry } from "./transcript.js";
+import { buildRecallQuery, buildTranscript, SEGMENT_MAX_CHARS, segmentText, type TranscriptEntry } from "./transcript.js";
 
 // ---------------------------------------------------------------------------
 // Automatic memory: Jev decides WHETHER to retain/recall and classifies each
@@ -52,6 +52,8 @@ export const BANK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 export const PROMPT_DEADLINE_MS = 4_000;
 export const PERIODIC_DEADLINE_MS = 8_000;
+/** Retain-only judgment of a finished run's final messages (runs in the background). */
+export const RUN_END_DEADLINE_MS = 8_000;
 export const RETAIN_TIMEOUT_MS = 5_000;
 export const MIN_RECALL_BUDGET_MS = 250;
 export const COOLDOWN_BASE_MS = 30_000;
@@ -243,17 +245,86 @@ export interface UnitClassification {
 	jevLabel: ApplicabilityLabel;
 }
 
+/** A verbatim span of one fresh message, judged on its own with the message as context. */
+export interface SourceUnit {
+	entry: TranscriptEntry;
+	/** Index of the source message in the gate's `fresh` list. */
+	message: number;
+	start: number;
+	end: number;
+	text: string;
+	/** False for whole-message fallbacks, truncated messages, and over-long spans: never stored broadly. */
+	narrow: boolean;
+}
+
+/** Minimum Jev probability that a span is portable on its own before it may be stored broadly. */
+export const PORTABLE_CONFIDENCE = 0.8;
+
+// Deterministic tripwires for project-only content in a broad candidate. They
+// only ever demote to project-local; they never widen anything.
+const PROJECT_MARKERS: readonly RegExp[] = [
+	/\[REDACTED\]/u,
+	/\b[a-z][a-z0-9+.-]*:\/\//iu,
+	/(?:^|[\s(`'"])(?:~|\.{1,2})?\/[\w.-]+/u,
+	/\b[\w-]+\/[\w./-]*\.\w{1,6}\b/u,
+];
+
+export function hasProjectMarker(text: string, projectName: string): boolean {
+	if (PROJECT_MARKERS.some((pattern) => pattern.test(text))) return true;
+	const name = projectName.trim().toLowerCase();
+	return name.length >= 3 && text.toLowerCase().includes(name);
+}
+
+// A span followed by a qualifier ("Always X. Except Y.") or introduced by a
+// lead-in ("In this repo:") is not complete alone; it can never be stored broadly.
+const QUALIFIER_START = /^(?:[-*•]\s*)?(?:except|unless|but|however|only|although|though|otherwise|if|when|as long as|provided)\b/iu;
+
 /**
- * Conservative policy over one unit's Jev probabilities. Not durable enough →
- * not retained. A broad label needs BROAD_SCOPE_CONFIDENCE, and "user-wide"
- * additionally needs the user to have said it; anything uncertain stays
- * project-local. Nothing ever becomes broad by default.
+ * Split fresh messages into source units, OLDEST first until GATE_MAX_UNITS,
+ * so a backlog is caught up by later checks instead of being skipped.
+ */
+export function buildSourceUnits(fresh: readonly TranscriptEntry[]): { messages: TranscriptEntry[]; units: SourceUnit[] } {
+	const picked: Array<{ entry: TranscriptEntry; segments: ReturnType<typeof segmentText> }> = [];
+	let count = 0;
+	for (const entry of fresh) {
+		const segmented = segmentText(entry.text);
+		if (count + segmented.segments.length > GATE_MAX_UNITS) break;
+		count += segmented.segments.length;
+		picked.push({ entry, segments: segmented });
+	}
+	const units: SourceUnit[] = [];
+	picked.forEach(({ entry, segments }, message) => {
+		segments.segments.forEach((segment, index, all) => {
+			const qualified =
+				QUALIFIER_START.test(segment.text) ||
+				QUALIFIER_START.test(all[index + 1]?.text ?? "") ||
+				(all[index - 1]?.text.endsWith(":") ?? false);
+			units.push({
+				entry,
+				message,
+				...segment,
+				narrow: !entry.truncated && !segments.whole && !qualified && segment.text.length <= SEGMENT_MAX_CHARS,
+			});
+		});
+	});
+	return { messages: picked.map((item) => item.entry), units };
+}
+
+/**
+ * Conservative policy over one span's Jev judgment. Not durable enough → not
+ * retained. Broad storage (user-wide or transferable) needs ALL of: a narrow
+ * span, the broad label at BROAD_SCOPE_CONFIDENCE, Jev confirming the span is
+ * portable alone (no project detail, no qualifier left behind) at
+ * PORTABLE_CONFIDENCE, and no deterministic project marker; user-wide also
+ * needs the user to have said it. Anything else durable stays project-local.
  */
 export function classifyUnit(
-	role: TranscriptEntry["role"],
-	probabilities: UnitProbabilities,
+	unit: Pick<SourceUnit, "text" | "narrow"> & { role: TranscriptEntry["role"] },
+	judgment: UnitJudgment,
 	retainThreshold: number,
+	projectName: string,
 ): UnitClassification | undefined {
+	const { probabilities } = judgment;
 	const jevLabel = (Object.entries(probabilities) as Array<[ApplicabilityLabel, number]>).reduce((best, entry) =>
 		entry[1] > best[1] ? entry : best,
 	)[0];
@@ -261,10 +332,11 @@ export function classifyUnit(
 	const durable = (["project_fact", "user_preference", "transferable_lesson"] as const).reduce((best, label) =>
 		probabilities[label] > probabilities[best] ? label : best,
 	);
-	if (durable === "user_preference" && role === "user" && probabilities.user_preference >= BROAD_SCOPE_CONFIDENCE) {
+	const portable = unit.narrow && judgment.portable >= PORTABLE_CONFIDENCE && !hasProjectMarker(unit.text, projectName);
+	if (portable && durable === "user_preference" && unit.role === "user" && probabilities.user_preference >= BROAD_SCOPE_CONFIDENCE) {
 		return { applicability: "user-wide", jevLabel };
 	}
-	if (durable === "transferable_lesson" && probabilities.transferable_lesson >= BROAD_SCOPE_CONFIDENCE) {
+	if (portable && durable === "transferable_lesson" && probabilities.transferable_lesson >= BROAD_SCOPE_CONFIDENCE) {
 		return { applicability: "transferable", jevLabel };
 	}
 	return { applicability: "project", jevLabel };
@@ -391,7 +463,7 @@ export interface AutomationContext {
 	sessionId?: string;
 }
 
-type CheckTrigger = "prompt" | "periodic";
+type CheckTrigger = "prompt" | "periodic" | "run-end";
 
 export interface AutomationStatus {
 	config: AutomationConfigState | undefined;
@@ -399,14 +471,24 @@ export interface AutomationStatus {
 	hindsight: string;
 	lastCheck?: { atMs: number; trigger: CheckTrigger; result: string };
 	recalled?: { atMs: number; bank: string; ids: string[] };
-	retain: { queued: number; failed: number; unknown: number; inFlight: boolean; pending: boolean; last?: string };
+	retain: {
+		queued: number;
+		failed: number;
+		unknown: number;
+		/** Messages that left the transcript window before they could be judged. */
+		dropped: number;
+		inFlight: boolean;
+		pending: boolean;
+		last?: string;
+	};
 }
 
-interface RetainUnit extends UnitClassification {
-	entry: TranscriptEntry;
-	probabilities: UnitProbabilities;
+interface RetainUnit extends UnitClassification, SourceUnit {
+	judgment: UnitJudgment;
 	model: string;
 }
+
+const unitId = (unit: Pick<SourceUnit, "entry" | "start">) => `${unit.entry.key}@${unit.start}`;
 
 interface RetainJob {
 	target: HindsightTarget;
@@ -435,13 +517,16 @@ export class MemoryAutomation {
 	readonly hindsight = new ServiceCooldown();
 	#run: RunState;
 	#check: Promise<void> | undefined;
+	#endCheck: Promise<void> | undefined;
 	#evaluated = new Set<string>();
 	#injectedTexts: string[] = [];
 	#retainInFlight: Promise<void> | undefined;
 	#retainPending: RetainJob | undefined;
 	#config: AutomationConfigState | undefined;
 	#lastCheck: AutomationStatus["lastCheck"];
-	#retainCounts = { queued: 0, failed: 0, unknown: 0 };
+	#retainCounts = { queued: 0, failed: 0, unknown: 0, dropped: 0 };
+	/** Fresh messages deferred past a check's unit cap, awaiting catch-up. */
+	#deferred = new Set<string>();
 	#lastRetain: string | undefined;
 	#disposed = false;
 
@@ -463,19 +548,63 @@ export class MemoryAutomation {
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
+		// Report honestly what shutdown leaves behind; nothing below is stored.
+		const unsent = this.#retainPending?.units.length ?? 0;
+		const lost = [
+			...(unsent > 0 ? [`${unsent} judged unit(s) never sent`] : []),
+			...(this.#retainInFlight !== undefined ? ["1 retain cancelled in flight (outcome unknown)"] : []),
+			...(this.#endCheck !== undefined ? ["the final messages were not judged in time"] : []),
+		];
 		this.#disposed = true;
 		this.#run.controller.abort();
 		this.#session.abort();
 		this.#retainPending = undefined;
+		if (lost.length > 0) {
+			this.#deps.diagnose("automation-shutdown", `pi-memory: automatic memory stopped at shutdown — ${lost.join("; ")}.`, "warning");
+		}
 	}
 
-	/** Wait (bounded) for an in-flight retain before shutdown; unsent pending work is reported, not sent. */
+	/**
+	 * Wait, bounded in total, for the run-end judgment and the retain it may
+	 * start before shutdown. Anything still unsent afterwards is dropped.
+	 */
 	async flush(timeoutMs: number): Promise<void> {
-		const inFlight = this.#retainInFlight;
-		if (inFlight === undefined) return;
 		let timer: NodeJS.Timeout | undefined;
-		await Promise.race([inFlight, new Promise<void>((resolve) => (timer = setTimeout(resolve, timeoutMs)))]);
+		const deadline = new Promise<void>((resolve) => (timer = setTimeout(resolve, timeoutMs)));
+		const settle = async () => {
+			await this.#endCheck;
+			while (this.#retainInFlight !== undefined) await this.#retainInFlight;
+		};
+		await Promise.race([settle().catch(() => undefined), deadline]);
 		if (timer !== undefined) clearTimeout(timer);
+	}
+
+	/**
+	 * A user run fully settled (no retry or continuation follows): judge its
+	 * not-yet-judged final messages for retention only. Never recalls, never
+	 * injects, never continues the run. Callers must not await it unbounded.
+	 */
+	onRunSettled(messages: readonly AgentContextMessage[], context: AutomationContext): Promise<void> {
+		if (this.#disposed || context.mode !== "read-write") return Promise.resolve();
+		const previous = this.#endCheck;
+		// The handle is set synchronously so flush()/idle() always see this work.
+		const check = (async () => {
+			await previous;
+			const config = await this.refreshConfig(context);
+			if (config.state !== "configured") return;
+			const entries = buildTranscript(messages);
+			if (entries.every((entry) => this.#evaluated.has(entry.key))) return;
+			await this.#runCheck("run-end", entries, undefined, context, RUN_END_DEADLINE_MS, config.settings);
+		})()
+			.catch(() => {
+				this.#lastCheck = { atMs: this.#deps.now(), trigger: "run-end", result: "internal error; skipped" };
+			})
+			.finally(() => {
+				if (this.#endCheck === check) this.#endCheck = undefined;
+			});
+		this.#endCheck = check;
+		return check;
 	}
 
 	status(): AutomationStatus {
@@ -571,6 +700,7 @@ export class MemoryAutomation {
 
 	#markEvaluated(entries: readonly TranscriptEntry[]): void {
 		for (const entry of entries) {
+			this.#deferred.delete(entry.key);
 			this.#evaluated.delete(entry.key);
 			this.#evaluated.add(entry.key);
 		}
@@ -592,7 +722,7 @@ export class MemoryAutomation {
 		context: AutomationContext,
 		deadlineMs: number,
 	): Promise<void> {
-		const check = this.#runCheck(trigger, entries, run, context, deadlineMs)
+		const check = this.#runCheck(trigger, entries, run, context, deadlineMs, run.settings)
 			.catch(() => {
 				this.#lastCheck = { atMs: this.#deps.now(), trigger, result: "internal error; skipped" };
 			})
@@ -603,15 +733,17 @@ export class MemoryAutomation {
 		return check;
 	}
 
+	/** One bounded check. `run` undefined = retain-only (run end): no recall, no run state touched. */
 	async #runCheck(
 		trigger: CheckTrigger,
 		entries: TranscriptEntry[],
-		run: RunState,
+		run: RunState | undefined,
 		context: AutomationContext,
 		deadlineMs: number,
+		settings: AutomationSettings | undefined,
 	): Promise<void> {
-		const settings = run.settings;
-		if (settings === undefined || context.identity.status !== "ok") return;
+		const identity = context.identity;
+		if (settings === undefined || identity.status !== "ok") return;
 		const { now } = this.#deps;
 		const started = now();
 		const record = (result: string) => {
@@ -620,15 +752,29 @@ export class MemoryAutomation {
 		if (!this.hindsight.canAttempt(started)) return record("skipped: Hindsight cooling down");
 		if (!this.jev.canAttempt(started)) return record("skipped: Jev cooling down");
 
-		const signals = [this.#session.signal, run.controller.signal, ...(context.signal !== undefined ? [context.signal] : [])];
+		const signals = [
+			this.#session.signal,
+			...(run !== undefined ? [run.controller.signal] : []),
+			...(run !== undefined && context.signal !== undefined ? [context.signal] : []),
+		];
 		const signal = AbortSignal.any(signals);
-		// Only the newest units are judged; older unjudged ones are dropped with them (bounded work).
-		const fresh = entries.filter((entry) => !this.#evaluated.has(entry.key));
-		const earlier = entries.filter((entry) => this.#evaluated.has(entry.key)).slice(-4);
+		const askRecall = run !== undefined;
 		const canRetain = context.mode === "read-write";
+		const unevaluated = entries.filter((entry) => !this.#evaluated.has(entry.key));
+		const earlier = entries.filter((entry) => this.#evaluated.has(entry.key)).slice(-4);
+		if (run !== undefined) this.#accountDropped(entries);
+		// read-write: the oldest messages whose units fit are judged; the rest wait for a later check.
+		// read-only: messages are recall context only and are marked considered, so they are
+		// neither re-sent every check nor retained later if the mode becomes read-write.
+		const { messages: judgedMessages, units: sourceUnits } = canRetain ? buildSourceUnits(unevaluated) : { messages: [], units: [] };
+		const considered = canRetain ? judgedMessages : unevaluated;
+		if (!askRecall && sourceUnits.length === 0) return;
+		// Reserve now so a concurrent check never judges the same messages; released on failure.
+		this.#markEvaluated(considered);
+		for (const entry of unevaluated) if (!considered.includes(entry)) this.#deferred.add(entry.key);
 
 		const gate: GateOutcome = await runMemoryGate(
-			{ earlier, fresh, askRetain: canRetain, askRecall: true },
+			{ earlier, fresh: considered, units: sourceUnits.map(({ message, text }) => ({ message, text })), askRecall },
 			{
 				agentDir: this.#deps.agentDir,
 				env: this.#deps.env,
@@ -637,7 +783,9 @@ export class MemoryAutomation {
 				...(this.#deps.jevFetch !== undefined ? { fetch: this.#deps.jevFetch } : {}),
 			},
 		);
-		if (gate.kind === "aborted" || !this.#isCurrent(run)) return record("cancelled");
+		// read-only context stays considered even on failure, so it can never be retained later.
+		if (gate.kind !== "decision" && canRetain) this.#forget(considered);
+		if (gate.kind === "aborted") return record("cancelled");
 		if (gate.kind === "unavailable") {
 			if (gate.reason === "missing-key" || gate.reason === "config-malformed") {
 				this.#deps.diagnose(
@@ -655,24 +803,23 @@ export class MemoryAutomation {
 		const parts: string[] = [];
 		if (units === undefined) parts.push("retain not asked");
 		else {
-			this.#markEvaluated(fresh);
-			const judged = fresh.slice(-units.length);
 			const selected: RetainUnit[] = [];
-			judged.forEach((entry, index) => {
-				const classification = classifyUnit(entry.role, units[index], settings.retainThreshold);
-				if (classification !== undefined) selected.push({ ...classification, entry, probabilities: units[index], model });
+			sourceUnits.forEach((unit, index) => {
+				const judgment = units[index];
+				const classification = classifyUnit({ ...unit, role: unit.entry.role }, judgment, settings.retainThreshold, identity.displayName);
+				if (classification !== undefined) selected.push({ ...unit, ...classification, judgment, model });
 			});
 			const count = (applicability: Applicability) => selected.filter((unit) => unit.applicability === applicability).length;
 			parts.push(
-				`retain ${selected.length}/${judged.length} (${count("user-wide")} user-wide, ${count("transferable")} transferable, ${count("project")} project)`,
+				`retain ${selected.length}/${sourceUnits.length} units (${count("user-wide")} user-wide, ${count("transferable")} transferable, ${count("project")} project)`,
 			);
 			if (selected.length > 0) {
 				this.#enqueueRetain(
 					{
 						target: { url: settings.url, bank: settings.bank },
 						units: selected,
-						projectHash: context.identity.identityHash,
-						projectName: context.identity.displayName,
+						projectHash: identity.identityHash,
+						projectName: identity.displayName,
 						sessionId: context.sessionId,
 					},
 					context,
@@ -680,12 +827,13 @@ export class MemoryAutomation {
 			}
 		}
 		parts.push(`recall ${recall === undefined ? "not asked" : recall.toFixed(2)}`);
-		if (recall !== undefined && recall >= settings.recallThreshold) {
+		if (run !== undefined && !this.#isCurrent(run)) parts.push("recall skipped: run ended");
+		else if (run !== undefined && recall !== undefined && recall >= settings.recallThreshold) {
 			const query = buildRecallQuery(entries, trigger === "periodic");
 			const remaining = deadlineMs - (now() - started);
 			if (query === undefined) parts.push("no query source");
 			else if (remaining < MIN_RECALL_BUDGET_MS) parts.push("recall skipped: deadline");
-			else parts.push(await this.#recall(run, settings, context.identity.identityHash, query, remaining, signal));
+			else parts.push(await this.#recall(run, settings, identity.identityHash, query, remaining, signal));
 		}
 		record(parts.join(", "));
 	}
@@ -761,8 +909,8 @@ export class MemoryAutomation {
 			// Coalesce into one pending job; same target only, bounded size.
 			const pending = this.#retainPending;
 			if (pending !== undefined && pending.target.bank === job.target.bank && pending.target.url === job.target.url) {
-				const seen = new Set(pending.units.map((unit) => unit.entry.key));
-				pending.units.push(...job.units.filter((unit) => !seen.has(unit.entry.key)));
+				const seen = new Set(pending.units.map(unitId));
+				pending.units.push(...job.units.filter((unit) => !seen.has(unitId(unit))));
 			} else {
 				this.#retainPending = job;
 			}
@@ -777,36 +925,60 @@ export class MemoryAutomation {
 		this.#retainInFlight = inFlight;
 	}
 
-	/** One independent item per source unit, each with its own applicability tags. */
+	/**
+	 * Items from source units, verbatim. A broad unit is always its own item.
+	 * Adjacent project-local units of one message merge into one item (the
+	 * exact original text between them), so a qualifier stays with what it
+	 * qualifies. Nothing is paraphrased or rewritten.
+	 */
 	#retainItems(job: RetainJob): RetainItem[] {
 		const timestamp = new Date(this.#deps.now()).toISOString();
-		const items: RetainItem[] = [];
+		const groups: RetainUnit[][] = [];
 		for (const unit of job.units) {
-			let text = unit.entry.text;
+			const last = groups[groups.length - 1];
+			const previous = last?.[last.length - 1];
+			const adjacent =
+				previous !== undefined &&
+				previous.entry.key === unit.entry.key &&
+				previous.applicability === "project" &&
+				unit.applicability === "project" &&
+				job.units.indexOf(previous) === job.units.indexOf(unit) - 1 &&
+				unit.entry.text.slice(previous.end, unit.start).trim() === "";
+			if (adjacent) last.push(unit);
+			else groups.push([unit]);
+		}
+		const items: RetainItem[] = [];
+		for (const group of groups) {
+			const first = group[0];
+			const lastUnit = group[group.length - 1];
+			let text = first.entry.text.slice(first.start, lastUnit.end);
 			// Do not feed memories the agent just echoed back into new memories.
 			for (const injected of this.#injectedTexts) {
 				if (injected.length >= 20) text = text.split(injected).join(RECALLED_OMITTED);
 			}
 			if (text.split(RECALLED_OMITTED).join("").trim().length < 20) continue;
-			const speaker = unit.entry.role === "user" ? "User" : "Assistant";
-			const probabilities = (Object.entries(unit.probabilities) as Array<[string, number]>)
-				.map(([label, value]) => `${label}=${value.toFixed(2)}`)
-				.join(",");
+			const speaker = first.entry.role === "user" ? "User" : "Assistant";
+			const judgment = (unit: RetainUnit) =>
+				(Object.entries(unit.judgment.probabilities) as Array<[string, number]>)
+					.map(([label, value]) => `${label}=${value.toFixed(2)}`)
+					.concat(`portable=${unit.judgment.portable.toFixed(2)}`)
+					.join(",");
 			items.push({
 				content: `${speaker}: ${text}`,
-				context: RETAIN_CONTEXT[unit.applicability](job.projectName),
+				context: RETAIN_CONTEXT[first.applicability](job.projectName),
 				metadata: {
 					source: "pi-memory-auto",
-					applicability: unit.applicability,
+					applicability: first.applicability,
 					source_project: job.projectName,
 					source_project_hash: projectKey(job.projectHash),
-					source_role: unit.entry.role,
+					source_role: first.entry.role,
+					source_span: `${first.start}-${lastUnit.end}`,
 					...(job.sessionId !== undefined ? { source_session: job.sessionId } : {}),
-					jev_label: unit.jevLabel,
-					jev_probabilities: probabilities,
-					jev_model: unit.model,
+					jev_label: group.map((unit) => unit.jevLabel).join(";"),
+					jev_probabilities: group.map(judgment).join(";"),
+					jev_model: first.model,
 				},
-				tags: tagsFor(unit.applicability, job.projectHash),
+				tags: tagsFor(first.applicability, job.projectHash),
 				timestamp,
 			});
 		}
@@ -833,7 +1005,7 @@ export class MemoryAutomation {
 		}
 		const items = this.#retainItems(job);
 		if (items.length === 0) {
-			this.#lastRetain = "not sent: only echoed recalled memory";
+			this.#lastRetain = "not sent: nothing substantive left (short, or only echoed recalled memory)";
 			return;
 		}
 		const outcome: HindsightOutcome<unknown> & { operationId: string } = await hindsightRetain(
@@ -865,14 +1037,28 @@ export class MemoryAutomation {
 		}
 	}
 
+	/** Deferred messages that left the transcript window unjudged are counted, not silently lost. */
+	#accountDropped(entries: readonly TranscriptEntry[]): void {
+		const visible = new Set(entries.map((entry) => entry.key));
+		for (const key of this.#deferred) {
+			if (visible.has(key) || this.#evaluated.has(key)) continue;
+			this.#deferred.delete(key);
+			this.#retainCounts.dropped += 1;
+		}
+	}
+
+	/** Released messages become judgeable again (and count as dropped if they leave the window first). */
 	#forget(entries: readonly TranscriptEntry[]): void {
-		for (const entry of entries) this.#evaluated.delete(entry.key);
+		for (const entry of entries) {
+			this.#evaluated.delete(entry.key);
+			this.#deferred.add(entry.key);
+		}
 	}
 
 	/** Test/diagnostic seam: resolves when background work settles. */
 	async idle(): Promise<void> {
 		for (let index = 0; index < 10; index += 1) {
-			const pending = [this.#check, this.#retainInFlight].filter((value) => value !== undefined);
+			const pending = [this.#check, this.#endCheck, this.#retainInFlight].filter((value) => value !== undefined);
 			if (pending.length === 0) return;
 			await Promise.allSettled(pending);
 		}
@@ -907,7 +1093,7 @@ export function automationStatusLines(status: AutomationStatus | undefined, now:
 	);
 	const retain = status.retain;
 	lines.push(
-		`  retain: ${retain.queued} accepted (async; not confirmed stored), ${retain.unknown} unknown, ${retain.failed} failed${retain.inFlight ? ", 1 in flight" : ""}${retain.pending ? ", 1 pending" : ""}${retain.last !== undefined ? `; last: ${retain.last}` : ""}`,
+		`  retain: ${retain.queued} accepted (async; not confirmed stored), ${retain.unknown} unknown, ${retain.failed} failed, ${retain.dropped} dropped unjudged${retain.inFlight ? ", 1 in flight" : ""}${retain.pending ? ", 1 pending" : ""}${retain.last !== undefined ? `; last: ${retain.last}` : ""}`,
 	);
 	return lines;
 }

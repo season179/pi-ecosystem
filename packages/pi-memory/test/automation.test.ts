@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Fetch } from "@typesafe-ai/sdk";
 import { afterEach, describe, it } from "vitest";
 import {
+	automationStatusLines,
 	classifyUnit,
 	MemoryAutomation,
 	parseAutomationConfig,
@@ -40,8 +41,14 @@ afterEach(async () => {
 
 interface JevCall {
 	questions: string[];
-	state: { earlier_messages: Array<{ text: string }>; fresh_messages: Array<{ role: string; text: string }> };
+	state: {
+		earlier_messages: Array<{ text: string }>;
+		fresh_messages: Array<{ role: string; text: string }>;
+		units: Array<{ message: number; text: string }>;
+	};
 }
+
+type JudgedUnit = { role: string; text: string };
 
 interface RetainBody {
 	items: Array<{ content: string; metadata: Record<string, string>; tags: string[]; document_id?: string }>;
@@ -51,7 +58,11 @@ interface RetainBody {
 
 interface Services {
 	/** Mutable Jev answers for subsequent calls; `unit` may depend on the judged message. */
-	answers: { unit: UnitProbabilities | ((message: { role: string; text: string }) => UnitProbabilities); recall: number };
+	answers: {
+		unit: UnitProbabilities | ((unit: JudgedUnit) => UnitProbabilities);
+		portable: number | ((unit: JudgedUnit) => number);
+		recall: number;
+	};
 	jev: Fetch;
 	hindsight: HindsightFetch;
 	jevCalls: JevCall[];
@@ -61,13 +72,14 @@ interface Services {
 
 function fakeServices(options: {
 	unit?: Services["answers"]["unit"];
+	portable?: Services["answers"]["portable"];
 	recall?: number;
 	jev?: (call: JevCall) => Promise<Response> | Response | undefined;
 	recallResponse?: (index: number, body: { tag_groups?: TagGroup[] }) => Promise<Response> | Response;
 	retainResponse?: () => Promise<Response> | Response;
 } = {}): Services {
 	const services: Services = {
-		answers: { unit: options.unit ?? PROJECT_FACT, recall: options.recall ?? 0.9 },
+		answers: { unit: options.unit ?? PROJECT_FACT, portable: options.portable ?? 0.9, recall: options.recall ?? 0.9 },
 		jevCalls: [],
 		recalls: [],
 		retains: [],
@@ -79,11 +91,14 @@ function fakeServices(options: {
 			if (override !== undefined) return override;
 			const answers: Record<string, unknown> = {};
 			for (const key of Object.keys(body.questions).filter((name) => name.startsWith("unit_"))) {
-				const message = body.state.fresh_messages[Number(key.slice(5))];
-				const unit = services.answers.unit;
-				const probabilities = typeof unit === "function" ? unit(message) : unit;
+				const index = Number(key.slice(5));
+				const span = body.state.units[index];
+				const judged = { role: body.state.fresh_messages[span.message].role, text: span.text };
+				const { unit, portable } = services.answers;
+				const probabilities = typeof unit === "function" ? unit(judged) : unit;
 				const choice = Object.entries(probabilities).reduce((best, entry) => (entry[1] > best[1] ? entry : best))[0];
 				answers[key] = { type: "choice", choice, confidence: 0.9, probabilities };
+				answers[`scope_${index}`] = { type: "noul", noul: typeof portable === "function" ? portable(judged) : portable };
 			}
 			if (body.questions.recall) answers.recall = { type: "noul", noul: services.answers.recall };
 			return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 1, output_tokens: 1 } });
@@ -215,7 +230,8 @@ const assistant = (text: string, timestamp: number) =>
 
 describe("automatic memory through a real Pi SDK session", () => {
 	it("recalls into the prompt request and retains the exchange without any memory tool call", async () => {
-		const services = fakeServices();
+		// The final reply is judged at run end; chatter is not durable, so only the prompt is stored.
+		const services = fakeServices({ unit: (unit) => (unit.role === "assistant" ? NOT_DURABLE : PROJECT_FACT) });
 		const rig = await session(services, { responses: [{ kind: "text", text: "Committed." }] });
 		await rig.prompt(PROMPT);
 
@@ -226,7 +242,7 @@ describe("automatic memory through a real Pi SDK session", () => {
 		assert.ok(context.includes("(user-wide preference; stated in project other-repo)"));
 		assert.ok(!JSON.stringify(rig.harness.captures[0].context.systemPrompt).includes(MEMORY_TEXT));
 		assert.deepEqual(services.recalls.map((recall) => recall.query), [PROMPT]);
-		assert.deepEqual(services.jevCalls[0].questions, ["recall", "unit_0"]);
+		assert.deepEqual(services.jevCalls[0].questions, ["recall", "scope_0", "unit_0"]);
 
 		assert.equal(services.retains.length, 1);
 		const [retain] = services.retains;
@@ -251,8 +267,9 @@ describe("automatic memory through a real Pi SDK session", () => {
 		});
 		await rig.prompt(PROMPT);
 		await rig.prompt("Next, tag the release.");
-		assert.equal(services.retains.length, 2);
-		const second = services.retains[1].items.map((item) => item.content).join("\n");
+		// prompt 1, run-end 1 (assistant reply), prompt 2; run-end 2 ("ok") has nothing substantive.
+		assert.equal(services.retains.length, 3);
+		const second = services.retains.slice(1).flatMap((retain) => retain.items.map((item) => item.content)).join("\n");
 		assert.ok(second.includes("Assistant: Noted: [recalled memory omitted]. Committed the staged changes as asked."));
 		assert.ok(!second.includes("HS_MEMORY_7c1e"));
 		assert.ok(!second.includes(PROMPT), "already-evaluated messages are not retained twice");
@@ -278,22 +295,41 @@ describe("automatic memory through a real Pi SDK session", () => {
 
 		const captures = rig.harness.captures.map(requestText);
 		assert.equal(captures.length, 6);
-		// periodicEveryRequests=2: prompt check at request 1, periodic launches at 3 and 5.
-		assert.equal(services.jevCalls.length, 3);
+		// periodicEveryRequests=2: prompt check at request 1, periodic launches at 3 and 5, then run end.
+		assert.equal(services.jevCalls.length, 4);
+		assert.ok(!services.jevCalls[3].questions.includes("recall"), "the run-end judgment never recalls");
 		const firstPeriodic = captures.findIndex((text) => text.includes("HS_PERIODIC_52aa"));
 		assert.ok(firstPeriodic >= 3, `periodic recall reaches a later request (got ${firstPeriodic})`);
 		assert.ok(captures.every((text) => text.includes("HS_MEMORY_7c1e")), "run-scoped recall stays for the whole run");
 		for (const text of captures) assert.equal(text.split("HS_MEMORY_7c1e").length - 1, 1, "one copy per request");
-		// Retain is judged once for the prompt; later checks have no fresh user/assistant text to judge.
+		// The prompt is judged once; periodic checks have no fresh text; "Done." is too short to store.
 		assert.equal(services.retains.length, 1);
-		assert.ok(services.jevCalls.slice(1).every((call) => call.questions.every((question) => !question.startsWith("unit_"))));
+		assert.ok(services.jevCalls.slice(1, 3).every((call) => call.questions.every((question) => !question.startsWith("unit_"))));
+	});
+
+	it("captures a settled run's final assistant completion with no later prompt, retain-only", async () => {
+		const CORRECTION = "Stop using npm here; always use pnpm in every project from now on.";
+		const FINAL = "Switched every script to pnpm and verified that the build passes.";
+		const services = fakeServices({ unit: (unit) => (unit.text === CORRECTION ? USER_PREFERENCE : PROJECT_FACT) });
+		const rig = await session(services, { responses: [{ kind: "text", text: FINAL }] });
+		await rig.prompt(CORRECTION);
+
+		assert.equal(rig.harness.captures.length, 1, "no forced continuation or extra provider request");
+		assert.equal(services.jevCalls.length, 2);
+		assert.ok(!services.jevCalls[1].questions.includes("recall"), "run end never recalls");
+		assert.deepEqual(services.jevCalls[1].state.units.map((unit) => unit.text), [FINAL], "only the not-yet-judged final message");
+		assert.equal(services.recalls.length, 1);
+		const contents = services.retains.flatMap((retain) => retain.items.map((item) => item.content));
+		assert.deepEqual(contents, [`User: ${CORRECTION}`, `Assistant: ${FINAL}`]);
+		assert.match(rig.automation()?.status().lastCheck?.result ?? "", /retain 1\/1 units/u);
+		assert.equal(rig.automation()?.status().lastCheck?.trigger, "run-end");
 	});
 
 	it("drops the previous run's recall at the next prompt when recall is not needed", async () => {
 		const services = fakeServices();
 		const rig = await session(services, { responses: [{ kind: "text", text: "Committed." }, { kind: "text", text: "Hi." }] });
 		await rig.prompt(PROMPT);
-		services.answers = { unit: NOT_DURABLE, recall: 0.1 };
+		services.answers = { ...services.answers, unit: NOT_DURABLE, recall: 0.1 };
 		await rig.prompt("thanks, that is all");
 		assert.ok(requestText(rig.harness.captures[0]).includes("HS_MEMORY_7c1e"));
 		assert.ok(!requestText(rig.harness.captures[1]).includes("HS_MEMORY_7c1e"), "no stale injection from the previous run");
@@ -306,22 +342,74 @@ describe("shared bank: applicability, provenance, and recall scope", () => {
 	const HASH_A = "a".repeat(64);
 	const HASH_B = "b".repeat(64);
 
-	it("classifies conservatively: broad labels need confidence and user-wide needs the user", () => {
-		assert.equal(classifyUnit("user", USER_PREFERENCE, 0.6)?.applicability, "user-wide");
-		const claimed = classifyUnit("assistant", USER_PREFERENCE, 0.6);
-		assert.deepEqual(claimed, { applicability: "project", jevLabel: "user_preference" }, "an assistant cannot state a user-wide preference");
+	it("classifies conservatively: broad needs a narrow, portable, marker-free span with confidence; user-wide needs the user", () => {
+		const span = (text: string, role: "user" | "assistant" = "user", narrow = true) => ({ text, role, narrow });
+		const judged = (probabilities: UnitProbabilities, portable = 0.95) => ({ probabilities, portable });
+		const classify = (unit: ReturnType<typeof span>, judgment: ReturnType<typeof judged>) =>
+			classifyUnit(unit, judgment, 0.6, "repo-a")?.applicability;
+		const pref = "Never add Co-authored-by lines to commits.";
+		assert.equal(classify(span(pref), judged(USER_PREFERENCE)), "user-wide");
+		assert.deepEqual(
+			classifyUnit(span(pref, "assistant"), judged(USER_PREFERENCE), 0.6, "repo-a"),
+			{ applicability: "project", jevLabel: "user_preference" },
+			"an assistant cannot state a user-wide preference; the original label is kept",
+		);
+		assert.equal(classify(span(pref), judged(USER_PREFERENCE, 0.5)), "project", "not verified portable");
+		assert.equal(classify(span(pref, "user", false), judged(USER_PREFERENCE)), "project", "truncated/whole/qualified spans are never broad");
+		for (const marked of ["Always run scripts/release.sh first.", "Use https://ci.example.test for builds.", "In repo-a, never squash.", "Use token [REDACTED]."]) {
+			assert.equal(classify(span(marked), judged(USER_PREFERENCE)), "project", marked);
+		}
 		const unsure = { user_preference: 0.55, project_fact: 0.2, transferable_lesson: 0.15, not_durable: 0.1 };
-		assert.equal(classifyUnit("user", unsure, 0.6)?.applicability, "project", "uncertain scope stays project-local");
+		assert.equal(classify(span(pref), judged(unsure)), "project", "uncertain scope stays project-local");
 		const lesson = { user_preference: 0.05, project_fact: 0.1, transferable_lesson: 0.8, not_durable: 0.05 };
-		assert.equal(classifyUnit("assistant", lesson, 0.6)?.applicability, "transferable");
-		assert.equal(classifyUnit("user", NOT_DURABLE, 0.6), undefined);
+		assert.equal(classify(span("Vitest fake timers stall fetch; use real timers.", "assistant"), judged(lesson)), "transferable");
+		assert.equal(classify(span(pref), judged(NOT_DURABLE)), undefined);
+	});
+
+	it("splits a SINGLE mixed message: only the portable preference is user-wide, project detail stays local", async () => {
+		const PREF = "From now on, never add Co-authored-by lines to any commit.";
+		const SECRET = "Our staging deploy host is db-7.internal and its admin password is swordfish.";
+		const services = fakeServices({
+			recall: 0.1,
+			// Adversarial labels: Jev calls BOTH spans user preferences; only the scope check tells them apart.
+			unit: () => USER_PREFERENCE,
+			portable: (unit) => (unit.text === PREF ? 0.95 : 0.1),
+		});
+		const { automation, context } = await unitRig(services.hindsight, services.jev, { identityHash: HASH_A, name: "repo-a", mode: "read-write" });
+		await automation.onContext([user(`${PREF} ${SECRET}`, 1)], context());
+		await automation.idle();
+
+		assert.deepEqual(services.jevCalls[0].state.units.map((unit) => unit.text), [PREF, SECRET], "verbatim spans, judged with the whole message as context");
+		assert.equal(services.jevCalls[0].state.fresh_messages[0].text, `${PREF} ${SECRET}`);
+		const items = services.retains[0].items;
+		const broad = items.filter((item) => item.tags.includes(TAG_USER_WIDE));
+		assert.deepEqual(broad.map((item) => item.content), [`User: ${PREF}`]);
+		assert.ok(broad.every((item) => !item.content.includes("swordfish") && !item.content.includes("db-7")), "user-wide carries no project-only fact");
+		const local = items.filter((item) => item.tags.includes(TAG_PROJECT_FACT));
+		assert.deepEqual(local.map((item) => item.content), [`User: ${SECRET}`]);
+		assert.deepEqual(local[0].tags, [TAG_PROJECT_FACT, projectTag(HASH_A)]);
+		assert.equal(local[0].metadata.jev_label, "user_preference", "original qualification is preserved");
+		assert.notEqual(broad[0].document_id, local[0].document_id, "items never share a document");
+	});
+
+	it("never splits an exception away from its rule: a qualified preference stays whole and project-local", async () => {
+		const RULE = "Always use tabs for indentation.";
+		const EXCEPTION = "Except in YAML files, where spaces are required.";
+		// Even with Jev wrongly confirming the rule alone as portable, the qualifier guard keeps it local.
+		const services = fakeServices({ recall: 0.1, unit: () => USER_PREFERENCE, portable: 0.95 });
+		const { automation, context } = await unitRig(services.hindsight, services.jev, { identityHash: HASH_A, name: "repo-a", mode: "read-write" });
+		await automation.onContext([user(`${RULE} ${EXCEPTION}`, 1)], context());
+		await automation.idle();
+		const items = services.retains[0].items;
+		assert.equal(items.filter((item) => item.tags.includes(TAG_USER_WIDE)).length, 0, "the bare rule is not stored user-wide");
+		assert.deepEqual(items.map((item) => item.content), [`User: ${RULE} ${EXCEPTION}`], "verbatim, exception kept with its rule");
 	});
 
 	it("stores each source unit as its own item, so one preference never widens a mixed exchange", async () => {
 		const PREF = "From now on, never add Co-authored-by lines to any commit.";
 		const services = fakeServices({
 			recall: 0.1,
-			unit: (message) => (message.text === PREF ? USER_PREFERENCE : message.role === "assistant" ? USER_PREFERENCE : NOT_DURABLE),
+			unit: (unit) => (unit.text === PREF ? USER_PREFERENCE : unit.role === "assistant" ? USER_PREFERENCE : NOT_DURABLE),
 		});
 		const { automation, context } = await unitRig(services.hindsight, services.jev, { identityHash: HASH_A, name: "repo-a", mode: "read-write" });
 		await automation.onContext(
@@ -332,18 +420,19 @@ describe("shared bank: applicability, provenance, and recall scope", () => {
 
 		assert.equal(services.retains.length, 1);
 		const items = services.retains[0].items;
-		assert.equal(items.length, 2, "the non-durable unit is not stored");
+		assert.equal(items.length, 2, "the non-durable message is not stored");
 		const [preference, fact] = items;
 		assert.equal(preference.content, `User: ${PREF}`, "the user-wide item carries only its own unit");
 		assert.deepEqual(preference.tags, [TAG_USER_WIDE]);
 		assert.equal(preference.metadata.applicability, "user-wide");
 		assert.equal(preference.metadata.source_project, "repo-a");
 		assert.equal(preference.metadata.source_session, "session-1");
-		assert.match(preference.metadata.jev_probabilities, /user_preference=0\.90/u);
+		assert.match(preference.metadata.jev_probabilities, /user_preference=0\.90.*portable=0\.90/u);
 		// The assistant unit was labelled a user preference by Jev; policy keeps it project-local.
 		assert.deepEqual(fact.tags, [TAG_PROJECT_FACT, projectTag(HASH_A)]);
 		assert.equal(fact.metadata.applicability, "project");
-		assert.equal(fact.metadata.jev_label, "user_preference", "original qualification is preserved");
+		assert.equal(fact.content, "Assistant: Understood. This repo builds with pnpm workspaces and Node 24.", "adjacent spans merge verbatim");
+		assert.equal(fact.metadata.jev_label, "user_preference;user_preference", "original qualification is preserved per span");
 		assert.notEqual(preference.document_id, fact.document_id, "items never share a document");
 	});
 
@@ -359,7 +448,7 @@ describe("shared bank: applicability, provenance, and recall scope", () => {
 		const { automation, context } = await unitRig(services.hindsight, services.jev, { mode: "read-write" });
 		await automation.onContext([user("Always use tabs.", 1), assistant("Noted, I will use tabs from now on.", 2), user("Go.", 3)], context());
 		await automation.idle();
-		assert.deepEqual(services.jevCalls[0].questions, ["recall", "unit_0", "unit_1", "unit_2"]);
+		assert.deepEqual(services.jevCalls[0].questions, ["recall", "scope_0", "scope_1", "scope_2", "unit_0", "unit_1", "unit_2"]);
 		assert.equal(services.retains.length + services.recalls.length, 0);
 		assert.match(automation.status().lastCheck?.result ?? "", /incomplete-response/u);
 	});
@@ -542,6 +631,76 @@ describe("MemoryAutomation stale work and cancellation", () => {
 		assert.equal(await pending, undefined);
 		assert.equal(await automation.onContext([user(PROMPT, 1)], context()), undefined, "no stale block in the new run");
 		assert.equal(automation.status().recalled, undefined);
+	});
+
+	it("catches up a backlog beyond one check's unit cap and counts messages that leave the window unjudged", async () => {
+		// 5 messages x 3 spans = 15 units > the cap of 12: the oldest 4 messages are judged first.
+		const backlog = [1, 2, 3, 4, 5].map((n) => user(`Note ${n} alpha line.\nNote ${n} beta line.\nNote ${n} gamma line.`, n));
+		const services = fakeServices({ recall: 0.1 });
+		const { automation, context } = await unitRig(services.hindsight, services.jev, { mode: "read-write" });
+		await automation.onContext(backlog, context());
+		await automation.idle();
+		assert.deepEqual(services.jevCalls[0].state.fresh_messages.map((message) => message.text.slice(0, 6)), ["Note 1", "Note 2", "Note 3", "Note 4"]);
+		await automation.onContext([...backlog, user("Next task please.", 6)], context());
+		await automation.idle();
+		assert.deepEqual(services.jevCalls[1].state.fresh_messages.map((message) => message.text.slice(0, 6)), ["Note 5", "Next t"], "the deferred message is judged, not lost");
+		assert.equal(automation.status().retain.dropped, 0);
+
+		const other = fakeServices({ recall: 0.1 });
+		const rig = await unitRig(other.hindsight, other.jev, { mode: "read-write" });
+		await rig.automation.onContext(backlog, rig.context());
+		await rig.automation.idle();
+		// Note 5 falls out of the transcript window before any check could judge it.
+		await rig.automation.onContext([user("Unrelated fresh prompt.", 7)], rig.context());
+		await rig.automation.idle();
+		assert.equal(rig.automation.status().retain.dropped, 1, "an unjudged message is counted, never silently skipped");
+		assert.match(automationStatusLines(rig.automation.status(), Date.now()).join("\n"), /1 dropped unjudged/u);
+	});
+
+	it("read-only messages give recall context once and are never retained after switching to read-write", async () => {
+		const READ_ONLY = "Remember that the release branch is frozen this week.";
+		const services = fakeServices();
+		const { automation, context } = await unitRig(services.hindsight, services.jev, { mode: "read-only" });
+		await automation.onContext([user(READ_ONLY, 1)], context());
+		await automation.idle();
+		assert.deepEqual(services.jevCalls[0].questions, ["recall"], "read-only judges no units");
+		const writable = { ...context(), mode: "read-write" as const, currentMode: async () => "read-write" as const };
+		await automation.onContext([user(READ_ONLY, 1), assistant("Noted.", 2), user("Now ship the patch release.", 3)], writable);
+		await automation.idle();
+		assert.deepEqual(services.jevCalls[1].state.earlier_messages.map((message) => message.text), [READ_ONLY], "read-only content stays recall context");
+		assert.ok(!services.jevCalls[1].state.units.some((unit) => unit.text === READ_ONLY), "never judged for retention later");
+		assert.ok(services.retains.every((retain) => retain.items.every((item) => !item.content.includes(READ_ONLY))));
+	});
+
+	it("shutdown flush drains the coalesced pending retain and reports honestly what it could not send", async () => {
+		const services = fakeServices();
+		// Every retain takes a while, so only a real drain sees the second one sent.
+		const slow: HindsightFetch = async (input, init) => {
+			if (input.endsWith("/memories")) await new Promise((resolve) => setTimeout(resolve, 30));
+			return services.hindsight(input, init);
+		};
+		const { automation, context } = await unitRig(slow, services.jev, { mode: "read-write" });
+		await automation.onContext([user(PROMPT, 1)], context());
+		void automation.onRunSettled([user(PROMPT, 1), assistant("Committed the staged changes with message 'fix'.", 2)], context());
+		await automation.flush(2_000);
+		assert.deepEqual(
+			services.retains.map((retain) => retain.items.map((item) => item.content)),
+			[[`User: ${PROMPT}`], ["Assistant: Committed the staged changes with message 'fix'."]],
+			"the pending job behind the in-flight retain is sent too",
+		);
+
+		const hung = fakeServices();
+		const diagnostics: string[] = [];
+		const hanging: HindsightFetch = (input, init) =>
+			input.endsWith("/memories") ? new Promise<Response>(() => undefined) : hung.hindsight(input, init);
+		const rig = await unitRig(hanging, hung.jev, { mode: "read-write", diagnostics });
+		await rig.automation.onContext([user(PROMPT, 1)], rig.context());
+		void rig.automation.onRunSettled([user(PROMPT, 1), assistant("Committed the staged changes with message 'fix'.", 2)], rig.context());
+		const started = Date.now();
+		await rig.automation.flush(100);
+		assert.ok(Date.now() - started < 600, "flush returns at its bound");
+		rig.automation.dispose();
+		assert.match(diagnostics.join("\n"), /1 judged unit\(s\) never sent; 1 retain cancelled in flight/u);
 	});
 
 	it("cancellation stops the prompt check without injecting or recalling", async () => {

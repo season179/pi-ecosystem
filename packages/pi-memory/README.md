@@ -406,7 +406,8 @@ check: a change must satisfy both cap systems, including their recovery rules.
 Off by default. When `<agentDir>/pi-memory/automation.json` exists, pi-memory
 recalls from and retains to a local Hindsight
 server (HTTP API 0.10.x) on its own, without memory tool calls. Jev decides whether to recall
-and classifies each new message; Hindsight stores and ranks.
+and classifies each new source unit (a verbatim line or sentence of a message);
+Hindsight stores and ranks.
 
 ```json
 { "version": 1 }
@@ -424,10 +425,13 @@ A Jev key must resolve through `TYPESAFE_API_KEY` or `typesafe.json`
 `apiKeyFile`.
 
 - **Shared bank, scoped recall.** One bank serves all projects.
-  - Each message is stored separately, tagged as a user-wide preference, a
-    transferable lesson, or a project-specific fact.
-  - Uncertain scope stays project-local, and only the user can state a
-    user-wide preference.
+  - Messages are split into verbatim spans. Each is tagged as a user-wide
+    preference, a transferable lesson, or a project-specific fact, so a
+    preference and a project secret in one message are stored apart.
+  - Broad scope needs a standalone span (no attached exception or condition),
+    confident labels, a separate portability check, and no project markers
+    (paths, URLs, redacted secrets, project name). Otherwise the span stays
+    project-local. Only the user can state a user-wide preference.
   - Recall returns user-wide items, transferable items, and the current
     project's facts only. It is filtered server-side, and each result is
     re-checked client-side.
@@ -436,10 +440,15 @@ A Jev key must resolve through `TYPESAFE_API_KEY` or `typesafe.json`
   - at each new prompt, bounded to 4 s and before the first request;
   - every few tool-loop requests.
 
-  Retain is asynchronous. Recalled items are injected transiently as untrusted
-  background, labelled with their applicability and source.
+  When a run settles, its final messages are judged once more, retain-only (no
+  recall, no extra model request). Retain is asynchronous; shutdown waits at
+  most 3 s for it and reports anything left unsent. A backlog larger than one
+  check is judged oldest first by later checks; messages that leave the window
+  unjudged are counted in status. Recalled items are injected transiently as
+  untrusted background, labelled with their applicability and source.
 - **Modes.**
-  - `read-only`: recall only.
+  - `read-only`: recall only. Messages seen in read-only are never retained
+    later, even after switching to `read-write`.
   - `off`: nothing.
   - Writes re-check the mode at submit time.
 - **Outages.** The task always continues:
