@@ -1,20 +1,16 @@
 import type {
   AgentBeforeSettleEvent, AgentBeforeSettleEventResult, ExtensionCommandContext, ExtensionContext, TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import { AccountStore, getOwnCredential, parseAccountName, type ProviderAccountsData } from "./account-store.js";
-import { checkCodexQuota, type CodexQuota } from "./codex-quota.js";
+import { AccountStore, defineOwn, getOwnCredential, parseAccountName, type ProviderAccountsData } from "./account-store.js";
+import { checkCodexQuota, codexAccountIdentity, type CodexQuota } from "./codex-quota.js";
+import { type Cooldown, type Cooldowns, mergeCooldown, QuotaStateStore } from "./quota-state.js";
 
 const PROVIDER = "openai-codex";
-const STATE_ENTRY = "pi-accounts-auto-switch";
 const UNKNOWN_RESET_RETRY_MS = 5 * 60_000;
 /** Policy used while `autoSwitch` is absent: this saved account first, Pi's built-in login second. */
 export const DEFAULT_PRIMARY = "oc-codex";
 export type AutoSwitchConfig = { primary: string; fallback: string };
-type Cooldown = { retryAt: number; resetKnown: boolean };
-type Session = ExtensionContext["sessionManager"] & { appendCustomEntry(type: string, data: unknown): string };
 export type AutoSwitchAccess = {
-  session: Session;
-  sessionId: string;
   signal: AbortSignal;
   isCurrent(): boolean;
   selected(): string | null;
@@ -46,39 +42,37 @@ export function autoSwitchConfig(state: ProviderAccountsData): AutoSwitchConfig 
   return { primary: value.primary, fallback: value.fallback };
 }
 
-/** One owner per Pi session. No polling, independent OAuth refreshes, or synthetic user prompts. */
+/**
+ * A shared cooldown applies to a label only when it was recorded for the same actual account, where that
+ * is knowable locally: a saved account's stored token identifies it; Pi's built-in `default` login does not.
+ */
+export function cooldownFor(cooldowns: Cooldowns, name: string, state: ProviderAccountsData): Cooldown | undefined {
+  const cooldown = Object.hasOwn(cooldowns, name) ? cooldowns[name] : undefined;
+  if (!cooldown?.identity || name === "default") return cooldown;
+  const credential = getOwnCredential(state.accounts, name);
+  const identity = credential ? codexAccountIdentity(credential.access) : undefined;
+  return identity === undefined || identity === cooldown.identity ? cooldown : undefined;
+}
+
+type Policy = { state: ProviderAccountsData; config: AutoSwitchConfig | undefined };
+
+/**
+ * One controller per Pi session; quota cooldowns live in the shared quota state file, per-prompt
+ * guards here. No polling, independent OAuth refreshes, or synthetic user prompts.
+ */
 export class CodexAutoSwitch {
-  private cooldowns = new Map<string, Cooldown>();
-  private stateError = false;
   private attempted = new Set<string>();
   private requestAccount?: string;
   private failure?: { account: string; message: string; entryId: string };
+  private warnedProblem?: string;
 
   constructor(
     private readonly store: AccountStore,
+    private readonly quotaState: QuotaStateStore,
     private readonly access: AutoSwitchAccess,
     private readonly quota: QuotaChecker = checkCodexQuota,
     private readonly now: () => number = Date.now,
-  ) {
-    for (const entry of access.session.getEntries()) {
-      if (entry.type !== "custom" || entry.customType !== STATE_ENTRY || !record(entry.data) ||
-          entry.data.sessionId !== access.sessionId) continue;
-      const value = entry.data;
-      if (value.version !== 1 || !record(value.cooldowns)) { this.stateError = true; continue; }
-      const restored = new Map<string, Cooldown>();
-      let invalid = false;
-      for (const [name, cooldown] of Object.entries(value.cooldowns)) {
-        if (!validName(name) || !record(cooldown) || typeof cooldown.retryAt !== "number" ||
-            !Number.isFinite(cooldown.retryAt) || cooldown.retryAt < 0 || typeof cooldown.resetKnown !== "boolean") {
-          invalid = true;
-          break;
-        }
-        restored.set(name, { retryAt: cooldown.retryAt, resetKnown: cooldown.resetKnown });
-      }
-      this.stateError = invalid;
-      if (!invalid) this.cooldowns = restored;
-    }
-  }
+  ) {}
 
   beginPrompt(): void {
     this.attempted.clear();
@@ -87,24 +81,26 @@ export class CodexAutoSwitch {
   }
 
   private selected(): string { return this.access.selected() ?? "default"; }
-  private async config(): Promise<AutoSwitchConfig | undefined> {
-    return autoSwitchConfig(await this.store.readProviderAsync(PROVIDER, this.access.signal));
+  private async policy(): Promise<Policy> {
+    const state = await this.store.readProviderAsync(PROVIDER, this.access.signal);
+    return { state, config: autoSwitchConfig(state) };
   }
   private participating(config: AutoSwitchConfig): boolean {
     return [config.primary, config.fallback].includes(this.selected());
   }
-  private available(name: string): boolean {
-    return (this.cooldowns.get(name)?.retryAt ?? 0) <= this.now();
+  /** Fresh shared read before every decision; a bad file warns once per problem per session and counts as empty. */
+  private cooldowns(ctx: ExtensionContext): Cooldowns {
+    const { cooldowns, problem } = this.quotaState.readCooldowns(PROVIDER);
+    if (problem && problem !== this.warnedProblem && this.access.isCurrent()) ctx.ui.notify(problem, "warning");
+    this.warnedProblem = problem;
+    return cooldowns;
   }
-  private persist(): void {
-    if (!this.access.isCurrent()) return;
-    this.access.session.appendCustomEntry(STATE_ENTRY, {
-      version: 1, sessionId: this.access.sessionId, cooldowns: Object.fromEntries(this.cooldowns),
-    });
+  private available(name: string, cooldowns: Cooldowns, state: ProviderAccountsData): boolean {
+    return (cooldownFor(cooldowns, name, state)?.retryAt ?? 0) <= this.now();
   }
-  private exhaustedMessage(config: AutoSwitchConfig): string {
+  private exhaustedMessage(config: AutoSwitchConfig, cooldowns: Cooldowns, state: ProviderAccountsData): string {
     return `Both ChatGPT accounts are exhausted. ${[config.primary, config.fallback].map(name => {
-      const limit = this.cooldowns.get(name);
+      const limit = cooldownFor(cooldowns, name, state);
       return `${name}: ${limit ? `${limit.resetKnown ? "reset" : "reset unknown; retry"} ${new Date(limit.retryAt).toISOString()}` : "already tried"}`;
     }).join("; ")}.`;
   }
@@ -113,13 +109,13 @@ export class CodexAutoSwitch {
   async prepare(ctx: ExtensionContext): Promise<boolean> {
     this.failure = undefined;
     this.requestAccount = undefined;
-    const config = await this.config();
+    const { state, config } = await this.policy();
     if (!this.access.isCurrent() || ctx.signal?.aborted) return false;
     if (!config || !this.participating(config)) return true;
-    if (this.stateError) throw new Error("Invalid saved ChatGPT quota state. Use /accounts-auto retry to reset it.");
-    const next = [config.primary, config.fallback].find(name => this.available(name));
+    const cooldowns = this.cooldowns(ctx);
+    const next = [config.primary, config.fallback].find(name => this.available(name, cooldowns, state));
     if (!next) {
-      ctx.ui.notify(this.exhaustedMessage(config), "error");
+      ctx.ui.notify(this.exhaustedMessage(config, cooldowns, state), "error");
       return false;
     }
     if (next !== this.selected()) {
@@ -128,7 +124,7 @@ export class CodexAutoSwitch {
         return false;
       }
       if (!this.access.isCurrent()) return false;
-      ctx.ui.notify(`ChatGPT account: ${next}${next !== config.primary ? " (fallback)" : this.cooldowns.has(next) ? " (primary; retrying after quota reset)" : " (primary)"}.`, "info");
+      ctx.ui.notify(`ChatGPT account: ${next}${next !== config.primary ? " (fallback)" : cooldownFor(cooldowns, next, state) ? " (primary; retrying after quota reset)" : " (primary)"}.`, "info");
     }
     this.requestAccount = next;
     this.attempted.add(next);
@@ -154,21 +150,32 @@ export class CodexAutoSwitch {
         failure.account !== this.selected() || !this.access.isCurrent() || ctx.signal?.aborted) return;
     if (!/usage[_ ]limit|rate[_ ]limit|\b429\b|quota/i.test(failure.message) ||
         /\b(?:401|403)\b|unauthori[sz]ed|authentication|context[_ ](?:length|window)|usage_not_included/i.test(failure.message)) return;
-    const config = await this.config();
+    const { state, config } = await this.policy();
     if (!config || !this.participating(config) || !this.access.isCurrent()) return;
     const signal = ctx.signal ? AbortSignal.any([this.access.signal, ctx.signal]) : this.access.signal;
     const quota = await this.quota(ctx, signal);
     if (!this.access.isCurrent() || signal.aborted || failure.account !== this.selected()) return;
     if (!quota.exhausted) return;
-    this.cooldowns.set(failure.account, {
+    const cooldown: Cooldown = {
       retryAt: quota.resetAt === undefined ? this.now() + UNKNOWN_RESET_RETRY_MS : Math.max(this.now() + 1_000, quota.resetAt + 1_000),
       resetKnown: quota.resetAt !== undefined,
-    });
-    this.persist(); // Persist before changing identity; never loop if a session write fails.
+      ...(quota.identity === undefined ? {} : { identity: quota.identity }),
+    };
+    // Record globally before changing identity, merging into the on-disk state so another session's
+    // observation or a concurrent `retry` is not overwritten; never switch if the shared write fails.
+    let cooldowns: Cooldowns;
+    try {
+      cooldowns = await this.quotaState.updateCooldowns(PROVIDER, current =>
+        defineOwn(current, failure.account, mergeCooldown(cooldownFor(current, failure.account, state), cooldown)), this.now(), signal);
+    } catch (error) {
+      if (signal.aborted || !this.access.isCurrent()) return; // An abandoned boundary is not an error.
+      throw error;
+    }
+    if (!this.access.isCurrent() || signal.aborted || failure.account !== this.selected()) return;
     this.attempted.add(failure.account);
-    const next = [config.primary, config.fallback].find(name => this.available(name) && !this.attempted.has(name));
+    const next = [config.primary, config.fallback].find(name => this.available(name, cooldowns, state) && !this.attempted.has(name));
     if (!next) {
-      ctx.ui.notify(this.exhaustedMessage(config), "error");
+      ctx.ui.notify(this.exhaustedMessage(config, cooldowns, state), "error");
       return;
     }
     if (!await this.access.activate(next) || !this.access.isCurrent() || signal.aborted) return;
@@ -203,11 +210,14 @@ export class CodexAutoSwitch {
       action = ({ "Configure primary and fallback": "configure", Status: "status", Disable: "off", "Retry now": "retry" })[choice] ?? "status";
     }
     if (action === "status") {
-      const state = await this.store.readProviderAsync(PROVIDER, this.access.signal);
-      const config = autoSwitchConfig(state);
+      const { state, config } = await this.policy();
       if (!this.access.isCurrent()) return;
+      const { cooldowns, problem } = this.quotaState.readCooldowns(PROVIDER);
+      const active = Object.keys(cooldowns).map(name => [name, cooldownFor(cooldowns, name, state)] as const)
+        .filter(([, limit]) => limit !== undefined && limit.retryAt > this.now())
+        .map(([name, limit]) => `${name}: ${limit!.resetKnown ? "reset" : "retry (reset unknown)"} ${new Date(limit!.retryAt).toISOString()}`);
       ctx.ui.notify(config
-        ? `ChatGPT auto-switch: ${config.primary} → ${config.fallback}${state.autoSwitch === undefined ? " (default policy)" : ""}. Current: ${this.selected()}${this.participating(config) ? "" : " (automatic switching paused for this selection)"}.\n${[...this.cooldowns].map(([name, limit]) => `${name}: ${limit.resetKnown ? "reset" : "retry (reset unknown)"} ${new Date(limit.retryAt).toISOString()}`).join("\n")}`
+        ? `ChatGPT auto-switch: ${config.primary} → ${config.fallback}${state.autoSwitch === undefined ? " (default policy)" : ""}. Current: ${this.selected()}${this.participating(config) ? "" : " (automatic switching paused for this selection)"}.\nShared quota cooldowns: ${active.length ? `\n${active.join("\n")}` : "none"}${problem ? `\n${problem}` : ""}`
         : "ChatGPT automatic switching is off.", "info");
       return;
     }
@@ -220,11 +230,11 @@ export class CodexAutoSwitch {
       return;
     }
     if (action === "retry") {
-      this.cooldowns.clear();
-      this.stateError = false;
+      await this.quotaState.reset(PROVIDER, this.access.signal);
+      if (!this.access.isCurrent()) return;
       this.beginPrompt();
-      this.persist();
-      ctx.ui.notify("Saved quota cooldowns cleared for this session. The next request will retry the primary if automatic switching is enabled.", "info");
+      this.warnedProblem = undefined;
+      ctx.ui.notify("Shared ChatGPT quota cooldowns cleared for every session using this agent directory. Exhaustion confirmed later is recorded again. The next request retries the primary if automatic switching is enabled.", "info");
       return;
     }
     let names = action.split(/\s+/);
@@ -247,10 +257,7 @@ export class CodexAutoSwitch {
       return next;
     });
     if (!this.access.isCurrent()) return;
-    this.cooldowns.clear();
-    this.stateError = false;
-    this.beginPrompt();
-    this.persist();
+    this.beginPrompt(); // Shared cooldowns stay: configuring a pair does not make an exhausted account usable.
     if (!await this.access.activate(primary) || !this.access.isCurrent()) {
       ctx.ui.notify("Automatic account settings saved, but primary authentication failed. Fix it through /accounts before continuing.", "error");
       return;

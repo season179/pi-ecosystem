@@ -2,9 +2,12 @@
 // fixtures and cross-covers menus, OAuth, replacement, switching, persistence, and lifecycle safety.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { InMemoryCredentialStore, type ModelAuth } from "@earendil-works/pi-ai";
 import {
   type CustomEntry,
+  getAgentDir,
   initTheme,
   ModelRegistry,
   ModelRuntime,
@@ -21,6 +24,7 @@ import accountsExtension, {
   AccountStore,
   FAIL_CLOSED_API_KEY,
   parseAccountName,
+  QUOTA_STATE_FILE,
   type StoredOAuthCredential,
 } from "../src/accounts.js";
 import {
@@ -3728,6 +3732,27 @@ test("remove account confirms and active removal restores default provider auth"
   assert.equal(state.accounts.personal?.access, "access-personal");
   assert.equal(keys.has("anthropic"), false);
   assert.match(confirmCalls[0]?.message ?? "", /Remove Anthropic account "work"/);
+});
+
+test("an injected account store without a quota store never writes shared quota state into the agent directory", async () => {
+  const store = new AccountStore(new InMemoryAccountStorageBackend());
+  await store.write({ version: 1, providers: { "openai-codex": {
+    active: "primary", accounts: { primary: credential("primary"), backup: credential("backup") },
+    autoSwitch: { primary: "primary", fallback: "backup" },
+  } } });
+  const mock = createMockPi();
+  accountsExtension(mock.pi, { store, providers: [fakeProvider("openai-codex")],
+    checkQuota: async () => ({ exhausted: true, resetAt: Date.now() + 60_000 }),
+  });
+  const { registry, keys } = runtimeHarness(mock);
+  const { ctx } = createMockContext({ model: { provider: "openai-codex", id: "codex" }, modelRegistry: registry });
+  await startSessionAndWaitForCurrentProvider(mock, ctx);
+  await mock.events.get("turn_start")?.[0]?.({}, ctx);
+  const failure = { toolResults: [], messageEntryId: "failed-entry", message: { role: "assistant", provider: "openai-codex", stopReason: "error", errorMessage: "You have hit your ChatGPT usage limit.", content: [] } };
+  await mock.events.get("turn_end")?.[0]?.(failure, ctx);
+  assert.deepEqual(await mock.events.get("agent_before_settle")?.[0]?.({ outcome: "error", context: { canContinue: true } }, ctx), { continue: true });
+  assert.equal(keys.get("openai-codex"), "access-backup");
+  assert.equal(existsSync(join(getAgentDir(), QUOTA_STATE_FILE)), false);
 });
 
 test("automatic failover uses verified runtime activation and stops when both accounts are exhausted", async () => {

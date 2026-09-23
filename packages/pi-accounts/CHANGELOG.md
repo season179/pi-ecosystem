@@ -6,7 +6,8 @@
 - Add `/accounts-auto` for quota-confirmed ChatGPT primary/fallback selection and return after reset.
 - Default to `oc-codex` → Pi built-in login without setup when a saved `oc-codex` account exists; `/accounts-auto off` persists as `autoSwitch: false`.
 - Check the switched account can serve the selected model before sending a request; a refused switch restores the previous account.
-- Persist session-owned quota cooldowns; resume failed requests without synthetic prompts or replaying completed tools.
+- Share quota cooldowns across sessions and processes in `pi-accounts-quota.json` (locked atomic updates, no tokens): new sessions send to the fallback while the primary is known to be exhausted, `/accounts-auto retry` clears globally, configuring a pair keeps real exhaustion, and a corrupt file fails open with a warning. Legacy per-session cooldown entries are ignored.
+- Resume failed requests without synthetic prompts or replaying completed tools.
 - Require Pi 0.87.1 and reject manual account changes during active responses.
 
 ## Upstream history: @narumitw/pi-accounts

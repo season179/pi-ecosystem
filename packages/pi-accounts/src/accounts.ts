@@ -1,11 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CodexAutoSwitch, type QuotaChecker } from "./auto-switch.js";
+import { QuotaStateStore } from "./quota-state.js";
 import {
   AccountStore,
   consumeMigrationNotice,
   defineOwn,
   defineOwnMap,
   getOwnCredential,
+  InMemoryAccountStorageBackend,
   normalizeStoredCredential,
   parseAccountName,
   type StoredOAuthCredential,
@@ -38,6 +40,7 @@ import {
   setAccountSelection,
 } from "./session-selection.js";
 
+export { QUOTA_STATE_FILE, QuotaStateStore } from "./quota-state.js";
 export {
   ACCOUNTS_FILE,
   AccountStore,
@@ -57,6 +60,12 @@ export const DEFAULT_PI_LOGIN_LABEL = "(default pi login)";
 
 export type AccountsDependencies = {
   store?: AccountStore;
+  /**
+   * Shared quota cooldown state. Defaults to `pi-accounts-quota.json` in the agent directory only when
+   * `store` also defaults there; an injected `store` without this gets an isolated in-memory state, so
+   * embedded or test setups never touch the live agent directory.
+   */
+  quotaState?: QuotaStateStore;
   providers?: readonly AccountProviderAdapter[];
   closeCodexWebSockets?: (sessionId?: string) => unknown | Promise<unknown>;
   checkQuota?: QuotaChecker;
@@ -105,6 +114,8 @@ type PersistSelection = (
 
 export default function accountsExtension(pi: ExtensionAPI, dependencies: AccountsDependencies = {}): void {
   const store = dependencies.store ?? new AccountStore();
+  const quotaState =
+    dependencies.quotaState ?? (dependencies.store ? new QuotaStateStore(new InMemoryAccountStorageBackend()) : new QuotaStateStore());
   let migrationNotice = dependencies.store ? undefined : consumeMigrationNotice();
   const providers = [
     ...(dependencies.providers ??
@@ -397,9 +408,7 @@ export default function accountsExtension(pi: ExtensionAPI, dependencies: Accoun
   ]);
 
   const autoSwitchFor = (owner: SessionSelectionOwner): CodexAutoSwitch => {
-    owner.autoSwitch ??= new CodexAutoSwitch(store, {
-      session: owner.sessionManager,
-      sessionId: owner.sessionId,
+    owner.autoSwitch ??= new CodexAutoSwitch(store, quotaState, {
       signal: owner.signal,
       isCurrent: () => isOwnerCurrent(owner),
       selected: () => owner.selections["openai-codex"] ?? null,

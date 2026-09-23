@@ -36,7 +36,7 @@
   "scripts": {
     "build": "node scripts/build-runtime.mjs",
     "check": "npm run build && npm run typecheck && npm test",
-    "test": "vitest run --root ../.. packages/pi-accounts/test",
+    "test": "vitest run --config vitest.config.ts",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit"
   },

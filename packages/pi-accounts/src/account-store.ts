@@ -13,7 +13,12 @@ import { basename, dirname, join } from "node:path";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type AccountProviderId, SUPPORTED_PROVIDER_IDS } from "./oauth.js";
-import { type AccountStorageBackend, FileAccountStorageBackend, InMemoryAccountStorageBackend } from "./storage.js";
+import {
+  type AccountStorageBackend,
+  FileAccountStorageBackend,
+  InMemoryAccountStorageBackend,
+  OperationQueue,
+} from "./storage.js";
 
 export const ACCOUNTS_FILE = "pi-accounts.json";
 export const LEGACY_CODEX_ACCOUNTS_FILE = "pi-codex-accounts.json";
@@ -38,7 +43,7 @@ export type AccountsData = {
 };
 
 export class AccountStore {
-  private operationTail: Promise<void> = Promise.resolve();
+  private readonly queue = new OperationQueue();
 
   constructor(private readonly backend: AccountStorageBackend = createDefaultBackend()) {}
 
@@ -104,49 +109,9 @@ export class AccountStore {
     await this.serialized(async () => this.backend.withLockAsync(async () => ({ result: undefined, next: raw })));
   }
 
-  private async serialized<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const previous = this.operationTail;
-    let release: () => void = () => undefined;
-    const slot = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.operationTail = previous.then(() => slot);
-    let entered = false;
-    try {
-      await waitForTurn(previous, signal);
-      entered = true;
-      signal?.throwIfAborted();
-      return await operation();
-    } finally {
-      if (entered) release();
-      else void previous.then(release, release);
-    }
+  private serialized<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return this.queue.run(operation, signal);
   }
-}
-
-function waitForTurn(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
-  if (!signal) return previous;
-  signal.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const settle = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", abort);
-      action();
-    };
-    const abort = () =>
-      settle(() =>
-        reject(
-          signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"),
-        ),
-      );
-    signal.addEventListener("abort", abort, { once: true });
-    previous.then(
-      () => settle(resolve),
-      (error) => settle(() => reject(error)),
-    );
-  });
 }
 
 export function parseAccountName(input: string): { ok: true; name: string } | { ok: false; error: string } {

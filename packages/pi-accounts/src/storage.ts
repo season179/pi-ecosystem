@@ -83,6 +83,8 @@ export type StorageLockResult<T> = {
 
 export interface AccountStorageBackend {
   read<T>(reader: (current: string | undefined) => T): T;
+  /** Reads without the cross-process lock. Writes are atomic renames, so the result is a whole old or new document. */
+  readUnlocked(): string | undefined;
   readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T>;
   withLock<T>(mutator: (current: string | undefined) => StorageLockResult<T>): T;
   withLockAsync<T>(
@@ -106,6 +108,10 @@ export class FileAccountStorageBackend implements AccountStorageBackend {
     } finally {
       release?.();
     }
+  }
+
+  readUnlocked(): string | undefined {
+    return readPrivateRegularFileIfExists(this.filePath);
   }
 
   async readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -294,6 +300,10 @@ export class InMemoryAccountStorageBackend implements AccountStorageBackend {
     return reader(this.value);
   }
 
+  readUnlocked(): string | undefined {
+    return this.value;
+  }
+
   async readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
     const result = await reader(this.value);
@@ -317,6 +327,55 @@ export class InMemoryAccountStorageBackend implements AccountStorageBackend {
     if (next !== undefined) this.value = next;
     return result;
   }
+}
+
+/** Orders one store's asynchronous operations so queued writes are visible to later reads without lock backoff. */
+export class OperationQueue {
+  private tail: Promise<void> = Promise.resolve();
+
+  async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.tail;
+    let release: () => void = () => undefined;
+    const slot = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.tail = previous.then(() => slot);
+    let entered = false;
+    try {
+      await waitForTurn(previous, signal);
+      entered = true;
+      signal?.throwIfAborted();
+      return await operation();
+    } finally {
+      if (entered) release();
+      else void previous.then(release, release);
+    }
+  }
+}
+
+function waitForTurn(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return previous;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      action();
+    };
+    const abort = () =>
+      settle(() =>
+        reject(
+          signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"),
+        ),
+      );
+    signal.addEventListener("abort", abort, { once: true });
+    previous.then(
+      () => settle(resolve),
+      (error) => settle(() => reject(error)),
+    );
+  });
 }
 
 function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {

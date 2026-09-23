@@ -3,7 +3,9 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { AccountStore, InMemoryAccountStorageBackend } from "../src/account-store.js";
 import { CodexAutoSwitch, type AutoSwitchAccess, type QuotaChecker } from "../src/auto-switch.js";
-import { checkCodexQuota, parseCodexQuota } from "../src/codex-quota.js";
+import { checkCodexQuota, codexAccountIdentity, parseCodexQuota } from "../src/codex-quota.js";
+import { QuotaStateStore } from "../src/quota-state.js";
+import { InMemoryAccountStorageBackend as MemoryBackend } from "../src/storage.js";
 import { createMockContext } from "./support.js";
 
 const baseTime = 2_000_000_000_000;
@@ -13,7 +15,8 @@ const error = (message = "You have hit your ChatGPT usage limit. Try again in ~6
 }) as never;
 const boundary = (outcome = "error", canContinue = true) => ({ outcome, context: { canContinue, contextEntries: [], llmMessages: [] } }) as never;
 
-async function fixture(quota?: QuotaChecker) {
+/** Two instances on one backend model two Pi sessions (or processes) sharing an agent directory. */
+async function fixture(quota?: QuotaChecker, quotaBackend = new MemoryBackend()) {
   const store = new AccountStore(new InMemoryAccountStorageBackend());
   const credential = { type: "oauth", access: "fixture", refresh: "fixture", expires: baseTime };
   await store.write({ version: 1, providers: { "openai-codex": {
@@ -26,7 +29,7 @@ async function fixture(quota?: QuotaChecker) {
   const switches: string[] = [];
   const controller = new AbortController();
   const access: AutoSwitchAccess = {
-    session, sessionId: session.getSessionId(), signal: controller.signal,
+    signal: controller.signal,
     isCurrent: () => !controller.signal.aborted,
     selected: () => selected,
     activate: async name => { switches.push(name); selected = name === "default" ? null : name; return true; },
@@ -36,10 +39,10 @@ async function fixture(quota?: QuotaChecker) {
     return quota ? quota(ctx, signal) : { exhausted: true, resetAt: now + 60_000 };
   };
   const clock = () => now;
-  const create = () => new CodexAutoSwitch(store, access, checker, clock);
+  const create = () => new CodexAutoSwitch(store, new QuotaStateStore(quotaBackend), access, checker, clock);
   const sut = create();
   const context = createMockContext({ model: { provider: "openai-codex", id: "codex" }, sessionManager: session });
-  return { store, session, sut, create, ...context, switches, controller,
+  return { store, session, quotaBackend, sut, create, ...context, switches, controller,
     select: (name: string | null) => { selected = name; }, advance: (ms: number) => { now += ms; },
     get checks() { return checks; }, get selected() { return selected; },
   };
@@ -60,7 +63,113 @@ test("primary → fallback → primary at the next request after reset; survives
   assert.equal(f.selected, null);
   assert.deepEqual(f.switches, ["backup", "default"]);
   assert.equal(f.checks, 1);
-  assert.ok(!JSON.stringify(f.session.getEntries()).includes('"access"'));
+  assert.equal(f.session.getEntries().filter(entry => entry.type === "custom").length, 0, "cooldowns are no longer session entries");
+  assert.ok(!(f.quotaBackend.readUnlocked() ?? "").includes("fixture"), "shared state holds no token material");
+});
+
+test("legacy session cooldown entries are ignored: they neither block nor resurrect cleared state", async () => {
+  const f = await fixture();
+  const legacy = f.session as unknown as { appendCustomEntry(type: string, data: unknown): string };
+  legacy.appendCustomEntry("pi-accounts-auto-switch", { version: 1, sessionId: f.session.getSessionId(),
+    cooldowns: { default: { retryAt: baseTime + 3_600_000, resetKnown: true } } });
+  legacy.appendCustomEntry("pi-accounts-auto-switch", { version: 1, sessionId: f.session.getSessionId(), cooldowns: "corrupt" });
+  const resumed = f.create();
+  assert.equal(await resumed.prepare(f.ctx), true);
+  assert.equal(f.selected, null, "primary is used; the legacy cooldown did not seed shared state");
+  assert.deepEqual(f.switches, []);
+});
+
+test("a stale cooldown for a replaced saved account is ignored; the same account keeps it", async () => {
+  const jwt = (accountId: string) =>
+    `h.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } })).toString("base64url")}.s`;
+  const f = await fixture(async () => ({ exhausted: true, resetAt: baseTime + 60_000, identity: codexAccountIdentity(jwt("acct-A")) }));
+  const credential = (access: string) => ({ type: "oauth", access, refresh: "fixture", expires: baseTime });
+  await f.store.write({ version: 1, providers: { "openai-codex": {
+    accounts: { backup: credential(jwt("acct-A")) }, autoSwitch: { primary: "backup", fallback: "default" },
+  } } });
+  await f.sut.prepare(f.ctx);
+  f.sut.observe(error());
+  assert.deepEqual(await f.sut.recover(boundary(), f.ctx), { continue: true });
+  assert.equal(f.selected, null);
+  assert.ok(!(f.quotaBackend.readUnlocked() ?? "").includes("acct-A"), "identity is a digest, not the account ID");
+  await f.sut.prepare(f.ctx);
+  assert.equal(f.selected, null, "same account: cooldown applies");
+  // Re-login of `backup` as a different ChatGPT account must not inherit the old account's cooldown.
+  await f.store.updateProvider("openai-codex", state => ({ ...state, accounts: { backup: credential(jwt("acct-B")) } }));
+  await f.sut.prepare(f.ctx);
+  assert.equal(f.selected, "backup");
+});
+
+test("cooldowns are shared: a second controller reads exhaustion first, retry clears it for both", async () => {
+  const a = await fixture();
+  const b = await fixture(undefined, a.quotaBackend);
+  await a.sut.prepare(a.ctx);
+  a.sut.observe(error());
+  await a.sut.recover(boundary(), a.ctx);
+  assert.equal(await b.sut.prepare(b.ctx), true);
+  assert.deepEqual(b.switches, ["backup"], "fresh controller goes to the fallback without trying the primary");
+  assert.equal(b.checks, 0);
+  await b.sut.command("status", b.ctx);
+  assert.match(b.notifications.at(-1)?.message ?? "", /Shared quota cooldowns:\s*\ndefault: reset/);
+  await b.sut.command("retry", b.ctx);
+  assert.match(b.notifications.at(-1)?.message ?? "", /every session/);
+  await a.sut.prepare(a.ctx);
+  assert.equal(a.selected, null, "retry elsewhere is visible without any cache");
+  // Retry clears known cooldowns; a confirmation that lands afterwards is fresh evidence and is recorded.
+  await b.sut.prepare(b.ctx);
+  b.sut.observe(error());
+  await b.sut.recover(boundary(), b.ctx);
+  assert.equal(b.selected, "backup");
+  assert.ok((a.quotaBackend.readUnlocked() ?? "").includes('"default"'));
+});
+
+test("recover merges into on-disk state, so a concurrent retry is not undone and only fresh exhaustion remains", async () => {
+  const a = await fixture();
+  const b = await fixture(undefined, a.quotaBackend);
+  await a.sut.prepare(a.ctx);
+  a.sut.observe(error());
+  await a.sut.recover(boundary(), a.ctx); // default exhausted, A on backup
+  a.sut.beginPrompt();
+  await a.sut.prepare(a.ctx); // A snapshot: default in cooldown
+  await b.sut.command("retry", b.ctx);
+  a.sut.observe(error());
+  await a.sut.recover(boundary(), a.ctx); // backup exhausted after the retry
+  const state = JSON.parse(a.quotaBackend.readUnlocked() ?? "{}");
+  assert.deepEqual(Object.keys(state.providers["openai-codex"].cooldowns), ["backup"]);
+  assert.equal(a.selected, null, "cleared primary is usable again");
+});
+
+test("configuring a pair keeps real exhaustion; the new pair honours it", async () => {
+  const f = await fixture();
+  await f.sut.prepare(f.ctx);
+  f.sut.observe(error());
+  await f.sut.recover(boundary(), f.ctx);
+  await f.sut.command("default other", f.ctx);
+  assert.equal(f.selected, null, "configure still activates the primary");
+  assert.equal(await f.sut.prepare(f.ctx), true);
+  assert.equal(f.selected, "other", "exhausted primary is skipped under the new pair");
+});
+
+test("corrupt shared state fails open with one warning, is self-healed by the next write, and reset by retry", async () => {
+  const f = await fixture();
+  await f.quotaBackend.withLockAsync(async () => ({ result: undefined, next: "{not json" }));
+  assert.equal(await f.sut.prepare(f.ctx), true);
+  assert.match(f.notifications.at(-1)?.message ?? "", /not valid JSON.*accounts-auto retry/s);
+  const warnings = f.notifications.length;
+  await f.sut.prepare(f.ctx);
+  assert.equal(f.notifications.length, warnings, "warned once per session");
+  f.sut.observe(error());
+  await f.sut.recover(boundary(), f.ctx);
+  assert.equal(f.selected, "backup");
+  assert.equal(JSON.parse(f.quotaBackend.readUnlocked() ?? "").version, 1, "write replaced the corrupt file");
+  await f.quotaBackend.withLockAsync(async () => ({ result: undefined, next: JSON.stringify({ version: 2, providers: {} }) }));
+  f.select(null);
+  await f.sut.prepare(f.ctx);
+  assert.match(f.notifications.at(-1)?.message ?? "", /newer pi-accounts version/);
+  await assert.rejects(f.sut.command("retry", f.ctx), /newer pi-accounts version and was not changed/); // Never clobber a newer format.
+  await f.quotaBackend.withLockAsync(async () => ({ result: undefined, next: "[]" }));
+  await f.sut.command("retry", f.ctx);
+  assert.equal(JSON.parse(f.quotaBackend.readUnlocked() ?? "").version, 1);
 });
 
 test("both exhausted stops continuation and subsequent prompts until earliest reset", async () => {
@@ -120,6 +229,23 @@ test("aborts, stale owners, changed selection, and other providers cannot trigge
   finish({ exhausted: true });
   assert.equal(await pending, undefined);
   assert.deepEqual(f.switches, []);
+  // Abort while the shared cooldown write is pending: the write may land, the switch must not.
+  let releaseWrite!: () => void;
+  const slowBackend = new MemoryBackend();
+  const original = slowBackend.withLockAsync.bind(slowBackend);
+  slowBackend.withLockAsync = async (mutator, signal) => {
+    await new Promise<void>(resolve => { releaseWrite = resolve; });
+    return original(mutator, signal);
+  };
+  const g = await fixture(undefined, slowBackend);
+  await g.sut.prepare(g.ctx);
+  g.sut.observe(error());
+  const writing = g.sut.recover(boundary(), g.ctx);
+  while (!releaseWrite) await new Promise(resolve => setImmediate(resolve));
+  g.controller.abort();
+  releaseWrite();
+  assert.equal(await writing, undefined, "an abandoned boundary neither switches nor reports an error");
+  assert.deepEqual(g.switches, []);
 });
 
 test("unknown reset uses a bounded retry, not a busy loop; no continuation without canContinue", async () => {
