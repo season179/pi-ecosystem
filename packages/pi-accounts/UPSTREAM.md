@@ -17,7 +17,7 @@ Relocated helpers:
 Local changes:
 
 - Workspace/package identity, CalVer, package-local helper imports, and Pi 0.87.1 compatibility floor.
-- Opt-in Codex priority/fallback policy, verified usage checks, session-owned cooldowns, safe boundary continuation, and `/accounts-auto`.
+- Codex priority/fallback policy (default `oc-codex` → built-in login when that account exists; persistent `off`), verified usage checks, session-owned cooldowns, safe boundary continuation, and `/accounts-auto`.
 - Prevent manual account changes during active responses.
 - Focused regression and real Pi session-loop tests; fork documentation.
 

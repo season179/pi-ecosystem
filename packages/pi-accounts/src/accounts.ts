@@ -404,11 +404,21 @@ export default function accountsExtension(pi: ExtensionAPI, dependencies: Accoun
       isCurrent: () => isOwnerCurrent(owner),
       selected: () => owner.selections["openai-codex"] ?? null,
       activate: async (name) => {
-        if (owner.error || !persistSelection(owner, "openai-codex", name === "default" ? null : name, () => isOwnerCurrent(owner))) return false;
+        const previous = owner.selections["openai-codex"] ?? null;
+        const requested = name === "default" ? null : name;
+        if (owner.error || !persistSelection(owner, "openai-codex", requested, () => isOwnerCurrent(owner))) return false;
         const result = await syncProvider("openai-codex", owner.context, owner);
-        if (result.status === "error" && isOwnerCurrent(owner)) owner.context.ui.notify(result.message, "error");
-        return isOwnerCurrent(owner) && (owner.selections["openai-codex"] ?? null) === (name === "default" ? null : name) &&
-          (name === "default" ? result.status === "inactive" : result.status === "active" && result.accountName === name);
+        if (!isOwnerCurrent(owner) || (owner.selections["openai-codex"] ?? null) !== requested) return false;
+        if (result.status === "error") owner.context.ui.notify(result.message, "error");
+        // before_agent_start checked the previous identity; the switched account needs the same check.
+        const model = owner.context.model;
+        const modelRefused = result.status === "active" && model?.provider === "openai-codex" &&
+          !owner.coordinators.get("openai-codex")?.isModelAvailable(model.id);
+        if (modelRefused) owner.context.ui.notify(`OpenAI Codex model ${model.id} is not available to account "${name}".`, "error");
+        else if (name === "default" ? result.status === "inactive" : result.status === "active" && result.accountName === name) return true;
+        // Restore the previous identity so a refused account cannot strand this session; prepare() still aborts the request.
+        if (persistSelection(owner, "openai-codex", previous, () => isOwnerCurrent(owner))) await syncProvider("openai-codex", owner.context, owner);
+        return false;
       },
     }, dependencies.checkQuota, dependencies.now);
     return owner.autoSwitch;

@@ -152,6 +152,32 @@ test("manual out-of-pair account pauses policy; disabled and malformed policies 
   assert.deepEqual(f.switches, []);
 });
 
+test("absent policy defaults to oc-codex → built-in login; off persists; missing oc-codex leaves login alone", async () => {
+  const f = await fixture();
+  const credential = { type: "oauth", access: "fixture", refresh: "fixture", expires: baseTime };
+  await f.store.write({ version: 1, providers: { "openai-codex": { accounts: { "oc-codex": credential } } } });
+  assert.equal(await f.sut.prepare(f.ctx), true);
+  assert.equal(f.selected, "oc-codex"); // No /accounts-auto needed.
+  f.sut.observe(error());
+  assert.deepEqual(await f.sut.recover(boundary(), f.ctx), { continue: true });
+  assert.equal(f.selected, null);
+  f.advance(61_001);
+  await f.sut.prepare(f.ctx);
+  assert.equal(f.selected, "oc-codex");
+  assert.deepEqual(f.switches, ["oc-codex", "default", "oc-codex"]);
+
+  await f.sut.command("off", f.ctx);
+  assert.equal((await f.store.readProviderAsync("openai-codex")).autoSwitch, false);
+  f.select(null);
+  await f.sut.prepare(f.ctx);
+  assert.equal(f.selected, null);
+
+  await f.store.write({ version: 1, providers: { "openai-codex": { accounts: {} } } });
+  assert.equal(await f.sut.prepare(f.ctx), true);
+  assert.equal(f.selected, null);
+  assert.equal(f.switches.length, 3);
+});
+
 test("configure is atomic, supports built-in login in either role, and refuses changes while streaming", async () => {
   const f = await fixture();
   await assert.rejects(f.sut.command("missing default", f.ctx), /missing/);

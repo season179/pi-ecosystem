@@ -4,6 +4,8 @@
 
 - Fork upstream 0.52.2 with its MIT license, authentication/storage implementation, and regression suites.
 - Add `/accounts-auto` for quota-confirmed ChatGPT primary/fallback selection and return after reset.
+- Default to `oc-codex` → Pi built-in login without setup when a saved `oc-codex` account exists; `/accounts-auto off` persists as `autoSwitch: false`.
+- Check the switched account can serve the selected model before sending a request; a refused switch restores the previous account.
 - Persist session-owned quota cooldowns; resume failed requests without synthetic prompts or replaying completed tools.
 - Require Pi 0.87.1 and reject manual account changes during active responses.
 

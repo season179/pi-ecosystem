@@ -7,6 +7,8 @@ import { checkCodexQuota, type CodexQuota } from "./codex-quota.js";
 const PROVIDER = "openai-codex";
 const STATE_ENTRY = "pi-accounts-auto-switch";
 const UNKNOWN_RESET_RETRY_MS = 5 * 60_000;
+/** Policy used while `autoSwitch` is absent: this saved account first, Pi's built-in login second. */
+export const DEFAULT_PRIMARY = "oc-codex";
 export type AutoSwitchConfig = { primary: string; fallback: string };
 type Cooldown = { retryAt: number; resetKnown: boolean };
 type Session = ExtensionContext["sessionManager"] & { appendCustomEntry(type: string, data: unknown): string };
@@ -28,7 +30,11 @@ function validName(value: unknown): value is string {
 }
 export function autoSwitchConfig(state: ProviderAccountsData): AutoSwitchConfig | undefined {
   const value = state.autoSwitch;
-  if (value === undefined) return undefined;
+  // `false` is an explicit, persistent off; absent means the default policy if its account exists.
+  if (value === false) return undefined;
+  if (value === undefined) {
+    return getOwnCredential(state.accounts, DEFAULT_PRIMARY) ? { primary: DEFAULT_PRIMARY, fallback: "default" } : undefined;
+  }
   if (!record(value) || !validName(value.primary) || !validName(value.fallback) || value.primary === value.fallback) {
     throw new Error("Invalid ChatGPT auto-switch settings. Use /accounts-auto off or configure them again.");
   }
@@ -117,8 +123,12 @@ export class CodexAutoSwitch {
       return false;
     }
     if (next !== this.selected()) {
-      if (!await this.access.activate(next) || !this.access.isCurrent()) return false;
-      ctx.ui.notify(`ChatGPT account: ${next}${next === config.primary ? " (primary; retrying after quota reset)" : " (fallback)"}.`, "info");
+      if (!await this.access.activate(next)) {
+        if (this.access.isCurrent()) ctx.ui.notify(`ChatGPT account ${next} could not be used. Fix it through /accounts, or run /accounts-auto off to stop automatic switching.`, "error");
+        return false;
+      }
+      if (!this.access.isCurrent()) return false;
+      ctx.ui.notify(`ChatGPT account: ${next}${next !== config.primary ? " (fallback)" : this.cooldowns.has(next) ? " (primary; retrying after quota reset)" : " (primary)"}.`, "info");
     }
     this.requestAccount = next;
     this.attempted.add(next);
@@ -193,21 +203,20 @@ export class CodexAutoSwitch {
       action = ({ "Configure primary and fallback": "configure", Status: "status", Disable: "off", "Retry now": "retry" })[choice] ?? "status";
     }
     if (action === "status") {
-      const config = await this.config();
+      const state = await this.store.readProviderAsync(PROVIDER, this.access.signal);
+      const config = autoSwitchConfig(state);
       if (!this.access.isCurrent()) return;
       ctx.ui.notify(config
-        ? `ChatGPT auto-switch: ${config.primary} → ${config.fallback}. Current: ${this.selected()}${this.participating(config) ? "" : " (automatic switching paused for this selection)"}.\n${[...this.cooldowns].map(([name, limit]) => `${name}: ${limit.resetKnown ? "reset" : "retry (reset unknown)"} ${new Date(limit.retryAt).toISOString()}`).join("\n")}`
+        ? `ChatGPT auto-switch: ${config.primary} → ${config.fallback}${state.autoSwitch === undefined ? " (default policy)" : ""}. Current: ${this.selected()}${this.participating(config) ? "" : " (automatic switching paused for this selection)"}.\n${[...this.cooldowns].map(([name, limit]) => `${name}: ${limit.resetKnown ? "reset" : "retry (reset unknown)"} ${new Date(limit.retryAt).toISOString()}`).join("\n")}`
         : "ChatGPT automatic switching is off.", "info");
       return;
     }
     if (action === "off") {
       await this.store.updateProvider(PROVIDER, state => {
         if (!this.access.isCurrent()) return state;
-        const next = { ...state };
-        delete next.autoSwitch;
-        return next;
+        return { ...state, autoSwitch: false }; // Deleting the field would restore the default policy.
       });
-      if (this.access.isCurrent()) ctx.ui.notify("ChatGPT automatic switching disabled. Current account unchanged.", "info");
+      if (this.access.isCurrent()) ctx.ui.notify("ChatGPT automatic switching disabled. Current account unchanged. Re-enable with /accounts-auto <primary> <fallback>.", "info");
       return;
     }
     if (action === "retry") {
