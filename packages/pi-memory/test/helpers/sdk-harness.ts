@@ -54,6 +54,8 @@ export interface SdkHarnessOptions {
 	cwd: string;
 	agentDir: string;
 	responses: FakeResponse[];
+	/** Memory extension factory to load instead of the package default. */
+	memoryExtension?: (pi: ExtensionAPI) => void;
 	persistSession?: boolean;
 	compaction?: {
 		enabled?: boolean;
@@ -263,7 +265,7 @@ export async function createSdkHarness(options: SdkHarnessOptions): Promise<SdkH
 				settingsManager,
 				modelRuntime,
 				resourceLoaderOptions: {
-					extensionFactories: [observeContext, memoryExtension, fakeProviderExtension(responses, captures)],
+					extensionFactories: [observeContext, options.memoryExtension ?? memoryExtension, fakeProviderExtension(responses, captures)],
 					noContextFiles: true,
 					noSkills: true,
 					noPromptTemplates: true,

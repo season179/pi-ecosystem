@@ -583,7 +583,7 @@ function tagMessage<T extends object>(message: T, tag: InjectionMessageTag): T {
  * turns are included because a new user turn moves our blocks out of the
  * target position without removing them from the re-fed messages.
  */
-function stripOwnedContent(messages: readonly AgentContextMessage[]): { messages: AgentContextMessage[]; stripped: number } {
+export function stripOwnedContent(messages: readonly AgentContextMessage[]): { messages: AgentContextMessage[]; stripped: number } {
 	let stripped = 0;
 	const result: AgentContextMessage[] = [];
 	for (const message of messages) {

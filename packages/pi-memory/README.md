@@ -401,6 +401,61 @@ over cap; an update that remains over cap must not grow either rendered file in
 UTF-8 bytes and must shrink at least one. Injection-budget validation is a separate
 check: a change must satisfy both cap systems, including their recovery rules.
 
+## Automatic Memory (Hindsight, optional)
+
+Off by default. When `<agentDir>/pi-memory/automation.json` exists, pi-memory
+recalls from and retains to a local Hindsight
+server (HTTP API 0.10.x) on its own, without memory tool calls. Jev decides whether to recall
+and classifies each new message; Hindsight stores and ranks.
+
+```json
+{ "version": 1 }
+```
+
+Optional fields:
+
+- `bank` (default `pi-memory`)
+- `hindsightUrl` (loopback only; default `http://127.0.0.1:8888`)
+- `retainThreshold` (0.6), `recallThreshold` (0.5)
+- `periodicEveryRequests` (4)
+- `projects: { "<identityHash>": { "enabled": false } }` to opt one project out
+
+A Jev key must resolve through `TYPESAFE_API_KEY` or `typesafe.json`
+`apiKeyFile`.
+
+- **Shared bank, scoped recall.** One bank serves all projects.
+  - Each message is stored separately, tagged as a user-wide preference, a
+    transferable lesson, or a project-specific fact.
+  - Uncertain scope stays project-local, and only the user can state a
+    user-wide preference.
+  - Recall returns user-wide items, transferable items, and the current
+    project's facts only. It is filtered server-side, and each result is
+    re-checked client-side.
+  - An unverifiable result discards the whole recall.
+- **When.** Recall runs:
+  - at each new prompt, bounded to 4 s and before the first request;
+  - every few tool-loop requests.
+
+  Retain is asynchronous. Recalled items are injected transiently as untrusted
+  background, labelled with their applicability and source.
+- **Modes.**
+  - `read-only`: recall only.
+  - `off`: nothing.
+  - Writes re-check the mode at submit time.
+- **Outages.** The task always continues:
+  - one warning per outage, with backoff and automatic recovery;
+  - no guessed decisions;
+  - an ambiguous retain is never resent.
+- **Privacy.** Each prompt sends a bounded, secret-redacted (best effort)
+  excerpt of recent user and assistant text to Jev. Retained messages go to
+  local Hindsight. Tool output and thinking are never sent. Use a bank written
+  only by pi-memory.
+
+`/pi-memory status` shows the configuration, service health, the last check,
+the current recall and retain counts. Accepted retains are shown as queued,
+not confirmed stored. Design, verified Hindsight semantics and limitations:
+[MEMORY-AUTOMATION.md](../../docs/MEMORY-AUTOMATION.md).
+
 ## Command
 
 ```txt

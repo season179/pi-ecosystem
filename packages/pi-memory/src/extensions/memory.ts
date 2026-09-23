@@ -2,6 +2,8 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { convertToLlm, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
 import { Type } from "typebox";
+import { automationStatusLines, MemoryAutomation } from "../automation.js";
+import type { HindsightFetch } from "../hindsight.js";
 import { formatMemoryError, isMemoryError } from "../errors.js";
 import {
 	formatBudgetUsage,
@@ -381,6 +383,10 @@ export interface MemoryExtensionSeams {
 	env?: NodeJS.ProcessEnv;
 	/** Injectable transport tested at the real SDK boundary. */
 	fetch?: Fetch;
+	/** Injectable Hindsight HTTP transport (automatic memory). */
+	hindsightFetch?: HindsightFetch;
+	/** Observes each session's automatic-memory orchestrator (tests/embeddings). */
+	onAutomation?: (automation: MemoryAutomation) => void;
 	now?: () => number;
 }
 
@@ -389,10 +395,39 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 	const semanticEnv = seams.env ?? process.env;
 	const semanticNow = seams.now;
 
+	// Automatic memory (Jev gate + Hindsight): one orchestrator per session
+	// state object, so reload/new/resume/fork/cwd changes start clean and a
+	// replaced session's late completions can never reach the new one.
+	const automations = new WeakMap<MemorySessionState, MemoryAutomation>();
+	let activeAutomation: MemoryAutomation | undefined;
+	let diagnosticContext: ExtensionContext | undefined;
+	const automationFor = (state: MemorySessionState): MemoryAutomation => {
+		let automation = automations.get(state);
+		if (automation === undefined) {
+			activeAutomation?.dispose();
+			automation = new MemoryAutomation({
+				agentDir,
+				env: semanticEnv,
+				...(seams.fetch !== undefined ? { jevFetch: seams.fetch } : {}),
+				hindsightFetch: seams.hindsightFetch ?? ((input, init) => fetch(input, init)),
+				now: seams.now ?? Date.now,
+				diagnose: (key, message, type) => {
+					if (diagnosticContext !== undefined) diagnoseOnce(state, diagnosticContext, key, message, type === "info" ? "warning" : type);
+				},
+			});
+			automations.set(state, automation);
+			activeAutomation = automation;
+			seams.onAutomation?.(automation);
+		}
+		return automation;
+	};
+
 	// Session lifecycle: every start reason (startup/reload/new/resume/fork)
 	// replaces the state promise synchronously, orphaning in-flight stale
 	// initialization; shutdown drops it entirely.
 	pi.on("session_start", async (_event, ctx) => {
+		activeAutomation?.dispose();
+		activeAutomation = undefined;
 		try {
 			const state = await runtime.begin(ctx.cwd);
 			const diagnostics = [
@@ -410,8 +445,15 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 			// Memory initialization must never fail the Pi session.
 		}
 	});
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async () => {
+		const automation = activeAutomation;
+		activeAutomation = undefined;
 		runtime.shutdown();
+		if (automation !== undefined) {
+			// Bounded: give an in-flight retain a moment, never block exit.
+			await automation.flush(1_500).catch(() => undefined);
+			automation.dispose();
+		}
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -422,8 +464,13 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 		} catch {
 			return undefined;
 		}
-		// New user run: reset the committed-mutation cap.
+		// New user run: reset the committed-mutation cap and automatic recall.
 		state.commits.used = 0;
+		try {
+			automationFor(state).beginRun();
+		} catch {
+			// automatic memory never fails the run
+		}
 		const mode = state.effectiveMode.mode;
 		if (mode === "off") return undefined;
 		// The policy is fixed for this run (documented limitation: a mid-run mode
@@ -488,6 +535,23 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 						message: state.rootError ?? "memory root unavailable",
 					});
 				}
+			}
+			// Automatic Hindsight recall: fail-open, bounded, and separate from
+			// the local stores' budgets. Off mode yields nothing.
+			try {
+				diagnosticContext = ctx;
+				const recalled = await automationFor(state).onContext(event.messages, {
+					mode,
+					identity: state.identity,
+					memoryRoot: state.root?.root,
+					containment: state.containment,
+					signal: ctx.signal,
+					currentMode: async () => (await runtime.refreshMode(state)).mode,
+					sessionId: ctx.sessionManager.getSessionId(),
+				});
+				if (recalled !== undefined) blocks.push(recalled);
+			} catch {
+				// automatic memory never fails the request
 			}
 			const result = buildContextResult(event.messages, blocks, { convertToLlm });
 			state.lastAssembled = {
@@ -761,7 +825,19 @@ function registerMemoryExtension(pi: ExtensionAPI, agentDir: string, seams: Memo
 					// stays the historical record of the previous request.
 					await runtime.refreshMode(state);
 					const semantic = await describeSemanticRecallStatus(agentDir, semanticEnv);
-					emitCommandOutput(ctx, renderMemoryStatus(await gatherMemoryStatus(state, semantic)));
+					const automation = automationFor(state);
+					await automation.refreshConfig({
+						identity: state.identity,
+						memoryRoot: state.root?.root,
+						containment: state.containment,
+					});
+					emitCommandOutput(
+						ctx,
+						[
+							renderMemoryStatus(await gatherMemoryStatus(state, semantic)),
+							...automationStatusLines(automation.status(), Date.now()),
+						].join("\n"),
+					);
 					return;
 				}
 

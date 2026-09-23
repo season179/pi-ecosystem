@@ -62,6 +62,15 @@ export interface InjectionBlockTag {
 	generation: MemoryGeneration;
 }
 
+/** Automatic Hindsight recall block; never budgeted against the local stores. */
+export interface RecalledBlockTag {
+	owner: typeof PI_MEMORY_OWNER;
+	kind: "recalled";
+	source: "hindsight";
+	/** Recall operation id; distinguishes refreshed blocks in diagnostics. */
+	recallId: string;
+}
+
 export interface InjectionMessageTag {
 	owner: typeof PI_MEMORY_OWNER;
 	origin: "synthetic" | "converted";
@@ -71,10 +80,10 @@ export interface InjectionMessageTag {
 export interface TaggedTextBlock {
 	type: "text";
 	text: string;
-	[PI_MEMORY_TAG_KEY]: InjectionBlockTag;
+	[PI_MEMORY_TAG_KEY]: InjectionBlockTag | RecalledBlockTag;
 }
 
-export function tagInjectionBlock(text: string, tag: InjectionBlockTag): TaggedTextBlock {
+export function tagInjectionBlock(text: string, tag: InjectionBlockTag | RecalledBlockTag): TaggedTextBlock {
 	return { type: "text", text, [PI_MEMORY_TAG_KEY]: { ...tag } };
 }
 
@@ -87,12 +96,17 @@ function isOwnerTag(value: unknown): value is { owner: typeof PI_MEMORY_OWNER } 
 }
 
 /** Structural ownership check for a content block; never inspects block text. */
-export function getInjectionBlockTag(block: unknown): InjectionBlockTag | undefined {
+export function getInjectionBlockTag(block: unknown): InjectionBlockTag | RecalledBlockTag | undefined {
 	if (typeof block !== "object" || block === null) return undefined;
 	const candidate = block as { type?: unknown; [PI_MEMORY_TAG_KEY]?: unknown };
 	if (candidate.type !== "text") return undefined;
 	const tag = candidate[PI_MEMORY_TAG_KEY];
 	if (!isOwnerTag(tag)) return undefined;
+	const recalled = tag as Partial<RecalledBlockTag>;
+	if (recalled.kind === "recalled") {
+		if (recalled.source !== "hindsight" || typeof recalled.recallId !== "string") return undefined;
+		return { owner: PI_MEMORY_OWNER, kind: "recalled", source: "hindsight", recallId: recalled.recallId };
+	}
 	const typed = tag as Partial<InjectionBlockTag>;
 	if ((typed.kind !== "always" && typed.kind !== "catalog") || typeof typed.generation !== "string") return undefined;
 	if (typed.scope !== "project" && typed.scope !== "legacy-global") return undefined;
