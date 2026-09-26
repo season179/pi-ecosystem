@@ -100,7 +100,7 @@ Jev receives only the current request and up to eight recent activity messages (
 
 Missing credentials, malformed config/answers, provider errors or deadlines use normal Buddy, with a bounded warning and `Jev: fallback` footer status. Cancellation, new activity, session/tree changes and Buddy off prevent stale gate results from launching or suppressing work. `/buddy status` shows the last gate state; `not checked` is not an activation claim. Telemetry uses distinct `jev_triage` rows, never synthetic passes. SDK logging is explicitly off, the endpoint is pinned to `https://api.typesafe.ai`, retries are disabled, and response bytes plus the complete parsed-result wait are bounded.
 
-`timeoutMs` accepts integer 1–10000, `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
+`timeoutMs` accepts integer 1–30000 (shared with pi-memory and pi-herdr; Jev triage runs inside the awaited `turn_end` handler, so a long value can delay the next turn by up to that long), `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
 
 ## Enable / Disable
 

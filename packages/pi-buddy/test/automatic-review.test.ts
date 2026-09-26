@@ -476,11 +476,16 @@ describe("Jev stable candidate routing", () => {
 		const checking = h.review.turnEnded(h.ctx);
 		await vi.waitFor(() => assert.equal(typeof release, "function"));
 		h.review.noteActivity();
-		release({ outcome: "suppress", totalMs: 0 }); await checking;
+		const answers = { action: { choice: "omit", probabilities: { omit: 0.9, review: 0.1 } }, context: { choice: "sufficient", probabilities: { sufficient: 0.9, unknown: 0.1 } }, risk: { choice: "low", probabilities: { low: 0.9, investigate: 0.1 } } };
+		release({ outcome: "suppress", totalMs: 0, answers, skipThreshold: 0.85 }); await checking;
 		assert.equal(h.review.heldCandidate()?.hold?.window?.invocations, 0);
 		assert.equal(revalidations(h).length, 0);
 		assert.equal(h.sent.length, 0);
 		assert.equal(rows.at(-1).outcome, "stale");
+		// The unapplied classification stays interpretable without claiming suppression.
+		assert.deepEqual(rows.at(-1).answers, answers);
+		assert.equal(rows.at(-1).skipThreshold, 0.85);
+		assert.equal(rows.filter((row) => row.outcome === "suppress").length, 0);
 		// Next turn is deferred by a running tool (no triage/reviewer). At settle,
 		// expiry frees the held slot and this unconsulted run is still eligible.
 		h.review.toolStarted("busy"); await h.review.turnEnded(h.ctx);

@@ -101,7 +101,36 @@ unfinished run once as `incomplete`. `effectiveCadence` is the start value and
 - `totalMs`: routing duration, including config/key reads and the parsed-result wait.
 - `opportunity`: session/tree-local periodic opportunity number, independent of candidate checks. Every `auditEvery` opportunities bypasses Jev. Off/on does not restart the audit counter.
 - `concernId`: candidate identity for candidate checks, when present.
+- `answers` (optional): the three validated Jev choices. Each of `action`, `context` and `risk` has the chosen label (`choice`) and a `probabilities` object with exactly both labels as unrounded numbers:
+  - `action`: `omit` | `review`
+  - `context`: `sufficient` | `unknown`
+  - `risk`: `low` | `investigate`
+- `skipThreshold` (optional): the effective threshold those answers were compared against. Present exactly when `answers` is present.
 - Standard session/run/policy/cadence correlation captured before awaiting Jev.
+
+`answers` is written only after all three answers pass validation (known label,
+both probabilities finite in 0–1, summing to ~1, chosen label highest). A
+malformed answer set records none of them. `audit`, `fallback` (config, no key,
+error, deadline, malformed), `review` with reason `incomplete`, and cancellations
+before a validated response have no `answers`. Only these fixed keys are copied:
+SDK `confidence`, explanations, unknown fields, usage, state, request and response
+text are never logged. A row with `answers` and outcome `stale` or `cancelled`
+means Jev classified the request but the result was **not applied**; the outcome
+field remains the source of truth for what happened. `skip`/`suppress` requires
+each expected label (`omit`, `sufficient`, `low`) to be chosen with probability
+`>= skipThreshold`; recompute that from the row rather than assuming it.
+
+Sanitized synthetic example (not real data):
+
+```json
+{"v":1,"ts":"2026-09-25T00:00:00.000Z","type":"jev_triage","sessionId":"s1","runId":"r1","policyRevision":"jev-triage-v1","outcome":"review","model":"jev-1.13.0","totalMs":412,"answers":{"action":{"choice":"omit","probabilities":{"omit":0.8499999999999999,"review":0.1500000000000001}},"context":{"choice":"sufficient","probabilities":{"sufficient":0.9,"unknown":0.1}},"risk":{"choice":"low","probabilities":{"low":0.95,"investigate":0.05}}},"skipThreshold":0.85,"phase":"periodic","opportunity":2}
+```
+
+Rows written before this field existed have no `answers`/`skipThreshold`; treat
+them as unknown, not as failed or low-probability classifications, and do not
+backfill from the current config. Probabilities are Jev's reported label
+distribution, not calibrated correctness, accuracy or benefit; `confidence` is
+deliberately not recorded or used as a gate. Answers add no cost or token data.
 
 `skip` means the periodic reviewer was not invoked; it does not mark the run
 consulted, so otherwise-eligible run-end review remains available. `suppress`
@@ -226,6 +255,9 @@ or writer failures can leave gaps even on the new policy.
 ```bash
 # Outcomes by source or event type
 jq -r '[.type // .source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
+
+# Jev answers near the threshold (rows without answers are skipped)
+jq -r 'select(.type=="jev_triage" and .answers) | [.ts,.phase,.outcome,.skipThreshold,.answers.action.probabilities.omit,.answers.context.probabilities.sufficient,.answers.risk.probabilities.low] | @tsv' ~/.pi/agent/buddy-telemetry.jsonl | tail
 
 # Recent provider-reported token usage
 jq -r '[.ts,.source,.outcome,(.totalTokens//"-"),(.finalRoundTotalTokens//"-"),(.costUsd//"-")] | @tsv' ~/.pi/agent/buddy-telemetry.jsonl | tail

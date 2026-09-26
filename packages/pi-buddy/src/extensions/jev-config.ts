@@ -35,7 +35,7 @@ export async function loadJevConfig(agentDir = getAgentDir()): Promise<JevConfig
 		const skipThreshold = value.buddy.skipThreshold ?? 0.85;
 		const auditEvery = value.buddy.auditEvery ?? 5;
 		if (typeof model !== "string" || !/^[a-zA-Z0-9._-]{1,80}$/.test(model) ||
-			!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000 ||
+			!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000 ||
 			typeof skipThreshold !== "number" || !Number.isFinite(skipThreshold) || skipThreshold < 0.5 || skipThreshold > 1 ||
 			!Number.isInteger(auditEvery) || auditEvery < 1 || auditEvery > 100 ||
 			(value.apiKeyFile !== undefined && (typeof value.apiKeyFile !== "string" || !value.apiKeyFile.trim()))) throw new Error();

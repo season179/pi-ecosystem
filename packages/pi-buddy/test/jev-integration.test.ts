@@ -13,6 +13,7 @@ function wire(omit = true) {
 	const choice = (yes: string, no: string) => ({ type: "choice", choice: omit ? yes : no, confidence: 0.99, probabilities: { [yes]: omit ? 0.95 : 0.05, [no]: omit ? 0.05 : 0.95 } });
 	return new Response(JSON.stringify({ model: "jev-1.13.0", answers: { action: choice("omit", "review"), context: choice("sufficient", "unknown"), risk: choice("low", "investigate") }, usage: { input_tokens: 10, output_tokens: 3 } }));
 }
+const scored = { action: { choice: "omit", probabilities: { omit: 0.95, review: 0.05 } }, context: { choice: "sufficient", probabilities: { sufficient: 0.95, unknown: 0.05 } }, risk: { choice: "low", probabilities: { low: 0.95, investigate: 0.05 } } };
 const pass = () => ({ answer: "Done", activity: [], rounds: 1, transcriptTokens: 10, watchdogVerdict: { decision: "pass" } });
 const concern = () => ({ ...pass(), watchdogVerdict: { decision: "concern", headline: "Old concern", advisory: "Old task needs work", evidence: ["old.ts:1"] } });
 const confirm = () => ({ ...pass(), watchdogVerdict: { ...concern().watchdogVerdict, decision: "confirm" } });
@@ -117,7 +118,11 @@ describe("active Jev at real Buddy extension event boundaries", () => {
 		assert.equal((reviewer.mock.calls[0][0] as any).trigger, "run_end");
 		assert.equal(fetch.mock.calls.length, 1);
 		const rows = await records();
-		assert.equal(rows.filter((r) => r.type === "jev_triage" && r.outcome === "skip").length, 1);
+		const skips = rows.filter((r) => r.type === "jev_triage" && r.outcome === "skip");
+		assert.equal(skips.length, 1);
+		assert.deepEqual(skips[0].answers, scored);
+		assert.equal(skips[0].skipThreshold, 0.85);
+		assert.doesNotMatch(JSON.stringify(skips[0]), /confidence|usage|input_tokens/);
 		assert.equal(rows.filter((r) => r.type === "watchdog_commit").length, 0);
 	});
 	it("review decision launches reviewer; fifth opportunity audits without Jev", async () => {
@@ -199,7 +204,9 @@ describe("live candidate relevance inside stable coordinator commit", () => {
 		assert.equal(reviewer.mock.calls.length, 1);
 		assert.equal(h.sent.length, 0);
 		let rows = await records();
-		assert.ok(rows.some((r) => r.type === "jev_triage" && r.phase === "candidate" && r.outcome === "suppress"));
+		const suppressed = rows.find((r) => r.type === "jev_triage" && r.phase === "candidate" && r.outcome === "suppress");
+		assert.deepEqual(suppressed?.answers, scored);
+		assert.equal(suppressed?.skipThreshold, 0.85);
 		assert.equal(rows.filter((r) => r.type === "watchdog_commit").length, 0);
 		await h.emit("agent_end"); await h.emit("agent_settled");
 		assert.equal(reviewer.mock.calls.length, 2); // slot released; run-end still eligible

@@ -27,6 +27,7 @@ import type {
 	BuddyTrigger,
 } from "./buddy-context.js";
 import type { ConcernDisposition } from "./concern-history.js";
+import type { JevAnswers } from "./jev-triage.js";
 
 export type { BuddyOutcome, BuddySource, BuddyTrigger } from "./buddy-context.js";
 export type BuddyFeedback = "more" | "same" | "less";
@@ -206,6 +207,10 @@ export interface BuddyJevTelemetryRecord extends BuddyTelemetryContext {
 	totalMs: number;
 	opportunity?: number;
 	concernId?: string;
+	/** Validated Jev labels/probabilities; absent when no complete valid answer set existed. */
+	answers?: JevAnswers;
+	/** Effective skip/suppress threshold, recorded with answers. */
+	skipThreshold?: number;
 }
 
 export async function recordJevTriage(record: Omit<BuddyJevTelemetryRecord, "v" | "ts" | "type">): Promise<void> {

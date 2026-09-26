@@ -60,13 +60,40 @@ describe("Jev SDK launch/candidate adapter", () => {
 		body.answers.action.probabilities = { omit: 0.6, review: 0.4 };
 		assert.equal((await triage(async () => response(body)).decide(input())).outcome, "review");
 	});
+	it.each([
+		{ omitP: 0.85, outcome: "skip" },
+		{ omitP: 0.8499999999999999, outcome: "review" },
+	])("records exact labels and unrounded probabilities at the threshold ($outcome), never extra SDK fields", async ({ omitP, outcome }) => {
+		const body: any = answer();
+		body.answers.action.probabilities = { omit: omitP, review: 1 - omitP };
+		body.answers.risk = { ...body.answers.risk, explanation: "private rationale", extra: { nested: "private" } };
+		body.answers.context.choice = "sufficient"; body.answers.context.probabilities = { sufficient: 0.9, unknown: 0.1 };
+		body.trace = "private trace";
+		const result = await triage(async () => response(body)).decide(input());
+		assert.equal(result.outcome, outcome);
+		assert.deepEqual(result.answers, {
+			action: { choice: "omit", probabilities: { omit: omitP, review: 1 - omitP } },
+			context: { choice: "sufficient", probabilities: { sufficient: 0.9, unknown: 0.1 } },
+			risk: { choice: "low", probabilities: { low: 0.95, investigate: 0.05 } },
+		});
+		assert.equal(result.skipThreshold, 0.85);
+		assert.doesNotMatch(JSON.stringify(result), /private|confidence|explanation|usage/);
+	});
 	it("audits every fifth periodic opportunity without an SDK call; candidates do not consume audit slots", async () => {
 		const fetch = vi.fn();
-		assert.equal((await triage(fetch).decide(input({ opportunity: 5 }))).outcome, "audit");
+		const result = await triage(fetch).decide(input({ opportunity: 5 }));
+		assert.equal(result.outcome, "audit");
+		assert.equal(result.answers, undefined);
 		assert.equal(fetch.mock.calls.length, 0);
 	});
-	it.each([{}, { answers: {} }, { answers: { action: { type: "noul", noul: 1 } } }])("malformed answers fail open", async (body) => {
-		assert.equal((await triage(async () => response(body)).decide(input())).reason, "malformed");
+	it.each([{}, { answers: {} }, { answers: { action: { type: "noul", noul: 1 } } },
+		// Two valid answers never produce partial recording.
+		{ answers: { ...answer().answers, risk: { ...answer().answers.risk, probabilities: { low: 0.95 } } } },
+	])("malformed answers fail open", async (body) => {
+		const result = await triage(async () => response(body)).decide(input());
+		assert.equal(result.reason, "malformed");
+		assert.equal(result.answers, undefined);
+		assert.equal(result.skipThreshold, undefined);
 	});
 	it("API errors fall back exactly once and never expose provider payloads", async () => {
 		const fetch = vi.fn(async () => new Response("sensitive provider body", { status: 429 }));
@@ -98,6 +125,7 @@ describe("Jev SDK launch/candidate adapter", () => {
 		release(JSON.stringify(answer()));
 		await Promise.resolve();
 		assert.equal(result.outcome, "fallback");
+		assert.equal(result.answers, undefined);
 	});
 	it("post-buffer caller cancellation cannot become a late skip or fallback", async () => {
 		let release!: (text: string) => void;
@@ -162,7 +190,12 @@ describe("shared config and bounded state", () => {
 		assert.equal((await adapter.decide(input())).outcome, "disabled");
 		assert.equal(fetch.mock.calls.length, 1);
 	});
-	it.each([{ timeoutMs: 0 }, { timeoutMs: 10001 }, { buddy: { enabled: "yes" } }, { buddy: { enabled: true, auditEvery: 0 } }, { buddy: { enabled: true, skipThreshold: 2 } }])("rejects malformed active options %j", async (options) => {
+	it("accepts the shared maximum timeout of 30 s", async () => {
+		config({ timeoutMs: 30000 });
+		const loaded = await loadJevConfig(dir);
+		assert.equal(loaded.kind === "enabled" && loaded.config.timeoutMs, 30000);
+	});
+	it.each([{ timeoutMs: 0 }, { timeoutMs: 30001 }, { buddy: { enabled: "yes" } }, { buddy: { enabled: true, auditEvery: 0 } }, { buddy: { enabled: true, skipThreshold: 2 } }])("rejects malformed active options %j", async (options) => {
 		config(options);
 		assert.equal((await loadJevConfig(dir)).kind, "fallback");
 	});

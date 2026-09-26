@@ -3,11 +3,25 @@ import { APITimeoutError, TypeSafeClient, type Fetch, type Questions } from "@ty
 import { loadJevConfig, loadJevKey } from "./jev-config.js";
 
 export type JevOutcome = "disabled" | "review" | "skip" | "suppress" | "audit" | "fallback" | "cancelled" | "stale";
+/** One validated choice: chosen label and every label's unrounded probability. */
+export interface JevAnswer<L extends string> {
+	choice: L;
+	probabilities: Record<L, number>;
+}
+export interface JevAnswers {
+	action: JevAnswer<"omit" | "review">;
+	context: JevAnswer<"sufficient" | "unknown">;
+	risk: JevAnswer<"low" | "investigate">;
+}
 export interface JevDecision {
 	outcome: JevOutcome;
 	reason?: "config" | "no_key" | "error" | "deadline" | "malformed" | "incomplete";
 	model?: string;
 	totalMs: number;
+	/** Present only after all three answers validated; never raw SDK objects. */
+	answers?: JevAnswers;
+	/** Effective threshold the answers were compared against. */
+	skipThreshold?: number;
 }
 export interface JevCandidateInput {
 	headline: string;
@@ -67,7 +81,8 @@ export class LiveJevTriage implements JevTriage {
 		input.signal.addEventListener("abort", abort, { once: true });
 		if (input.signal.aborted) abort();
 		let timer = setTimeout(() => { timedOut = true; abort(); }, 10000);
-		const result = (outcome: JevOutcome, reason?: JevDecision["reason"]): JevDecision => ({ outcome, reason, model, totalMs: Date.now() - start });
+		const result = (outcome: JevOutcome, reason?: JevDecision["reason"], scored?: Pick<JevDecision, "answers" | "skipThreshold">): JevDecision =>
+			({ outcome, reason, model, totalMs: Date.now() - start, ...scored });
 		try {
 			return await abortable(async () => {
 				const loaded = await loadJevConfig(this.options.agentDir);
@@ -110,7 +125,13 @@ export class LiveJevTriage implements JevTriage {
 					const answer = response.answers[id];
 					return answer.type === "choice" && answer.choice === label && answer.probabilities[label] >= config.skipThreshold;
 				});
-				return result(omit ? (input.candidate ? "suppress" : "skip") : "review");
+				// Fixed keys only: confidence, explanations and unknown SDK fields are dropped.
+				const answers: JevAnswers = {
+					action: recorded(response.answers.action, ["omit", "review"]),
+					context: recorded(response.answers.context, ["sufficient", "unknown"]),
+					risk: recorded(response.answers.risk, ["low", "investigate"]),
+				};
+				return result(omit ? (input.candidate ? "suppress" : "skip") : "review", undefined, { answers, skipThreshold: config.skipThreshold });
 			}, controller.signal);
 		} catch (error) {
 			if (input.signal.aborted) return result("cancelled");
@@ -133,6 +154,10 @@ function validChoice(value: any, labels: string[]): boolean {
 		sum += p;
 	}
 	return Math.abs(sum - 1) < 0.01 && labels.every((label) => value.probabilities[value.choice] >= value.probabilities[label]);
+}
+
+function recorded<L extends string>(answer: any, labels: readonly L[]): JevAnswer<L> {
+	return { choice: answer.choice, probabilities: Object.fromEntries(labels.map((label) => [label, answer.probabilities[label]])) as Record<L, number> };
 }
 
 /** No full transcript, hidden thinking, images, or tool-result details. */
