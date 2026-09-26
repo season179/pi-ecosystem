@@ -113,12 +113,12 @@ describe('modes, privacy and identified tools', () => {
     const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'original source');
     const path = config(r), ext = extensionFixture(manager, server, { configPath: path, mode: 'read-write' });
     await ext.emit('agent_settled');
-    server.facts.set('fact-one', { id: 'fact-one', bank_id: BANK, fact_type: 'world', text: 'old fact', document_id: `conversation:${manager.getSessionId()}` });
+    server.facts.set('fact-one', { id: 'fact-one', bank_id: BANK, type: 'world', text: 'old fact', document_id: `conversation:${manager.getSessionId()}` });
     const params = { fact_id: 'fact-one', document_id: `conversation:${manager.getSessionId()}`, expected_text: 'old fact' };
     await expect(ext.tool('hindsight_manage_fact', { ...params, document_id: 'wrong', action: 'edit', text: 'new fact' })).rejects.toThrow('scope');
-    server.facts.get('fact-one').fact_type = 'observation';
+    server.facts.get('fact-one').type = 'observation';
     await expect(ext.tool('hindsight_manage_fact', { ...params, action: 'invalidate' })).rejects.toThrow('world/experience');
-    server.facts.get('fact-one').fact_type = 'world';
+    server.facts.get('fact-one').type = 'world';
     const answer = await ext.tool('hindsight_manage_fact', { ...params, action: 'edit', text: 'new fact; only staging' });
     expect(JSON.stringify(answer)).toContain('not permanent erasure');
     expect(JSON.stringify(answer)).toContain('refresh requested for 1 page');
@@ -140,7 +140,7 @@ describe('modes, privacy and identified tools', () => {
   it('revalidates mode/scope after an awaited fact read, and propagates abort/shutdown without late writes', async () => {
     const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'private'); const path = config(r);
     const ext = extensionFixture(manager, server, { configPath: path, mode: 'read-write' });
-    server.facts.set('f', { id: 'f', fact_type: 'world', text: 'old', document_id: 'd' });
+    server.facts.set('f', { id: 'f', type: 'world', text: 'old', document_id: 'd' });
     server.before = c => { if (c.url.pathname.endsWith('/memories/f')) config(r, { disabled: true }); };
     await expect(ext.tool('hindsight_manage_fact', { action: 'edit', fact_id: 'f', expected_text: 'old', document_id: 'd', text: 'new' })).rejects.toThrow();
     expect(server.calls.some(c => c.method === 'PATCH')).toBe(false);

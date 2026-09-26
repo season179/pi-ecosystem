@@ -24,6 +24,6 @@ The published root exports an OpenCode plugin; `dist/pi.js` exports only the com
 
 ## API evidence and limits
 
-Fact curation and operation/document response shapes were checked against the locally cached **Hindsight API 0.10.1 OpenAPI**, `/tmp/hs-openapi.json` (also `/tmp/hindsight-guide-openapi.json`); no live calls were used. The fact endpoint is GET/PATCH `/v1/default/banks/{bank_id}/memories/{memory_id}`. PATCH accepts `text`, `state: invalidated|valid`, and `reason`; only world/experience facts are curated. Single-fact permanent DELETE is absent. Bank/document/derived-observation deletes are not substitutes and are not implemented.
+Fact curation and operation/document response shapes were checked against the locally cached **Hindsight API 0.10.1 OpenAPI**, `/tmp/hs-openapi.json` (also `/tmp/hindsight-guide-openapi.json`); no live calls were used. The fact endpoint is GET/PATCH `/v1/default/banks/{bank_id}/memories/{memory_id}`. PATCH accepts `text`, `state: invalidated|valid`, and `reason`; only world/experience facts are curated. The live 0.10.1 fact detail reports its kind as `type` (list items use `fact_type`); the OpenAPI detail schema is untyped, and this was confirmed against the running service. Single-fact permanent DELETE is absent. Bank/document/derived-observation deletes are not substitutes and are not implemented.
 
 The retained upstream defect evidence at `/tmp/hindsight-retain-repro/{report.md,repro.mjs}` was inspected read-only and remains unchanged. Its historical VM approach is not used by production or these tests.

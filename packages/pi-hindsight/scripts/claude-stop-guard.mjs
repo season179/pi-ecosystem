@@ -9,7 +9,7 @@
 //   node claude-stop-guard.mjs --official <.../dist/claude-stop-hook.js> --sha256 <hex>
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -17,6 +17,9 @@ const argv = process.argv.slice(2);
 const option = name => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
 const CONFIG = process.env.HINDSIGHT_CONFIG || join(homedir(), '.hindsight', 'coding-agent.json');
 const LOG = join(homedir(), '.hindsight', 'coding-agents-logs', 'stop-guard.jsonl');
+const LOG_BYTES = 2 * 1024 * 1024; // same policy as pi-hindsight telemetry: one .1 generation
+const INPUT_BYTES = 1024 * 1024; // hook payload is a small JSON object
+const TRANSCRIPT_BYTES = 256 * 1024 * 1024; // far above real sessions (largest seen ~11 MB)
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /** Decide from the parsed hook input, raw config text and transcript text; pure for tests. */
@@ -43,15 +46,16 @@ function note(sessionId, reason) {
   // Metadata only: session ID and fixed reason.
   try {
     mkdirSync(dirname(LOG), { recursive: true, mode: 0o700 });
+    try { if (statSync(LOG).size >= LOG_BYTES) renameSync(LOG, `${LOG}.1`); } catch { /* absent */ }
     appendFileSync(LOG, `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, outcome: 'capture skipped', reason })}\n`, { mode: 0o600 });
   } catch { /* never affects the host */ }
 }
 
 async function main() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
+  const chunks = []; let size = 0;
+  for await (const chunk of process.stdin) { size += chunk.length; if (size <= INPUT_BYTES) chunks.push(chunk); }
   const raw = Buffer.concat(chunks);
-  let input; try { input = JSON.parse(raw.toString('utf8')); } catch { input = undefined; }
+  let input; try { input = size <= INPUT_BYTES ? JSON.parse(raw.toString('utf8')) : undefined; } catch { input = undefined; }
   const official = option('official'), pin = option('sha256');
   let reason;
   try {
@@ -63,7 +67,8 @@ async function main() {
     try { configText = readFileSync(CONFIG, 'utf8'); } catch { configText = ''; }
     try {
       const path = input?.transcript_path;
-      if (typeof path === 'string' && statSync(path).isFile()) transcript = readFileSync(path, 'utf8');
+      const stat = typeof path === 'string' ? statSync(path) : undefined;
+      if (stat?.isFile() && stat.size <= TRANSCRIPT_BYTES) transcript = readFileSync(path, 'utf8');
     } catch { /* unreadable */ }
     const verdict = decide(input, configText, transcript);
     if (verdict !== 'forward') reason = verdict;

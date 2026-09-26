@@ -28,7 +28,8 @@ const BACKUP_STORES = option('backup-stores') ?? join(HOME, '.hindsight/backups/
 const MAIN_CONFIG = option('config') ?? join(HOME, '.hindsight/coding-agent.json');
 const GLOBAL_CONFIG = option('global-config') ?? join(HOME, '.hindsight/coding-agent-global.json');
 const OUT_ROOT = option('out-root') ?? join(HOME, '.hindsight/migrations');
-const OLD_BANK = 'pi-memory';
+// --source-bank exists only for synthetic rehearsals against disposable banks.
+const OLD_BANK = option('source-bank') ?? 'pi-memory';
 const PAGE = 500;
 const RETIRED_MATCH = 0.6, RETIRED_MARGIN = 0.1, MIN_TOKENS = 8;
 
@@ -193,7 +194,7 @@ async function migrate(apply) {
     const role = meta.source_role === 'assistant' || meta.source_role === 'user' ? meta.source_role : undefined;
     if (!role && !dest.quarantine) dest = { quarantine: 'unknown source_role' };
     const when = doc.retain_params?.event_date ?? doc.created_at;
-    items.push({ kind: 'bank-span', source_id: doc.id, source_sha256: sha(text), ...dest, document_id: `legacy-bank:pi-memory:${doc.id}`,
+    items.push({ kind: 'bank-span', source_id: doc.id, source_sha256: sha(text), ...dest, document_id: `legacy-bank:${OLD_BANK}:${doc.id}`,
       content: redact(`[${role} message in Pi session ${meta.source_session ?? 'unknown'} at ${when}]\n${text}`), timestamp: when,
       context: 'Verbatim excerpt of an earlier Pi conversation, selected by the legacy pi-memory automation. A primary quote with its original speaker and time, not a derived summary.',
       tags: ['source:legacy-pi-memory-bank', 'harness:pi', `legacy-role:${role}`],

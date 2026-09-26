@@ -42,11 +42,12 @@ node ~/.hindsight/pi-hindsight/claude-stop-guard.mjs --official ~/.hindsight/cod
 
 It reads `harnesses["claude-code"].captureSince` from the same official file. Only when the transcript's earliest timestamp is at or after that cutoff does it forward the unchanged hook stdin to the pinned official hook. A resumed Claude session appends to its original transcript, so the earliest entry is the original start.
 
-Anything uncertain is skipped with exit 0 and a metadata line in `~/.hindsight/coding-agents-logs/stop-guard.jsonl`. That covers:
+Anything uncertain is skipped with exit 0 and a metadata line in `~/.hindsight/coding-agents-logs/stop-guard.jsonl`, which rotates at 2 MiB to one `.1`. That covers:
 - a missing or invalid cutoff;
 - an undated or unreadable transcript;
 - entries from another session (fork);
-- an official hook whose hash changed, which needs re-review and a new pin.
+- an official hook whose hash changed, which needs re-review and a new pin;
+- hook input over 1 MiB or a transcript over 256 MiB. Every one of the 217 current real transcripts passes.
 
 Fresh sessions are captured exactly as before. SessionStart and UserPromptSubmit stay official and unwrapped.
 

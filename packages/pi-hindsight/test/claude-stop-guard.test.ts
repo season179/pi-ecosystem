@@ -66,4 +66,14 @@ describe('Claude Stop guard process', () => {
     expect(log).toContain('official hook changed');
     expect(log).not.toContain('hi');
   });
+  it('fails closed on oversized hook input and rotates its metadata log', async () => {
+    expect(await run(`{"hook_event_name":"Stop","session_id":"s1","pad":"${'x'.repeat(1024 * 1024)}"}`)).toBe(0);
+    expect(existsSync(join(root, 'forwarded'))).toBe(false);
+    const log = join(root, '.hindsight/coding-agents-logs/stop-guard.jsonl');
+    expect(readFileSync(log, 'utf8')).toContain('unexpected hook input');
+    writeFileSync(log, 'x'.repeat(2 * 1024 * 1024));
+    expect(await run(payload(line('2026-09-01T00:00:00Z')))).toBe(0);
+    expect(readFileSync(log, 'utf8')).toContain('pre-cutover session');
+    expect(existsSync(`${log}.1`)).toBe(true);
+  });
 });

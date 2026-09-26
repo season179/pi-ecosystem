@@ -205,7 +205,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         const write = args.action !== 'inspect';
         const target = operation(ctx, write, signal);
         const fact = await target.client.fact(args.fact_id); target.guard();
-        if (fact?.id !== args.fact_id || (fact.bank_id !== undefined && fact.bank_id !== target.bank) || !['world', 'experience'].includes(fact.fact_type) || typeof fact.text !== 'string') throw new Error('Hindsight fact identity/type not verified; only identified world/experience facts are supported');
+        if (fact?.id !== args.fact_id || (fact.bank_id !== undefined && fact.bank_id !== target.bank) || !['world', 'experience'].includes(fact.type) || typeof fact.text !== 'string') throw new Error('Hindsight fact identity/type not verified; only identified world/experience facts are supported');
         if (!write) return result(fact, [fact.text]);
         if (!args.document_id || fact.document_id !== args.document_id || fact.text !== args.expected_text) throw new Error('Hindsight fact/source changed or scope not verified; inspect it again');
         const patch: Record<string, string> = args.action === 'edit'
@@ -214,7 +214,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         // Conservative, session-local source replay guard. No claim about other writers.
         await blockReplay(ctx, target);
         const current = await target.client.fact(args.fact_id); target.guard();
-        if (current.id !== fact.id || current.text !== fact.text || current.document_id !== fact.document_id || current.fact_type !== fact.fact_type) throw new Error('Hindsight fact changed before curation; inspect again');
+        if (current.id !== fact.id || current.text !== fact.text || current.document_id !== fact.document_id || current.type !== fact.type) throw new Error('Hindsight fact changed before curation; inspect again');
         await target.client.curate(args.fact_id, patch); target.guard();
         const verified = await target.client.fact(args.fact_id); target.guard();
         if (verified.id !== fact.id || verified.document_id !== fact.document_id || (patch.text !== undefined && verified.text !== patch.text) || (patch.state !== undefined && verified.state !== patch.state)) throw new Error('Hindsight curation accepted but resulting fact not verified; do not blindly retry');

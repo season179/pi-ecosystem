@@ -100,6 +100,7 @@ export class HindsightClient {
   async getPage(id: string): Promise<unknown> {
     return shapePage(await this.request('GET', this.bankUrl(`/knowledge-base/pages/${encodeURIComponent(id)}`)));
   }
+  /** Fact detail (0.10.1): the kind is `type`, unlike list items' `fact_type`. */
   fact(id: string): Promise<any> {
     return this.request('GET', this.bankUrl(`/memories/${encodeURIComponent(id)}`));
   }
