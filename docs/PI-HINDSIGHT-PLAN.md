@@ -137,17 +137,26 @@ Disposable, ownership-marked banks only, all deleted and verified absent afterwa
 
 - **Baseline** (`scripts/eval-baseline.mjs`, gate-off Reflect, 14 cases): 13 answered.
   - Label agreement passed for must-find (Pi and Claude origin), qualifier, speaker/uncertainty attribution, unrelated abstention, both isolation directions, and edit/invalidate before and after curation.
-  - The indirect-recall case hit its 150 s request deadline, so it is unmeasured rather than wrong.
+  - The indirect-recall case hit its 150 s request deadline in the full run. Rerun alone on an idle server, it passed: 27.8 s structured, and 19.3 s and 31.7 s as ordinary low-budget Reflects.
 - **Non-resurrection, a measured limitation:** re-retaining an *unchanged* source document after curation brings back both the edited value and the invalidated fact, in the facts, observations and page. Curation, consolidation and page refresh alone did not resurrect them.
   - The mitigations are to never resubmit curated sources: importer idempotence (existing documents are verified, never resubmitted), `captureSince` guards, quarantine of retired note versions, and Pi's session-local replay block after curation.
-  - Claude Stop capture re-sends the whole transcript and has no such block, so a fact curated from a live Claude session can come back at that session's next Stop.
-- **Latency:** the service LLM is serialized (max concurrency 1). Low-budget Reflect took 20–84 s, and 1 of 14 exceeded 150 s. The automatic caps (Pi's 6 s, the official hook's 20 s) will therefore usually time out on this service, and migration extraction drains slowly.
+  - Follow-up (`01d244f`): before any append, Pi capture and the Claude Stop guard read the session source's facts (live `edited_at` plus the `state=invalidated` archive). They refuse replay after curation by any session or harness.
+  - A real-hook disposable check passed: the fresh session was captured, one fact was edited, and the next Stop was refused. The document and operations were unchanged.
+  - Permanent external deletion leaves no trace and is not covered.
+- **Latency:** the service log's per-iteration timings show that idle low-budget Reflect is itself slow. Across 33 Reflects:
+  - it ran a median of 3 agentic LLM iterations;
+  - net LLM time (excluding queueing) was 18–76 s, median 27 s;
+  - none finished under 6 s, and 6 finished under 20 s.
+- Serialization adds on top of that: the global LLM cap was 1, and 15 of the 33 waited up to 59 s behind other LLM work.
+- So Pi's 6 s automatic cap never succeeds on this provider, and the official hook's 20 s rarely does. Explicit `hindsight_reflect` (bounded by the configured tool deadline) is the working retrieval path.
+- A reserved-headroom change is prepared but not active. It is `LLM_MAX_CONCURRENT` 4, with `RETAIN_`, `CONSOLIDATION_` and `MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT` at 1 each, which is upstream's per-op composition, so interactive Reflect always keeps one slot. It sits in the service plist (backed up), and needs a service reload that was not permitted in this session.
 - **API facts:** `GET /banks/{id}/profile` returns 410. Existence is checked with `GET /banks/{id}/config` (404 when missing), plus the exact `bank_id` in `GET /banks?q=` (`banks[].name` as the ownership marker). After DELETE, `/config` keeps answering 200 for about 20–30 s while the list already reflects the deletion. Fact detail uses `type`; list items use `fact_type`.
 - **Import rehearsal** (8 synthetic sources, 3 disposable banks):
   - The dry run and apply routed 4 items (a project note and span, a global note and a user-wide span).
   - They quarantined `not_durable`, the retired-note match, the unmapped project and the unknown `source_role`.
   - `--verify` exited 1 before extraction, then 0 after the drain. A re-apply verified 4 items identical without resubmitting. A tag tamper made `--verify` exit 1 (`document tags mismatch`).
   - Plain Reflect on the migrated banks returned the expected facts (37–44 s) and never the retired value.
+- **Apply gate** (`cfad3b5`): `--apply` requires `--expect <reviewed dry-run manifest>`. It refuses before any write if the recomputed plan differs in any field.
 
 ## Decisions still required before rollout
 
