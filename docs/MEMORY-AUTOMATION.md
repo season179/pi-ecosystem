@@ -23,9 +23,9 @@ The local file stores, their injection and their tools are unchanged.
 
 | Trigger | When | Awaited? | Result lands |
 | --- | --- | --- | --- |
-| prompt | First provider request carrying a new user message (including steering/queued messages) | Yes, bounded by 4 s total | Same request |
+| prompt | First provider request carrying a new user message (including steering/queued messages) | Yes, bounded by 4 s total (stretched for a longer `timeoutMs`; see below) | Same request |
 | periodic | Every `periodicEveryRequests` (default 4) tool-loop continuations of one run; at most one check in flight | No | First request after it completes |
-| run-end | `agent_settled` (fires once, after retries), over the messages collected from `agent_end` | No; bounded by 8 s | Retain only: no recall, no extra model request |
+| run-end | `agent_settled` (fires once, after retries), over the messages collected from `agent_end` | No; bounded by 8 s (stretched likewise) | Retain only: no recall, no extra model request |
 
 The run-end check judges only messages not already judged, so the final
 assistant completion (and a last user correction) is captured without waiting
@@ -233,6 +233,12 @@ Feedback loops are cut in three ways:
   check.
 - Prompt deadline 4 s; periodic and run-end 8 s; retain 5 s; shutdown flush
   3 s total.
+- A shared `typesafe.json` `timeoutMs` above its 3 s default stretches each
+  check deadline by the excess, so Jev gets that whole timeout and Hindsight
+  keeps the headroom it has at the default (at 30 s: prompt 31 s, periodic and
+  run-end 35 s). The prompt check is awaited, so a slow Jev call delays the
+  first request up to that long. The shutdown flush stays 3 s: a run-end
+  judgment still waiting on Jev at exit is reported, not awaited.
 
 ## Limitations
 

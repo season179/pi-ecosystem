@@ -35,9 +35,9 @@ export const TYPESAFE_OFFICIAL_BASE_URL = "https://api.typesafe.ai";
 export const SEMANTIC_MODEL_DEFAULT = "jev-1.13.0";
 export const SEMANTIC_TIMEOUT_MS_DEFAULT = 3000;
 export const SEMANTIC_MIN_RELEVANCE_DEFAULT = 0.5;
-/** Shared top-level bounds, aligned with the Buddy consumer of typesafe.json. */
+/** Shared top-level bounds, aligned with the Buddy and Herdr consumers of typesafe.json. */
 export const SEMANTIC_MODEL_PATTERN = /^[a-zA-Z0-9._-]{1,80}$/;
-export const SEMANTIC_MAX_TIMEOUT_MS = 10_000;
+export const SEMANTIC_MAX_TIMEOUT_MS = 30_000;
 /** Candidates per request; keeps state+largest question far below 32k tokens. */
 export const SEMANTIC_STATE_BATCH_CANDIDATES = 16;
 /** Serialized state bytes per request; far below the 32k-token single-state cap. */

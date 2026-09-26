@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Fetch } from "@typesafe-ai/sdk";
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import {
 	automationStatusLines,
 	classifyUnit,
@@ -192,9 +192,9 @@ function requestText(capture: ProviderCapture): string {
 async function unitRig(
 	hindsight: HindsightFetch,
 	jev: Fetch,
-	options: { identityHash?: string; name?: string; mode?: "read-only" | "read-write"; diagnostics?: string[] } = {},
+	options: { identityHash?: string; name?: string; mode?: "read-only" | "read-write"; diagnostics?: string[]; typesafe?: unknown } = {},
 ) {
-	const { agentDir } = await workspace({ version: 1, bank: "test-bank", periodicEveryRequests: 1 });
+	const { agentDir } = await workspace({ version: 1, bank: "test-bank", periodicEveryRequests: 1 }, options.typesafe);
 	const root = await resolveMemoryRoot(agentDir);
 	const automation = new MemoryAutomation({
 		agentDir,
@@ -714,6 +714,73 @@ describe("MemoryAutomation stale work and cancellation", () => {
 		assert.equal(await pending, undefined);
 		assert.equal(services.recalls.length, 0);
 		assert.match(automation.status().lastCheck?.result ?? "", /cancelled/u);
+	});
+});
+
+describe("configured Jev timeout", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** Config and key reads are real I/O outside fake time; let them run. */
+	async function until(condition: () => boolean): Promise<void> {
+		for (let turn = 0; !condition(); turn += 1) {
+			if (turn > 10_000) throw new Error("condition never met");
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+	}
+
+	async function fakeTimeRig(typesafe: unknown, jev: Fetch) {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const services = fakeServices();
+		let calls = 0;
+		const counted: Fetch = (input, init) => {
+			calls += 1;
+			return jev(input, init);
+		};
+		const rig = await unitRig(services.hindsight, counted, { typesafe });
+		return { ...rig, services, calls: () => calls };
+	}
+
+	it("gives prompt and periodic checks the whole 30 s and still recalls afterwards", async () => {
+		const answers = fakeServices();
+		const slow: Fetch = async (input, init) => {
+			await new Promise((resolve) => setTimeout(resolve, 29_000));
+			return answers.jev(input, init);
+		};
+		const { automation, context, services, calls } = await fakeTimeRig({ timeoutMs: 30_000 }, slow);
+
+		const prompt = automation.onContext([user(PROMPT, 1)], context());
+		await until(() => calls() === 1);
+		await vi.advanceTimersByTimeAsync(29_000);
+		const block = await prompt;
+		assert.ok(block?.text.includes(MEMORY_TEXT), "the prompt request carries the recall");
+		assert.match(automation.status().lastCheck?.result ?? "", /recall 0\.90, recalled 1/u);
+
+		void automation.onContext([user(PROMPT, 1), assistant("Checked the staged diff before committing.", 2)], context());
+		await until(() => calls() === 2);
+		await vi.advanceTimersByTimeAsync(29_000);
+		await until(() => services.recalls.length === 2);
+		await automation.idle();
+		assert.equal(automation.status().lastCheck?.trigger, "periodic");
+		assert.match(automation.status().lastCheck?.result ?? "", /recalled 1/u);
+	});
+
+	it.each([3_000, 30_000])("still cancels a hanging Jev call at timeoutMs %i", async (timeoutMs) => {
+		const hanging: Fetch = () => new Promise<Response>(() => undefined);
+		const { automation, context, services, calls } = await fakeTimeRig({ timeoutMs }, hanging);
+		let settled = false;
+		const prompt = automation.onContext([user(PROMPT, 1)], context()).finally(() => {
+			settled = true;
+		});
+		await until(() => calls() === 1);
+		await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+		assert.equal(settled, false, "no earlier cut-off than configured");
+		await vi.advanceTimersByTimeAsync(1);
+		assert.equal(await prompt, undefined);
+		assert.equal(settled, true);
+		assert.match(automation.status().lastCheck?.result ?? "", /Jev unavailable \(timeout\)/u);
+		assert.equal(services.recalls.length, 0);
 	});
 });
 

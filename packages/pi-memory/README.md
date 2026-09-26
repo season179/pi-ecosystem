@@ -268,8 +268,9 @@ fields are shown, unrelated fields for other consumers are ignored):
 ```
 
 - `model` matches `/^[a-zA-Z0-9._-]{1,80}$/`; default `jev-1.13.0`.
-- `timeoutMs` is an integer 1–10000; default 3000. It bounds the **entire**
-  semantic operation, all batches included.
+- `timeoutMs` is an integer 1–30000; default 3000. It bounds the **entire**
+  semantic operation, all batches included, and each automatic-memory Jev
+  check (see below).
 - `minRelevance` is 0–1; default 0.5. `memory.enabled` defaults to false, so
   the feature is off unless explicitly enabled — an absent config file leaves
   recall fully deterministic and quiet.
@@ -437,7 +438,9 @@ A Jev key must resolve through `TYPESAFE_API_KEY` or `typesafe.json`
     re-checked client-side.
   - An unverifiable result discards the whole recall.
 - **When.** Recall runs:
-  - at each new prompt, bounded to 4 s and before the first request;
+  - at each new prompt, bounded to 4 s and before the first request (a
+    `timeoutMs` above 3000 extends that bound by the excess, so Jev always
+    gets its full timeout; background checks extend their 8 s likewise);
   - every few tool-loop requests.
 
   When a run settles, its final messages are judged once more, retain-only (no

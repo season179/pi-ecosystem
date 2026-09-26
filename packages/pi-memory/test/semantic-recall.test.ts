@@ -106,7 +106,7 @@ describe("parseTypesafeConfig", () => {
 			JSON.stringify({ timeoutMs: 0 }),
 			JSON.stringify({ timeoutMs: "3000" }),
 			JSON.stringify({ timeoutMs: 3000.5 }),
-			JSON.stringify({ timeoutMs: 10001 }),
+			JSON.stringify({ timeoutMs: 30001 }),
 			JSON.stringify({ apiKeyFile: 7 }),
 			JSON.stringify({ memory: "on" }),
 			JSON.stringify({ memory: { enabled: "yes" } }),

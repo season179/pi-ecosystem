@@ -17,6 +17,7 @@ import type { ProjectIdentity } from "./identity.js";
 import { escapeInjectionInline, PI_MEMORY_OWNER, tagInjectionBlock, type TaggedTextBlock } from "./injection.js";
 import { GATE_MAX_UNITS, runMemoryGate, type ApplicabilityLabel, type GateOutcome, type UnitJudgment } from "./jev-gate.js";
 import { assertContainedRegularPath, type StoreContainment } from "./paths.js";
+import { loadTypesafeConfig, SEMANTIC_TIMEOUT_MS_DEFAULT } from "./semantic.js";
 import { buildRecallQuery, buildTranscript, SEGMENT_MAX_CHARS, segmentText, type TranscriptEntry } from "./transcript.js";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ export const AUTOMATION_CONFIG_FILE = "automation.json";
 export const DEFAULT_BANK = "pi-memory";
 export const BANK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
+// Check deadlines at the default Jev timeout; see checkDeadlineMs for longer ones.
 export const PROMPT_DEADLINE_MS = 4_000;
 export const PERIODIC_DEADLINE_MS = 8_000;
 /** Retain-only judgment of a finished run's final messages (runs in the background). */
@@ -64,6 +66,15 @@ export const RECALLED_ITEM_MAX_CHARS = 600;
 export const RECALLED_BLOCK_MAX_BYTES = 4_096;
 /** Minimum Jev probability for a broad (user-wide or transferable) label; below it a unit stays project-local. */
 export const BROAD_SCOPE_CONFIDENCE = 0.7;
+
+/**
+ * A check's whole deadline: its base, stretched by however far the configured
+ * Jev timeout exceeds the default, so Jev gets that whole timeout and Hindsight
+ * keeps the headroom it has at the default. Bounded by the config maximum.
+ */
+export function checkDeadlineMs(baseMs: number, jevTimeoutMs: number): number {
+	return baseMs + Math.max(0, jevTimeoutMs - SEMANTIC_TIMEOUT_MS_DEFAULT);
+}
 
 // Stable tags only: they define Hindsight consolidation scopes, so nothing
 // volatile (sessions, dates) is ever a tag. Session provenance is metadata.
@@ -739,7 +750,7 @@ export class MemoryAutomation {
 		entries: TranscriptEntry[],
 		run: RunState | undefined,
 		context: AutomationContext,
-		deadlineMs: number,
+		baseDeadlineMs: number,
 		settings: AutomationSettings | undefined,
 	): Promise<void> {
 		const identity = context.identity;
@@ -751,6 +762,9 @@ export class MemoryAutomation {
 		};
 		if (!this.hindsight.canAttempt(started)) return record("skipped: Hindsight cooling down");
 		if (!this.jev.canAttempt(started)) return record("skipped: Jev cooling down");
+		// A malformed config is reported by the gate itself.
+		const typesafe = await loadTypesafeConfig(this.#deps.agentDir);
+		const deadlineMs = checkDeadlineMs(baseDeadlineMs, typesafe.state === "loaded" ? typesafe.settings.timeoutMs : SEMANTIC_TIMEOUT_MS_DEFAULT);
 
 		const signals = [
 			this.#session.signal,
