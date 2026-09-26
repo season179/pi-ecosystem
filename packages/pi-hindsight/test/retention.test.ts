@@ -1,11 +1,11 @@
 import { afterEach, describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, appendFileSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, readFileSync, statSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { config, exchange, extensionFixture, message, persisted, sdk, Server, BANK } from './helpers.js';
 import { CURSOR_TYPE } from '../src/retention.js';
-import { TELEMETRY_BYTES, TELEMETRY_FILE } from '../src/telemetry.js';
+import { record, TELEMETRY_BYTES, TELEMETRY_FILE } from '../src/telemetry.js';
 const roots: string[] = [];
 const root = () => { const p = mkdtempSync(join(tmpdir(), 'pi-hindsight-test-')); roots.push(p); return p; };
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -60,6 +60,38 @@ describe('persisted conversation evidence', () => {
     const delta = server.retains[1].body.items[0].content;
     expect(delta).not.toContain(source); expect(delta).toContain('[memory-derived text omitted]');
     expect(delta).toContain('New work remains provisional.');
+  });
+
+  it('refuses to append to a source whose facts were curated elsewhere, and remembers the refusal', async () => {
+    const r = root(), server = new Server(), manager = persisted(r);
+    const ext = extensionFixture(manager, server, { configPath: config(r), mode: 'read-write' });
+    exchange(manager, 'first'); await ext.emit('agent_settled');
+    exchange(manager, 'second'); await ext.emit('agent_settled');
+    expect(server.retains).toHaveLength(2);
+    const doc = `conversation:${manager.getSessionId()}`;
+    // Curated from another session/harness: this session's own checkpoint knows nothing about it.
+    server.facts.set('f-other', { id: 'f-other', type: 'world', text: 'x', document_id: doc, state: 'valid', edited_at: '2026-09-26T13:00:00Z' });
+    exchange(manager, 'third'); await ext.emit('agent_settled');
+    expect(ext.status).toContain('curated facts');
+    expect(server.retains).toHaveLength(2);
+    const lists = () => server.calls.filter(c => c.url.pathname.endsWith('/memories/list')).length;
+    const checked = lists();
+    exchange(manager, 'fourth'); await ext.emit('agent_settled');
+    expect(ext.status).toContain('blocked after curation'); expect(lists()).toBe(checked); expect(server.retains).toHaveLength(2);
+    // An invalidated (archived) fact alone also blocks; an unfiltered/invalid list fails closed without a durable block.
+    const other = persisted(root()), ext2 = extensionFixture(other, server, { configPath: config(r), mode: 'read-write' });
+    exchange(other, 'a'); await ext2.emit('agent_settled');
+    server.facts.set('f-inv', { id: 'f-inv', type: 'world', text: 'y', document_id: `conversation:${other.getSessionId()}`, state: 'invalidated' });
+    exchange(other, 'b'); await ext2.emit('agent_settled');
+    expect(ext2.status).toContain('curated facts'); expect(server.retains).toHaveLength(3);
+    const third = persisted(root()), ext3 = extensionFixture(third, server, { configPath: config(r), mode: 'read-write' });
+    exchange(third, 'a'); await ext3.emit('agent_settled');
+    server.before = call => { if (call.url.pathname.endsWith('/memories/list')) call.url.searchParams.delete('document_id'); };
+    exchange(third, 'b'); await ext3.emit('agent_settled');
+    expect(ext3.status).toContain('not filtered'); expect(server.retains).toHaveLength(4);
+    server.before = undefined;
+    exchange(third, 'c'); await ext3.emit('agent_settled');
+    expect(server.retains).toHaveLength(5);
   });
 
   it('blocks divergent branches/source rewrites, but permits returning to the original lineage', async () => {
@@ -164,6 +196,10 @@ describe('telemetry', () => {
     subject = await sdk(r, server, persisted(r), [message('again')], { agentDir });
     try { await subject.session.prompt('again'); } finally { await subject.dispose(); }
     expect(statSync(`${file}.1`).size).toBe(TELEMETRY_BYTES); expect(statSync(file).size).toBeLessThan(4096);
+    // Pre-existing broader modes (current and rotated) are repaired to owner-only.
+    chmodSync(file, 0o644); chmodSync(`${file}.1`, 0o644);
+    record(agentDir, { event: 'probe' });
+    expect(statSync(file).mode & 0o777).toBe(0o600); expect(statSync(`${file}.1`).mode & 0o777).toBe(0o600);
     const quiet = root(), off = await sdk(quiet, server, persisted(quiet), [message('off')], { agentDir: join(quiet, 'agent'), mode: 'off' });
     try { await off.session.prompt('off'); } finally { await off.dispose(); }
     expect(existsSync(join(quiet, 'agent', TELEMETRY_FILE))).toBe(false);

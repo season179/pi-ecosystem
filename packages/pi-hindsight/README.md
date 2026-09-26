@@ -34,18 +34,31 @@ It runs the installed official 0.7.0 `deepen.js` with a private copy of the conf
 
 **Pre-cutover guard.** `harnesses.pi.captureSince` (ISO time; a local key that official hosts ignore) skips automatic capture for sessions whose header predates it, with status. This stops a resumed pre-cutover session replaying history the legacy writer already captured. A malformed value blocks automatic capture. Explicit Retain is unaffected.
 
-Claude gets the same guarantee from `scripts/claude-stop-guard.mjs`, which replaces the official Stop command in `~/.claude/settings.json`:
+Claude gets the same guarantee from `scripts/claude-stop-guard.mjs`, which replaces the official Stop command in `~/.claude/settings.json`. It is installed as one bundled file carrying the vendored 0.7.0 config and bank resolution:
 
 ```sh
+npm run build -w @season179/pi-hindsight
+node packages/pi-hindsight/scripts/bundle-claude-guard.mjs ~/.hindsight/pi-hindsight/claude-stop-guard.mjs   # 0600
 node ~/.hindsight/pi-hindsight/claude-stop-guard.mjs --official ~/.hindsight/coding-agents/dist/claude-stop-hook.js --sha256 <pinned hash>
 ```
 
 It reads `harnesses["claude-code"].captureSince` from the same official file. Only when the transcript's earliest timestamp is at or after that cutoff does it forward the unchanged hook stdin to the pinned official hook. A resumed Claude session appends to its original transcript, so the earliest entry is the original start.
 
+**Curated sources are not replayed.** Re-retaining an unchanged source re-extracts claims that were edited or invalidated; the Stage 6 baseline measured this. Before any append, both harnesses therefore read the facts of the session's own source document (`conversation:<session>`) in the bank the host resolves:
+- live facts come from `GET …/memories/list?document_id=…`, checked for `edited_at`;
+- archived facts come from the same listing with `state=invalidated`.
+
+The read is bounded: 200 facts per page, at most 5,000, and every item must match the filter. If any fact was curated, capture is refused, whichever session or harness did the curation.
+- **Pi** records the refusal as a durable block in the session's checkpoint; the existing cursor is preserved.
+- **The Claude guard** resolves the bank exactly as the official Stop hook does. It reads the recorded session root without writing it.
+
+A failed, oversized or unfiltered read also refuses capture. A permanently deleted fact leaves no trace, so this cannot prevent resurrection after external deletion.
+
 Anything uncertain is skipped with exit 0 and a metadata line in `~/.hindsight/coding-agents-logs/stop-guard.jsonl`, which rotates at 2 MiB to one `.1`. That covers:
 - a missing or invalid cutoff;
 - an undated or unreadable transcript;
 - entries from another session (fork);
+- an unresolved destination, curated source facts or a failed curation read;
 - an official hook whose hash changed, which needs re-review and a new pin;
 - hook input over 1 MiB or a transcript over 256 MiB. Every one of the 217 current real transcripts passes.
 
@@ -53,7 +66,7 @@ Fresh sessions are captured exactly as before. SessionStart and UserPromptSubmit
 
 **Remote-less repositories** use explicit bank names with a path-hash suffix, for example `coding-agent::local:<name>-<first 8 hex of sha256(realpath)>`. Two same-named directories therefore never share a bank. `$HOME` and `~/.pi` are never mapped.
 
-**Global cross-project memory (read-only).** If `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`) exists, it must name one static `bankId`, no `mapPathToBank`, an explicit endpoint, and not `pi-memory`. Automatic retrieval then runs the project and global Reflect in parallel under the same 8 s wall and attempt budget. `hindsight_reflect` accepts `scope: "global"`. Capture, Retain, curation and pages never target the global bank, and a repository that resolves to it is refused. A broken or failing global config never blocks project retrieval. Global is relevance-based: the legacy guaranteed `always` injection no longer exists. The same file serves Claude through a second official UserPromptSubmit hook (with `HINDSIGHT_CONFIG` pointing at it and a separate `TMPDIR`) and a second MCP server with its write tools denied.
+**Global cross-project memory (read-only).** If `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`) exists, it must name one static `bankId`, no `mapPathToBank`, an explicit endpoint, and not `pi-memory`. Automatic retrieval then runs the project and global Reflect in parallel under the same 8 s wall and attempt budget, but only while the global file's own `autoInject` is `reflect`; its endpoint, bank, mode, `autoInject` and `observationScopes` are part of the frozen retrieval snapshot, so a mid-flight change rejects the result. `hindsight_reflect` accepts `scope: "global"`. Capture, Retain, curation and pages never target the global bank, and a repository that resolves to it is refused. A broken or failing global config never blocks project retrieval. Global is relevance-based: the legacy guaranteed `always` injection no longer exists. The same file serves Claude through a second official UserPromptSubmit hook (with `HINDSIGHT_CONFIG` pointing at it and a separate `TMPDIR`) and a second MCP server with its write tools denied.
 
 ## Automatic retrieval
 
@@ -81,7 +94,7 @@ Because steering/follow-ups also increase `n`, a periodic value can be skipped; 
 
 Absent file/section or key → periodic gate off (initial still runs); malformed → gate off with status. The endpoint is pinned to `https://api.typesafe.ai`, SDK logging off, retries 0. Jev receives the redacted current request, the last six visible branch messages (context edits honored, 1,500 chars each) and the last two injected memory texts. **This sends conversation excerpts to TypeSafe**; enable it only if that is acceptable. Cadence, threshold, caps and cooldown are constants pending Stage 6 evaluation. `/hindsight` shows the last retrieval outcome.
 
-**Telemetry.** `<agentDir>/hindsight-telemetry.jsonl` (0600, rotates at 2 MiB to one `.1`, nothing when mode is `off`). It holds metadata only: tool/outcome/timing, retrieval trigger, gate decision, Reflect count and injected character count. For capture it records retain `accepted`/`unchanged`/`blocked`/`not_sent`/`skipped_pre_cutover` separately from prior extraction `completed`/`pending`/`failed_or_unknown`. Consolidation is always `not_observed`, because the API exposes no per-document signal. It never records prompts, answers, memory text or credentials.
+**Telemetry.** `<agentDir>/hindsight-telemetry.jsonl` (0600, rotates at 2 MiB to one `.1`, nothing when mode is `off`). A pre-existing current or rotated file with broader permissions is repaired to 0600 before each write; the Claude guard's log follows the same policy. It holds metadata only: tool/outcome/timing, retrieval trigger, gate decision, Reflect count and injected character count. For capture it records retain `accepted`/`unchanged`/`blocked`/`not_sent`/`skipped_pre_cutover` separately from prior extraction `completed`/`pending`/`failed_or_unknown`. Consolidation is always `not_observed`, because the API exposes no per-document signal. It never records prompts, answers, memory text or credentials.
 
 **Legacy internal Recall preference.** Explicitly reconciled as *not delivered*: automatic paths use Reflect only, no Recall tool exists, and configured Recall/pages injection is refused instead of approximated. Revisit only if evaluation shows Reflect misses cases that Recall recovers, under separate approval.
 
@@ -97,12 +110,13 @@ Absent file/section or key → periodic gate off (initial still runs); malformed
 
 There is **no raw Recall**, broad delete, page-generation or migration tool. One-off legacy migration uses the local operator script `scripts/migrate-legacy.mjs` (not shipped):
 - It is a dry run by default and writes a content-free manifest.
+- `--apply --expect <dry-run manifest>` recomputes the plan before any write and refuses unless every source, hash, destination, quarantine, operation ID and expected payload matches the reviewed dry run.
 - Each manifest row carries the expected SHA-256 of the exact redacted payload plus tag and metadata hashes.
 - Apply requires the complete retired-note inventory and destination banks that store text verbatim (`memory_defense` unset).
 - An existing document is either verified identical or reported as a conflict, never skipped or overwritten.
 - `--verify` exits nonzero unless every imported item is present, byte-identical and extracted. Curation requires the inspected fact's exact original text and document ID, rechecks them before PATCH, and reads back the requested change. Invalidation is reversible. **Permanent deletion is unavailable** because the verified API has no single-fact DELETE; it never falls back to document/bank/supporting-fact deletion. If a safe endpoint is later added, it still needs a separate explicit human confirmation design.
 
-Retain reports **accepted**, not completed extraction/consolidation. Curation verifies the fact change, then requests a refresh of up to 10 of the bank's Knowledge Pages, reported as "refresh requested; freshness not verified". It does not rewrite the source, scrub Pi transcripts, or prove observations/pages fresh. Other sessions/harnesses can replay old evidence. This session's auto-capture is durably blocked before curation, including on an uncertain PATCH outcome; there is no automatic unblock. No page or injected-memory cache is maintained.
+Retain reports **accepted**, not completed extraction/consolidation. Curation verifies the fact change, then requests a refresh of up to 10 of the bank's Knowledge Pages, reported as "refresh requested; freshness not verified". It does not rewrite the source, scrub Pi transcripts, or prove observations/pages fresh. Other sessions/harnesses can replay old evidence. This session's auto-capture is durably blocked before curation, including on an uncertain PATCH outcome; other sessions and Claude refuse to replay a source with curated facts (see above). There is no automatic unblock. No page or injected-memory cache is maintained.
 
 ## History and failure behavior
 

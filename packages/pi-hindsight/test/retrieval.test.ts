@@ -181,6 +181,23 @@ describe('global cross-project memory', () => {
     expect(routed.status).toContain('global bank'); expect(server.retains).toHaveLength(writes);
   });
 
+  it('the automatic global leg honors the global autoInject and rejects a mid-flight global settings change', async () => {
+    const r = root(), server = new Server(), globalConfigPath = join(r, 'global.json');
+    const global = (extra = {}) => writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK, ...extra }));
+    global({ autoInject: 'none' });
+    const off = extensionFixture(persisted(r), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });
+    const injected = await off.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first' } as any);
+    expect(injected.message.details.hindsight.echoTexts).toEqual([server.reflectText]);
+    expect(server.calls.some(c => c.url.pathname.includes(encodeURIComponent(GLOBAL_BANK)))).toBe(false);
+    // Explicit global Reflect stays available.
+    expect(JSON.stringify((await off.tool('hindsight_reflect', { query: 'preferences?', scope: 'global' })).content)).toContain(server.globalText);
+    global();
+    server.before = c => { if (c.url.pathname.endsWith('/reflect')) global({ autoInject: 'none' }); };
+    const changed = extensionFixture(persisted(root()), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });
+    expect(await changed.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first' } as any)).toBeUndefined();
+    expect(changed.status).toContain('stale retrieval rejected');
+  });
+
   it('a global failure or broken global config never blocks project retrieval', async () => {
     const r = root(), server = new Server(), globalConfigPath = join(r, 'global.json');
     writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK }));

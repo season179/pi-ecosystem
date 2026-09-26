@@ -74,6 +74,13 @@ export async function retainHistory(options: {
     if (document?.id !== documentId || document.bank_id !== bank || original !== expected) {
       throw new Error('Hindsight remote source no longer matches the retained prefix; capture blocked, never repaired by replacement');
     }
+    // Curation from ANY session (another Pi session, Claude, an operator) marks this source's facts;
+    // an append re-extracts the whole document and would resurrect them. Refuse and remember.
+    const curation = await client.documentCuration(documentId); guard();
+    if (curation.edited || curation.invalidated) {
+      save({ ...checkpoint, blocked: true });
+      throw new Error('Hindsight source has curated facts; automatic capture blocked to avoid resurrecting them');
+    }
   }
   const content = checkpoint.cursor.turns === 0
     ? renderSessionJsonl(documentId, h.turns, h.start)

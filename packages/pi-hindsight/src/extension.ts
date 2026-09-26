@@ -62,7 +62,8 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (!bank || cfg.dynamicBankId || Object.keys(cfg.mapPathToBank ?? {}).length) throw new Error('Hindsight global config must name one static bankId without mapPathToBank');
       if (cfg.disabled || bank === 'pi-memory') throw new Error('Hindsight global memory disabled or legacy bank protected');
       checkEndpoint(cfg);
-      return { cfg, bank, key: hash(JSON.stringify(['global', cfg.apiUrl, cfg.apiToken, bank, current])) };
+      // Retrieval authorization is part of the identity, so a mid-flight settings change rejects stale work.
+      return { cfg, bank, key: hash(JSON.stringify(['global', cfg.apiUrl, cfg.apiToken, bank, current, cfg.autoInject, cfg.observationScopes])) };
     }
     const globalBank = () => { try { return globalTarget()?.bank; } catch { return undefined; } };
 
@@ -254,11 +255,15 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (!query) return undefined;
       // The opportunity is frozen to its first destination: mode, endpoint, bank and retrieval settings.
       // The global bank is optional; its absence or misconfiguration never blocks project retrieval.
-      const globalOf = () => { try { const g = globalTarget(); return g ? g.key : 'none'; } catch (error) { return safeError(error); } };
+      // The automatic global leg follows the global file's own autoInject; explicit scope:"global" Reflect is unaffected.
+      const globalOf = () => {
+        try { const g = globalTarget(); return !g ? 'none' : g.cfg.autoInject === 'reflect' ? g.key : 'automatic off'; }
+        catch (error) { return safeError(error); }
+      };
       const scope = (d: Destination) => JSON.stringify([d.key, d.cfg.autoInject, d.cfg.observationScopes, globalOf()]);
       const first = destination(ctx, false), { cfg } = first, original = scope(first), globalState = globalOf();
-      const global = globalState !== 'none' && !globalState.startsWith('Hindsight ');
-      trace.global = global ? 'configured' : globalState === 'none' ? 'none' : 'invalid';
+      const global = !['none', 'automatic off'].includes(globalState) && !globalState.startsWith('Hindsight ');
+      trace.global = global ? 'configured' : ['none', 'automatic off'].includes(globalState) ? globalState : 'invalid';
       if (cfg.autoInject !== 'reflect') return note(ctx, cfg.autoInject === 'none' ? 'disabled by autoInject none'
         : `autoInject ${cfg.autoInject} unsupported; automatic retrieval off (no pages/Recall substitution)`);
       if (reflectAttempts >= REFLECT_ATTEMPTS) return note(ctx, 'automatic Reflect attempt budget used for this activation');

@@ -14,6 +14,8 @@ export interface ClientOptions {
   signal: AbortSignal;
   fetch?: typeof fetch;
 }
+const CURATION_PAGE = 200; // keeps each list response well under the 1 MiB body limit
+const CURATION_MAX_FACTS = 5000;
 export class HindsightClient {
   constructor(readonly options: ClientOptions) {}
   bankUrl(suffix = ''): string {
@@ -106,6 +108,34 @@ export class HindsightClient {
   }
   curate(id: string, patch: Record<string, string>): Promise<any> {
     return this.request('PATCH', this.bankUrl(`/memories/${encodeURIComponent(id)}`), patch);
+  }
+  /**
+   * Curation state of the facts extracted from one source document, via the 0.10.1 list filters:
+   * `state=invalidated` reads the archive, the default listing exposes `edited_at`. Replaying an
+   * unchanged source re-extracts curated claims, so callers refuse replay when either count is
+   * nonzero. Bounded and exact: a list that is unstable, oversized or not filtered throws.
+   * A permanently deleted fact leaves no trace here.
+   */
+  async documentCuration(documentId: string): Promise<{ facts: number; edited: number; invalidated: number }> {
+    const list = async (query: string) => {
+      const value = await this.request('GET', this.bankUrl(`/memories/list?document_id=${encodeURIComponent(documentId)}&${query}`));
+      if (!Number.isSafeInteger(value?.total) || value.total < 0 || !Array.isArray(value.items)) throw new Error('Hindsight invalid memory list response');
+      if (value.items.some((item: any) => typeof item?.id !== 'string' || item.document_id !== documentId)) throw new Error('Hindsight memory list not filtered to the source document');
+      return value as { total: number; items: Array<{ id: string; edited_at?: string | null }> };
+    };
+    const archived = await list('state=invalidated&limit=1');
+    const seen = new Set<string>();
+    let edited = 0, total: number | undefined;
+    for (let offset = 0; total === undefined || offset < total; offset += CURATION_PAGE) {
+      const page = await list(`limit=${CURATION_PAGE}&offset=${offset}`);
+      if (total !== undefined && page.total !== total) throw new Error('Hindsight source facts changed during the curation check');
+      total = page.total;
+      if (total > CURATION_MAX_FACTS) throw new Error('Hindsight source has too many facts for a bounded curation check');
+      for (const item of page.items) if (!seen.has(item.id)) { seen.add(item.id); if (item.edited_at) edited++; }
+      if (!page.items.length) break;
+    }
+    if (seen.size !== total) throw new Error('Hindsight source fact listing incomplete; curation state unknown');
+    return { facts: total, edited, invalidated: archived.total };
   }
   /** Request (not await) regeneration of this bank's pages after curation; returns accepted page IDs. */
   async refreshPages(max: number): Promise<string[]> {

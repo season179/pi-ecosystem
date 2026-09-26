@@ -44,10 +44,17 @@ export class Server {
     if (call.method === 'POST' && path.endsWith('/refresh')) return json({ operation_id: 'refresh-op', status: 'pending' });
     if (path.endsWith('/knowledge-base/search')) return json({ results: [{ id: 'kp-one', name: 'Decisions', snippet: 'Previously retrieved memory says the old timeout was thirty seconds.', score: 1 }] });
     if (path.endsWith('/knowledge-base/pages/kp-one')) return json({ id: 'kp-one', name: 'Decisions', body: 'Page content', markdown: 'duplicate', timestamp: '2026-01-01' });
+    if (call.method === 'GET' && path.endsWith('/memories/list')) {
+      // 0.10.1: state=invalidated lists the archive; the default lists live facts with edited_at.
+      const q = call.url.searchParams, archive = q.get('state') === 'invalidated';
+      const all = [...this.facts.values()].filter(f => (!q.get('document_id') || f.document_id === q.get('document_id')) && (f.state === 'invalidated') === archive);
+      const offset = Number(q.get('offset') ?? 0), limit = Number(q.get('limit') ?? 100);
+      return json({ items: all.slice(offset, offset + limit).map(f => ({ ...f, fact_type: f.type })), total: all.length, limit, offset });
+    }
     if (path.includes('/memories/')) {
       const id = path.split('/memories/')[1]; const fact = this.facts.get(id);
       if (!fact) return json({}, 404);
-      if (call.method === 'PATCH') this.facts.set(id, { ...fact, ...call.body });
+      if (call.method === 'PATCH') this.facts.set(id, { ...fact, ...call.body, ...(call.body.text ? { edited_at: '2026-09-26T13:00:00Z' } : {}) });
       return json(this.facts.get(id));
     }
     throw new Error(`Unexpected mocked HTTP: ${call.method} ${path}`);
