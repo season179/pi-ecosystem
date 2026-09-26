@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 const VERSION = '0.10.1';
 // Sized for the measured local service: every model call is serialized (LLM_MAX_CONCURRENT=1) and one
 // Reflect takes tens of seconds to minutes, so shorter bounds only measure timeouts.
-const DEFAULTS = { requestMs: 150_000, waitMs: 600_000, pollMs: 3_000, totalMs: 2_700_000, cleanupMs: 40_000, maxPolls: 200, maxRequests: 1_500 };
+const DEFAULTS = { requestMs: 150_000, waitMs: 600_000, pollMs: 3_000, totalMs: 2_700_000, cleanupMs: 120_000, maxPolls: 200, maxRequests: 1_500 };
 const STAMP = '2026-09-26T00:00:00Z';
 export const FIXTURES = [
   { bank: 'a', id: 'eval-pi', harness: 'pi', content: 'User Mira in Pi: Project Kestrel deploys using Helm chart kestrel-saffron. Set connection retries to 7 only in staging; production stays at 2. Assistant in Pi: I suspect the staging disconnects are caused by DNS, but I have not tested this. User Mira: That is an unverified assistant hypothesis, not an established root cause.' },
@@ -343,9 +343,10 @@ export async function runBaseline(options = {}, deps = {}) {
         }
         const deleted = await request('DELETE', bank, '', undefined, false, 'delete-owned-bank');
         if (deleted.success !== true) fail('cleanup-delete-unconfirmed');
-        // DELETE is synchronous, but config/list reads can briefly lag; re-check a few times within the reserve.
+        // DELETE is synchronous and the bank list reflects it at once, but GET /config was measured
+        // answering 200 for ~30 s afterwards (server cache); re-check within the reserve.
         let gone = false;
-        for (let i = 0; i < 5 && !gone; i++) { if (i) await sleep(limits.pollMs); gone = !(await presence(bank, 'cleanup-verify')).exists; row.verifyPolls = i + 1; }
+        for (let i = 0; i < 15 && !gone; i++) { if (i) await sleep(limits.pollMs); gone = !(await presence(bank, 'cleanup-verify')).exists; row.verifyPolls = i + 1; }
         row.status = gone ? 'deleted-verified-immediate' : 'still-present';
       } catch (error) { row.status = errorCode(error); }
     }
