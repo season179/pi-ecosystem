@@ -54,6 +54,25 @@ export function inputSnapshot(branch: SessionEntry[], ids: string[]): string {
 export function injections(branch: SessionEntry[]): ContextEntry[] {
   return branch.filter((e): e is ContextEntry => e.type === 'custom_message' && e.customType === CONTEXT_TYPE);
 }
+export function injectionCount(branch: SessionEntry[]): number {
+  const { released } = deliveryState(branch);
+  return injections(branch).filter(e => !e.details?.hindsight?.late || released.has(deliveryKey(e))).length;
+}
+/** Pi 0.87.1 appends these image-normalization notes AFTER before_agent_start.
+ * Match the entire original text, never its truncated/redacted query or an arbitrary prefix.
+ * Unknown notes fail closed; allow the exact pinned grammar only when images were supplied.
+ */
+export function matchesPrompt(promptHash: string, imageCount: number, text: string): boolean {
+  if (hash(text) === promptHash) return true;
+  if (!imageCount) return false;
+  const split = text.lastIndexOf('\n\n');
+  if (split < 0 || hash(text.slice(0, split)) !== promptHash) return false;
+  const hints = text.slice(split + 2).split('\n');
+  return hints.length <= 2 * imageCount && hints.every(hint =>
+    /^\[Image omitted: could not be (?:converted to a supported inline image format|resized below the inline image size limit)\.\]$/.test(hint) ||
+    /^\[Image converted from image\/[a-z0-9.+-]+ to image\/(?:png|jpeg|gif|webp)\.\]$/.test(hint) ||
+    /^\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by \d+\.\d{2} to map to original image\.\]$/.test(hint));
+}
 /** Persisted user entries (steering/follow-ups included) plus the prompt now starting. */
 export function triggerFor(branch: SessionEntry[]): Trigger | undefined {
   const n = branch.filter(e => e.type === 'message' && e.message.role === 'user').length + 1;

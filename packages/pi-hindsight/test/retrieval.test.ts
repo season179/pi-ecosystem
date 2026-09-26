@@ -120,6 +120,13 @@ describe('automatic retrieval', () => {
     const ext = extensionFixture(capped, server, { configPath: config(r), mode: 'read-only', agentDir, jevFetch: gate.fetch });
     expect(await ext.emit('before_agent_start', start)).toBeUndefined();
     expect(ext.status).toContain('cap'); expect(gate.calls).toHaveLength(0); expect(server.calls).toHaveLength(calls);
+    // Staging was never delivery: eight orphaned late drafts must not exhaust the branch cap.
+    const discarded = persisted(r);
+    for (let i = 0; i < 8; i++) discarded.appendCustomMessageEntry(CONTEXT_TYPE, `discarded ${i}`, true,
+      { hindsight: { late: true, deliveryId: `discarded-${i}` } });
+    const available = extensionFixture(discarded, server, { configPath: config(r), mode: 'read-only' });
+    expect((await available.emit('before_agent_start', start)).message.customType).toBe(CONTEXT_TYPE);
+    await available.emit('session_shutdown');
   });
 
   it('opportunity is frozen: mode/config/scope changes during async reads or a positive gate, and the 8 s wall, stop later dispatch', async () => {

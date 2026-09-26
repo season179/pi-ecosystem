@@ -15,7 +15,7 @@ import { readHistory } from './history.js';
 import { CURSOR_TYPE, latestCheckpoint, lockSession, retainHistory, type Checkpoint } from './retention.js';
 import { hash, inputText, modeOf, redact, safeError, textOf, untrusted, type Mode } from './safety.js';
 import { askGate, automaticQuery, BRANCH_INJECTIONS, CONTEXT_TYPE, COOLDOWN_MS, gateState, GATE_ATTEMPTS, GATE_THRESHOLD, INJECT_CHARS,
-  BACKGROUND_MAX_MS, DELIVERY_TYPE, deliveryKey, deliveryState, inputSnapshot, GATE_MAX_MS, injections, loadGate, loadKey,
+  BACKGROUND_MAX_MS, DELIVERY_TYPE, deliveryKey, deliveryState, inputSnapshot, GATE_MAX_MS, injections, injectionCount, matchesPrompt, loadGate, loadKey,
   REFLECT_ATTEMPTS, REFLECT_MAX_MS, triggerFor, type ContextEntry } from './retrieval.js';
 import { record, type Row } from './telemetry.js';
 
@@ -251,16 +251,20 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (generation === epoch) { pausedUntil = Date.now() + COOLDOWN_MS; note(ctx, `${text}; paused 10 minutes, not retried`); }
     };
     type Pending = {
-      id: string; generation: number; session: string; query: string; anchor: string | null;
+      id: string; generation: number; session: string; promptHash: string; imageCount: number; anchor: string | null;
       inputIds: string[]; inputHash: string; userHash?: string; origin?: string; originHash?: string;
       controller: AbortController; cleanup: Array<() => void>; deadline: number; fresh: () => void;
+      prepare: () => void; stopRequests: () => void; discarded: () => void;
       message?: { customType: string; content: string; display: boolean; details: { hindsight: { echoTexts: string[]; trigger: string; deliveryId: string; late?: boolean } } };
       staged?: boolean; released?: boolean; runBound?: boolean; work?: Promise<void>;
     };
     let pending: Pending | undefined;
     function stopPending() {
       const p = pending; pending = undefined;
-      if (p) { p.controller.abort(); for (const clean of p.cleanup.splice(0)) clean(); }
+      if (p) {
+        p.controller.abort(); for (const clean of p.cleanup.splice(0)) clean();
+        if (p.staged && !p.released) p.discarded();
+      }
       return p?.work;
     }
     function invalidateMemory(ctx: ExtensionContext) {
@@ -306,7 +310,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       const p = pending;
       if (!p || event.message.role !== 'user') return;
       // Pi dispatches message_end BEFORE persisting the entry. Bind its ID at the next freshness check.
-      if (p.userHash || automaticQuery(textOf(event.message.content)) !== p.query) { stopPending(); return; }
+      if (p.userHash || !matchesPrompt(p.promptHash, p.imageCount, textOf(event.message.content))) { stopPending(); return; }
       p.userHash = hash(JSON.stringify(event.message.content));
     });
     pi.on('before_agent_start', async (event, ctx) => {
@@ -314,7 +318,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (mode() === 'off') return undefined;
       const branch = ctx.sessionManager.getBranch(), trigger = triggerFor(branch), query = automaticQuery(event.prompt);
       if (!trigger || !query) return undefined;
-      if (injections(branch).length >= BRANCH_INJECTIONS) return note(ctx, 'branch injection cap reached; automatic retrieval stopped for this branch');
+      if (injectionCount(branch) >= BRANCH_INJECTIONS) return note(ctx, 'branch injection cap reached; automatic retrieval stopped for this branch');
       if (Date.now() < pausedUntil) return note(ctx, 'paused after a service failure; not retried');
       if (reflectAttempts >= REFLECT_ATTEMPTS) return note(ctx, 'automatic Reflect attempt budget used for this activation');
       const started = Date.now(), generation = epoch, trace: Row = { trigger };
@@ -330,9 +334,11 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         trace.global = global ? 'configured' : 'automatic off or absent';
         const inputIds = branch.filter(e => (e.type === 'message' && ['user', 'assistant'].includes(e.message.role)) ||
           (e.type === 'custom_message' && e.customType === CONTEXT_TYPE)).map(e => e.id);
-        const p: Pending = { id: randomUUID(), generation, session: ctx.sessionManager.getSessionId(), query,
+        const p: Pending = { id: randomUUID(), generation, session: ctx.sessionManager.getSessionId(),
+          promptHash: hash(event.prompt), imageCount: event.images?.length ?? 0,
           anchor: ctx.sessionManager.getLeafId(), inputIds, inputHash: hash(inputSnapshot(branch, inputIds)),
-          controller: new AbortController(), cleanup: [], deadline: Infinity, fresh: () => {} };
+          controller: new AbortController(), cleanup: [], deadline: Infinity, fresh: () => {}, prepare: () => {}, stopRequests: () => {},
+          discarded: () => note(ctx, 'late context discarded; not released') };
         pending = p;
         p.fresh = () => {
           p.controller.signal.throwIfAborted();
@@ -378,18 +384,14 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         timer(p, () => { if (pending === p && !p.released) { fail(ctx, generation, 'Hindsight background deadline used'); stopPending(); } }, BACKGROUND_MAX_MS);
         const targets = [first, ...(global ? [global] : [])].slice(0, REFLECT_ATTEMPTS - reflectAttempts);
         reflectAttempts += targets.length; trace.reflects = targets.length;
-        const requests = targets.map(async t => {
-          const local = new AbortController();
-          const clear = timer(p, () => local.abort(), Math.min(BACKGROUND_MAX_MS, Math.max(100, t.cfg.reflectTimeoutMs)));
-          const client = new HindsightClient({ apiUrl: t.cfg.apiUrl, apiToken: t.cfg.apiToken, bank: t.bank,
-            observationScopes: t.cfg.observationScopes, signal: AbortSignal.any([p.controller.signal, local.signal]), guard: p.fresh, fetch: options.fetch });
-          try { return await client.reflect(query, 'low'); } finally { clear(); }
-        });
-        const retrievalWork = Promise.allSettled(requests).then(settled => {
-          p.fresh();
-          const failures = settled.filter(s => s.status === 'rejected');
-          if (failures.length === settled.length) throw new Error('Hindsight Reflect failed or deadline exceeded');
-          const texts = settled.map(s => s.status === 'fulfilled' ? redact(s.value).trim() : '');
+        // Keep at most two results in this opportunity. Snapshot only at a delivery boundary;
+        // a slow sibling cannot withhold available evidence or amend an already staged message.
+        const settled: Array<PromiseSettledResult<string> | undefined> = Array(targets.length).fill(undefined);
+        const stops: Array<() => void> = [];
+        p.stopRequests = () => { for (const stop of stops) stop(); };
+        p.prepare = () => {
+          if (p.message || p.staged || p.released) return;
+          const texts = settled.map(s => s?.status === 'fulfilled' ? s.value : '');
           let delivered: string, echoes: string[];
           if (!global) { delivered = texts[0].slice(0, INJECT_CHARS); echoes = [delivered]; }
           else {
@@ -398,25 +400,45 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             echoes = parts.map(([, t]) => t.slice(0, each));
             delivered = parts.map(([label], i) => `${label}:\n${echoes[i]}`).join('\n\n');
           }
-          if (failures.length) fail(ctx, generation, `${failures.length} Reflect failed; partial context available`);
           const content = untrusted(delivered, INJECT_CHARS);
           const current = ctx.sessionManager.getBranch(), state = deliveryState(current);
           if (!delivered.trim() || injections(current).some(e => e.content === content && !state.invalidated.has(deliveryKey(e)) &&
             (!e.details?.hindsight?.late || state.released.has(deliveryKey(e))))) {
-            note(ctx, !delivered.trim() ? 'Reflect returned nothing; not injected' : 'Reflect repeated an earlier injection; not injected');
-            stopPending(); return;
+            // A pending sibling may still provide distinct content at a later natural boundary.
+            if (settled.every(Boolean)) {
+              note(ctx, !delivered.trim() ? 'Reflect returned nothing; not injected' : 'Reflect repeated an earlier injection; not injected');
+              stopPending();
+            }
+            return;
           }
           trace.chars = delivered.length;
           p.message = { customType: CONTEXT_TYPE, content, display: true, details: { hindsight: { echoTexts: echoes, trigger, deliveryId: p.id } } };
-          note(ctx, failures.length ? `${failures.length} Reflect failed; partial context ready, retrieval paused` : 'context ready for the same request');
-        }).catch(error => {
-          if (pending === p) { fail(ctx, generation, safeError(error)); stopPending(); }
+        };
+        const requests = targets.map(async (t, i) => {
+          const local = new AbortController();
+          const clear = timer(p, () => local.abort(), Math.min(BACKGROUND_MAX_MS, Math.max(100, t.cfg.reflectTimeoutMs)));
+          stops.push(() => { clear(); local.abort(); });
+          const client = new HindsightClient({ apiUrl: t.cfg.apiUrl, apiToken: t.cfg.apiToken, bank: t.bank,
+            observationScopes: t.cfg.observationScopes, signal: AbortSignal.any([p.controller.signal, local.signal]), guard: p.fresh, fetch: options.fetch });
+          let outcome: PromiseSettledResult<string>;
+          try { outcome = { status: 'fulfilled', value: redact(await client.reflect(query, 'low')).trim() }; }
+          catch (reason) { outcome = { status: 'rejected', reason }; }
+          finally { clear(); }
+          // Cancelling unused siblings after selection is not a service failure or another delivery.
+          if (pending !== p || p.staged || p.released) return;
+          try {
+            p.fresh(); settled[i] = outcome;
+            if (outcome.status === 'rejected') fail(ctx, generation, 'Reflect failed or deadline exceeded');
+            else if (outcome.value) note(ctx, 'context available for the next same-request boundary');
+            if (settled.every(s => s?.status === 'rejected')) stopPending();
+          } catch (error) { if (pending === p) { fail(ctx, generation, safeError(error)); stopPending(); } }
         });
-        p.work = retrievalWork;
-        await wait(p, retrievalWork, REFLECT_MAX_MS);
+        p.work = Promise.all(requests).then(() => {});
+        await wait(p, p.work, REFLECT_MAX_MS);
         if (pending !== p) return undefined;
-        p.fresh();
-        if (p.message) { p.released = true; note(ctx, Date.now() < pausedUntil ? 'foreground context injected; Reflect failed, retrieval paused' : 'foreground context injected'); return { message: p.message }; }
+        p.fresh(); p.prepare();
+        if (pending !== p) return undefined;
+        if (p.message) { p.released = true; p.stopRequests(); note(ctx, Date.now() < pausedUntil ? 'foreground context injected; Reflect failed, retrieval paused' : 'foreground context injected'); return { message: p.message }; }
         note(ctx, 'Reflect pending in background; first answer may not use memory');
       } catch (error) { fail(ctx, generation, safeError(error)); stopPending(); }
       finally { log(ctx, { event: 'retrieval', ...trace, outcome: retrieval, ms: Date.now() - started }); }
@@ -425,12 +447,15 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     pi.on('turn_end', (event, ctx) => {
       bindRun(ctx);
       const p = pending;
-      if (!p?.message || p.released || p.staged || !p.origin || event.outcome !== 'completed' || !event.toolResults.length ||
+      if (!p || p.released || p.staged || event.outcome !== 'completed' || !event.toolResults.length ||
         event.context.pendingMessages.some(m => m.role === 'user')) return;
       try {
-        p.fresh();
-        if (Date.now() >= p.deadline || injections(ctx.sessionManager.getBranch()).length >= BRANCH_INJECTIONS) { stopPending(); return; }
-        p.staged = true; p.message.details.hindsight.late = true;
+        p.fresh(); // also binds a user entry persisted after Reflect became available
+        if (!p.origin) return;
+        if (Date.now() >= p.deadline || injectionCount(ctx.sessionManager.getBranch()) >= BRANCH_INJECTIONS) { stopPending(); return; }
+        p.prepare();
+        if (!p.message) return;
+        p.staged = true; p.message.details.hindsight.late = true; p.stopRequests();
         note(ctx, 'late context staged; awaiting a natural same-request model turn');
         return { entries: [{ type: 'custom_message' as const, ...p.message }] }; // never request continuation
       } catch { stopPending(); }
@@ -445,21 +470,26 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         if (invalidated.has(key)) return false;
         if (!entry.details?.hindsight?.late || state.released.has(key)) return true;
         const p = pending;
+        const discard = () => {
+          if (p?.id === key) stopPending();
+          note(ctx, 'late context discarded; not released');
+          return false;
+        };
         try {
-          if (!p || p.id !== key || !p.staged || !p.origin || Date.now() >= p.deadline || ctx.signal?.aborted) return false;
+          if (!p || p.id !== key || !p.staged || !p.origin || Date.now() >= p.deadline || ctx.signal?.aborted) return discard();
           p.fresh();
           // Compaction/context edits must not remove the originating request from effective context.
           const origin = branch.find(e => e.id === p.origin);
-          if (origin?.type !== 'message' || origin.message.role !== 'user') return false;
+          if (origin?.type !== 'message' || origin.message.role !== 'user') return discard();
           const originalMessage = origin.message;
           if (!event.messages.some(m => m.role === 'user' && m.timestamp === originalMessage.timestamp &&
-            JSON.stringify(m.content) === JSON.stringify(originalMessage.content))) return false;
+            JSON.stringify(m.content) === JSON.stringify(originalMessage.content))) return discard();
           pi.appendEntry(DELIVERY_TYPE, { action: 'release', id: p.id });
           p.released = true;
           note(ctx, 'late context released to model context (use not verified)');
           log(ctx, { event: 'retrieval', outcome: 'late_released', chars: p.message?.content.length });
           return true;
-        } catch { return false; }
+        } catch { return discard(); }
       });
       return { messages };
     });
