@@ -1,0 +1,25 @@
+{
+  "package": "@vectorize-io/hindsight-coding-agents",
+  "version": "0.7.0",
+  "commit": "0c0869b7321c836d4f902d1f6ef8b5c8b432a2c4",
+  "originalSha256": {
+    "uuid.ts": "5b5e7494982632c83bc86364cc3177469b97cc4392071a18d7076bde632304ac",
+    "retain-stamp.ts": "2d0f6d15595cbbf2f2edcb4e4183279d322a68123dd4e21f54a7b1d3b16dcf22",
+    "template.ts": "46083e83e5d1f8eb53d6f4bbdb085bd2feaf3fa8b7b009dc1508ab8a5e9ad241",
+    "bank.ts": "a9c26bccb20a37a146981703ed0b6818fae11e65ab898b6ede65091be1a92452",
+    "retain-cursor.ts": "58ad1d6cdd6bb58996fa496bf84176c8ab09a6f8510b21742c0dca76856f89bb",
+    "config.ts": "932520cd71dee7e6be5553841a81dbd7b90524cf585c3c344bc2071d9bfcae9e",
+    "git-layout.ts": "2f4be171b6252d41cb0d9582c0879cca92206e28ca82ea6a24c187ce68bafc19",
+    "chat.ts": "851d3dfffc7824e2cd6abe230266f858f2d394748e864eacf6698dedef79f1ec",
+    "missions.ts": "55ac41ea6c4492ffb2229e3c4b3bee75f38e3b0483e1a2184acf62eb20221c2d",
+    "hindsight.ts": "fdbdee830b90b57d578f2c45bddffe9e137aba440330efeb357808cf57819f47",
+    "seed.ts": "47b6e3e2ace4cd4cf7bc5559c0c672d032f63a0a0f26eb3ca71cc0fe312d5615",
+    "knowledge-tools.ts": "9dd6a69102e678777efbffc9819ed166a7b928382406a0047bf1c673926b78b8",
+    "transcript-util.ts": "9502b959b1e23ca49320369f6f1543ec8d2e5d1d23eb354917a381057470e156"
+  },
+  "apiEvidence": {
+    "version": "0.10.1",
+    "artifact": "/tmp/hs-openapi.json",
+    "sha256": "9d46af7f5237c044fbdac0cd331c1aad0354f9718a4debcb11c1e68f1f0c2f49"
+  }
+}

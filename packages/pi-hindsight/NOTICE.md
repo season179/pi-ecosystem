@@ -1,0 +1,26 @@
+# Provenance and local patches
+
+Derived from **@vectorize-io/hindsight-coding-agents 0.7.0**, upstream commit
+`0c0869b7321c836d4f902d1f6ef8b5c8b432a2c4`, MIT, Copyright 2025 Vectorize AI, Inc.
+Repository: https://github.com/vectorize-io/hindsight/tree/0c0869b7321c836d4f902d1f6ef8b5c8b432a2c4/hindsight-integrations/coding-agents
+Original file SHA-256 values: `src/upstream/provenance.json`. The MIT permission and copyright notice are included in `LICENSE`.
+Local adapter/tests: Copyright 2026 Season Saw, MIT. Credential-redaction patterns and synthetic-provider testing approach reuse this repository's MIT pi-memory patterns, not its runtime or stores.
+
+## Why source excerpts
+
+The published root exports an OpenCode plugin; `dist/pi.js` exports only the complete Pi factory. Config, resolver, client and cursor are internal to its self-contained bundle. Invoking that factory starts upstream lifecycle/seeding and exposes more tools than this stage permits. There is no supported exported core seam to wrap. This package therefore carries the smallest source pieces needed for the shared configuration/routing contract and selected operations, rather than evaluating bundled dist or importing the entire runtime and its dependencies.
+
+## Vendored scope and changes
+
+- `config.ts`, `bank.ts`, `git-layout.ts`, `template.ts`, `retain-stamp.ts`, `uuid.ts`, `retain-cursor.ts`: official source with relative ESM `.js` imports and provenance headers. Config-only dependencies were extracted to `defaults.ts`; no seed/missions execution is imported.
+- Config parsing fails closed on unreadable/malformed/non-object JSON and malformed numeric environment settings. Local endpoint provenance follows the official layers and bank overrides: only an explicitly supplied effective URL or deliberately selected Cloud/daemon endpoint permits HTTP. Implicit Cloud fallback is blocked. Upstream's permissive defaults must not redirect an activated session after a bad config edit. `log.ts`/`diag.ts` are deliberately inert (no config values, transcript logging, or telemetry files).
+- `chat.ts`: only `TransportTurn`, `withRefId`, `renderSessionJsonl`. No historical import/backfill path.
+- `client.ts`: selected HTTP serialization/Reflect/page-read methods and `shapePage` derived from `core/hindsight.ts` and `core/knowledge-tools.ts`. Added cancellation, bounded response bodies, scope guards, sanitized errors, operation/document reads, and scoped fact GET/PATCH. Removed setup, daemon lifecycle, retries, drain loops, Recall and destructive endpoints. Retain always explicitly appends and requires an acknowledged deterministic operation ID.
+- Retention uses the official fingerprint planner/UUID scheme, but **never executes its replacement plan**. First capture appends with the REF-ID header. A small cursor/operation ID is persisted in Pi custom entries before sending. Later appends require completed extraction and a matching remote document prefix. Missing/failed/unknown operations are not retried. No pending-payload store/recovery framework.
+- The Pi adapter uses persisted active-branch originals at `agent_settled`, not official run-local `agent_end.messages`. It excludes raw tools/thinking/system/custom/summary messages, honors context edits, preserves source IDs/roles/timestamps, redacts and strips known injected blocks. The structural tag set extends `core/transcript-util.ts`; exact echo exclusion is chronological and assistant-only after each memory result, never retroactive or applied to primary user evidence. It is not a semantic echo classifier.
+
+## API evidence and limits
+
+Fact curation and operation/document response shapes were checked against the locally cached **Hindsight API 0.10.1 OpenAPI**, `/tmp/hs-openapi.json` (also `/tmp/hindsight-guide-openapi.json`); no live calls were used. The fact endpoint is GET/PATCH `/v1/default/banks/{bank_id}/memories/{memory_id}`. PATCH accepts `text`, `state: invalidated|valid`, and `reason`; only world/experience facts are curated. Single-fact permanent DELETE is absent. Bank/document/derived-observation deletes are not substitutes and are not implemented.
+
+The retained upstream defect evidence at `/tmp/hindsight-retain-repro/{report.md,repro.mjs}` was inspected read-only and remains unchanged. Its historical VM approach is not used by production or these tests.

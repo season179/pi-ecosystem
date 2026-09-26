@@ -1,6 +1,6 @@
 # pi-hindsight: replacement and shared-memory plan
 
-Current direction: 2026-09-26. **Planning only; implementation and migration are not authorized.**
+Current direction: 2026-09-26. **Stages 1–2 are complete for this repository. Stage 3 is implemented, tested and installed only in an isolated staging profile with memory off—not activated in the real profile. Later stages and migration require separate approval.** See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
 
 The selected target is a new, thin **pi-hindsight** package derived from the official Pi integration, replacing pi-memory after verification. Claude Code uses the official integration. Both share one bank per repository; Jev gates proactive retrieval, and telemetry measures usefulness as well as operation health.
 
@@ -10,17 +10,17 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 
 - Selected goals: official-derived Pi replacement, official Claude integration, per-repository sharing, coherent automatic Retain, deliberate Reflect and page search/read, Jev-gated additional Reflect, scoped corrections, and migration of both legacy sources.
 - The sequence below combines those goals with recommended safeguards and verification steps. Exact implementation, defaults and policies are not all user-approved; unresolved choices are listed explicitly.
-- Documentation consolidation and separate commits of this plan and the existing pi-memory changes are authorized. Execution of the replacement/migration plan requires separate approval.
-- No installation, migration, uninstall, bank mutation, provider/config/version change, network operation, push or release is authorized by this plan. No instruction files are edited now.
+- Documentation and existing pi-memory changes were committed separately. Stages 1–3 were subsequently authorized: audit/protection, routing plus empty-bank creation for this repository, and replacement-package implementation with isolated staging verification. Live cutover and later stages require separate approval.
+- Beyond the completed scoped work above, this plan alone does not authorize further installation, migration, uninstall, bank mutation, provider/config/version change, network operation, push or release. No instruction files were edited.
 
 ## Current state and verification limits
 
 - Official `@vectorize-io/hindsight-coding-agents` **0.7.0** is installed for Claude: staged hooks, skill and user-scope MCP registration are present.
 - The missing `~/.hindsight/coding-agent.json` was fixed in a separate authorized repair: self-hosted `http://127.0.0.1:8888`, file mode **0600**. Claude hook/MCP settings needed no repair.
-- The actual staged resolver maps this repository root and its `packages` subdirectory to `coding-agent::pi-ecosystem`. The default uses the repository basename and resolves linked worktrees; this does not prove collision-safe routing for every repository.
+- An explicit official `mapPathToBank` entry routes this repository (root, subdirectories, linked worktrees) to the empty bank `coding-agent::season179:pi-ecosystem`. Other repositories still use the basename default, which is not collision-safe.
 - Read-only API checks reported healthy service, connected database and API **0.10.1**. Registered MCP initialization and tools-list passed; no tool calls were made.
 - **Actual hooks, Retain and Reflect have not been exercised.** A fresh Claude session/MCP reconnect is still needed for end-to-end verification. Normal sessions can retain history, manage banks/pages, ingest Git history, survey code and update the runtime; review those defaults before testing.
-- pi-memory remains installed. No pi-hindsight package or migration exists yet; the existing mixed-project `pi-memory` bank is untouched.
+- pi-memory remains the active installed writer. `packages/pi-hindsight` now exists and passed an isolated local install plus real Pi 0.87.1 RPC/SDK loading with `--hindsight-mode off`; no real-profile activation or migration occurred. The old mixed-project bank was not modified by this implementation.
 - The service uses pg0-managed real **PostgreSQL 18.1 on port 5433**, separate from Homebrew PostgreSQL 18 on 5432. No database move is needed; 8888 is the integration API, not a database port.
 - Local repair evidence: `/tmp/hindsight-claude-fix-report.md` (ephemeral report; the durable verified facts are summarized above). No live checks are repeated by this documentation task.
 
@@ -28,13 +28,17 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 
 ### 1. Back up, audit sources and reproduce the upstream defect
 
+**Completed 2026-09-26:** private local backup, successful isolated database restore, verified file hashes and synthetic adapter-boundary reproduction. See [results and remaining risks](HINDSIGHT-DATA-AUDIT.md). Content-level replay suitability remains a migration prerequisite.
+
 - Back up curated files, relevant configuration and the old bank before any approved data changes. Inventory available source documents/host sessions, dates, routing, corrections, invalidations and deletions without replaying them.
 - Recheck the chosen upstream version and pin the implementation baseline; do not assume the audited defect persists in newer versions.
 - The [comparison's source trace](HINDSIGHT-INTEGRATION-COMPARISON.md#pi-blocker-run-local-messages-used-as-a-cumulative-document) concerns integration **0.7.0 / Pi 0.87.1**: run-local `agent_end.messages` can replace a cumulative Hindsight conversation document. This risks retained evidence, not deletion of local Pi chat history.
-- Reproduce with a deterministic multi-run mocked-client regression before fixing it, then recheck the pinned upstream behavior. An executable reproduction has not yet been run.
+- A deterministic multi-run mocked-client regression now reproduces the defect in the source, published and installed 0.7.0 adapters. Positive controls passed; the desired history invariant fails as expected. No fix or live-server extraction test has been performed; recheck the selected baseline before implementation.
 - Audit source coverage first: replay cannot recover context that selected spans never captured unless original host sessions still exist.
 
 ### 2. Establish one shared bank per repository
+
+**Completed 2026-09-26 for this repository only:** explicit mapping and empty bank created, with no content, pages or model calls. Other repositories and cross-project routing remain open. See the [routing record](HINDSIGHT-BANK-ROUTING.md).
 
 - Repository A: Pi + Claude → bank A; repository B: Pi + Claude → bank B. Do not split banks by harness or place every repository in one bank.
 - Define compatible routing/naming, worktree/subdirectory handling, source/document identities, tags, observation scopes and Knowledge Page configuration across both integrations.
@@ -43,6 +47,10 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 - Keep the old mixed-project bank unchanged and outside unrestricted official-integration access. Cross-project/global knowledge routing is a separate unresolved decision.
 
 ### 3. Build the thin, pinned official-derived Pi package
+
+**Implemented and staged 2026-09-26:** `@season179/pi-hindsight@26.9.0`, pinned official 0.7.0 core with license/provenance. Build/typecheck and 18 package tests passed; 58 existing memory tests also passed. Real Pi 0.87.1 loaded the compiled package from an isolated local installation with memory explicitly off and no package network attempts. Product default is **read-write with automatic capture**, but no real-profile installation/activation has occurred while the old writer is active.
+
+The [package README](../packages/pi-hindsight/README.md) records capability limits: append-only persisted history and small durable cursor; ambiguous/divergent/forked histories, unknown writes and unsafe replay fail closed; structural/chronological echo filtering only; fact edit/invalidate/revert, **no permanent single-fact DELETE** in the verified API; source/derivative freshness is not guaranteed. An explicit endpoint is required before any memory access. No Jev gate, automatic injection, page setup, new telemetry or migration was implemented in this stage.
 
 - Keep upstream changes small and reviewable; carry the history fix and required safeguards rather than rebuilding an unrelated adapter.
 - Automatically Retain coherent conversation updates after completed replies. Hindsight extracts memories; Jev no longer selects spans for automatic retention.
