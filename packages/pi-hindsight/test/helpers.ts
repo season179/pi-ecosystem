@@ -104,14 +104,16 @@ export function extensionFixture(manager: SessionManager, server: Server, option
   };
 }
 
-export async function sdk(root: string, server: Server, sessionManager: SessionManager, replies: AssistantMessage[], options: ExtensionOptions = {}) {
+export async function sdk(root: string, server: Server, sessionManager: SessionManager, replies: AssistantMessage[], options: ExtensionOptions = {}, tools: ToolDefinition[] = []) {
   const requests: unknown[] = [];
   const agentDir = join(root, 'agent'); mkdirSync(agentDir, { recursive: true });
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const model: Model<Api> = { id: 'fake', name: 'fake', api: 'openai-completions', provider: 'offline-hindsight',
     baseUrl: 'https://offline.invalid', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 1024,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-  const provider = (pi: ExtensionAPI) => pi.registerProvider('offline-hindsight', {
+  const provider = (pi: ExtensionAPI) => {
+    for (const tool of tools) pi.registerTool(tool);
+    pi.registerProvider('offline-hindsight', {
     baseUrl: model.baseUrl, api: model.api, apiKey: 'fake-not-a-credential', models: [model],
     streamSimple(_model, context) {
       requests.push(JSON.parse(JSON.stringify(context.messages)));
@@ -122,13 +124,14 @@ export async function sdk(root: string, server: Server, sessionManager: SessionM
       return stream;
     },
   });
+  };
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: null, allowModelNetwork: false });
   const services = await createAgentSessionServices({ cwd: root, agentDir, modelRuntime,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, defaultProjectTrust: 'always', enableAnalytics: false, enableInstallTelemetry: false }, { projectTrusted: true }),
     resourceLoaderOptions: { noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: config(root), globalConfigPath: join(root, 'no-global.json'), fetch: server.fetch, ...options })] },
+      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: options.configPath ?? config(root), globalConfigPath: join(root, 'no-global.json'), fetch: server.fetch, ...options })] },
   });
-  const { session } = await createAgentSessionFromServices({ services, sessionManager, model, thinkingLevel: 'off', tools: [] });
+  const { session } = await createAgentSessionFromServices({ services, sessionManager, model, thinkingLevel: 'off', tools: tools.map(t => t.name) });
   await session.bindExtensions({ mode: 'print' });
   return { session, requests, async dispose() { session.dispose(); } };
 }

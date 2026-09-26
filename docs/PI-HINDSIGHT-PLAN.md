@@ -1,6 +1,8 @@
 # pi-hindsight: replacement and shared-memory plan
 
-Current direction: 2026-09-26. **Stages 1–2 are complete for this repository. Stages 3–4 are implemented and tested only in isolated staging profiles with synthetic services—not activated in the real profile. Later stages and migration require separate approval.** See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
+Current checkpoint: 2026-09-26. **Stages 4–8 are authorized and in progress, not complete.** The user personally applied 359 migration items (10 quarantined) and restarted the service with global/retain concurrency 4/2. The replacement Pi package and latest Claude source-curation guard are locally installed; the old writer is disabled but its package/data remain. Two migration parents have failed on provider HTTP 429/code 1302. Full exact/extracted verification and live host acceptance are outstanding; old-package removal is blocked. See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
+
+Earlier dated implementation and baseline sections below are historical evidence, not current installation/authorization claims. **Do not repeat real migration apply, restart/signal the service, mutate production operations, or delete original data/backups under this plan.** Recovery needs coordinator authorization. While the provider is throttled, further live model tests are paused; offline/local loading checks may continue. No push is authorized.
 
 The selected target is a new, thin **pi-hindsight** package derived from the official Pi integration, replacing pi-memory after verification. Claude Code uses the official integration. Both share one bank per repository; Jev gates proactive retrieval, and telemetry measures usefulness as well as operation health.
 
@@ -13,7 +15,18 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 - Documentation and existing pi-memory changes were committed separately. Stages 1–3 were subsequently authorized: audit/protection, routing plus empty-bank creation for this repository, and replacement-package implementation with isolated staging verification. Live cutover and later stages require separate approval.
 - Beyond the completed scoped work above, this plan alone does not authorize further installation, migration, uninstall, bank mutation, provider/config/version change, network operation, push or release. No instruction files were edited.
 
-## Current state and verification limits
+## Current completion status and verification limits
+
+- **Implemented, verified offline:** bounded automatic background retrieval. Initial foreground wait ≤6 seconds; periodic gate/key/Jev work ≤2 seconds, then Reflect foreground ≤6 seconds. The same requests may continue for at most 90 seconds total from dispatch, honoring lower configured deadlines. One owned opportunity, low budget, capped attempts, no retry/Recall fallback or induced turn.
+- **Delivery:** ready late context is staged after a natural tool-bearing turn, then released only into a fresh same-request model context. A receipt means released to context, not provider use. New prompts never receive unreleased old results. Short one-answer requests can finish without memory.
+- **Evidence safety:** staged drafts do not strip assistant evidence. Echo provenance starts at the chronological release receipt. Local curation cancels pending retrieval separately from PATCH and persistently filters prior automatic injections, retaining historical echo provenance without rewriting sources or claiming universal deletion.
+- **Installed:** `@season179/pi-hindsight@26.9.0` from the local workspace, plus the newest bundled Claude guard. Existing host sessions were not reloaded. Pi-only `harnesses.pi.reflectTimeoutMs: 90000` is set in both shared/project and global config files (0600); this changes neither foreground waiting nor Claude/service model settings.
+- **Verified loading:** fresh Pi 0.87.1 SDK manifest loading in off/read-only/read-write modes, five tools, no load errors, off/read-only mutation refusals, zero fetch/model calls. Installed guard + real pinned official Stop hook against an isolated loopback mock passed cutoff, forwarding and curated-source refusal. These are host/code checks, **not live memory-service acceptance**.
+- **Tests:** 54 package tests, typecheck, build and offline pack dry run pass. Independent final code review remains outstanding. Live natural-turn automatic usefulness and final Pi↔Claude/global/history/page/correction acceptance remain unverified for this rollout.
+- **Migration:** real manifest `~/.hindsight/migrations/2026-09-26T145053594Z-apply/manifest.jsonl`. Coordinator owns full readonly verification and failed-operation diagnosis. Two failed parents exhausted child retries on provider rate capacity; no agent repair/resubmission performed by this implementation. Prior synthetic repeat-import passed; a real repeat apply has **not** been performed and must not be claimed.
+- **Preserved:** original curated files, legacy bank, backups and disabled pi-memory package. Backup of completion config/guard/settings changes: `~/.hindsight/backups/20260926T160100Z-completion/`. Old-package uninstall requires all 359 exact/extracted plus coordinator final review.
+
+## Historical pre-cutover state
 
 - Official `@vectorize-io/hindsight-coding-agents` **0.7.0** is installed for Claude: staged hooks, skill and user-scope MCP registration are present.
 - The missing `~/.hindsight/coding-agent.json` was fixed in a separate authorized repair: self-hosted `http://127.0.0.1:8888`, file mode **0600**. Claude hook/MCP settings needed no repair.
@@ -158,7 +171,9 @@ Disposable, ownership-marked banks only, all deleted and verified absent afterwa
   - Plain Reflect on the migrated banks returned the expected facts (37–44 s) and never the retired value.
 - **Apply gate** (`cfad3b5`): `--apply` requires `--expect <reviewed dry-run manifest>`. It refuses before any write if the recomputed plan differs in any field.
 
-## Decisions still required before rollout
+## Historical open decisions (resolved rollout choices recorded above)
+
+Global routing, worker/off controls, capture cutoffs, source-curation guards, explicit page setup and local cutover sequence have since been decided and implemented. Remaining acceptance gates are migration recovery/completeness, independent final code review and live host usefulness under available provider capacity. The original decision checklist follows for traceability:
 
 - Global/cross-project knowledge destination and retrieval scope.
 - Worker capture/exclusion and Claude-path redaction; detailed transcript boundaries and processing limits.

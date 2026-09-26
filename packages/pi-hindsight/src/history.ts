@@ -2,7 +2,7 @@ import { openSync, closeSync, readFileSync, fstatSync } from 'node:fs';
 import type { FileEntry, ExtensionContext, SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { TransportTurn } from './upstream/chat.js';
 import { redact, stripMemory, textOf } from './safety.js';
-import { CONTEXT_TYPE } from './retrieval.js';
+import { CONTEXT_TYPE, DELIVERY_TYPE, type Delivery } from './retrieval.js';
 
 export const HISTORY_BYTES = 256 * 1024;
 export const SESSION_BYTES = 8 * 1024 * 1024;
@@ -45,6 +45,9 @@ export function readHistory(manager: ExtensionContext['sessionManager']): Histor
     if (e.type === 'context_edit') edits.set(e.targetId, e.replacement);
   }
   const echoes: string[] = [];
+  const staged = new Map<string, string[]>();
+  const addEchoes = (values: unknown): string[] => Array.isArray(values)
+    ? values.filter((text): text is string => typeof text === 'string' && text.length >= 20).map(redact) : [];
   const turns: TransportTurn[] = [];
   let lastRole = '', lastStop = '';
   for (const e of branch) {
@@ -52,9 +55,17 @@ export function readHistory(manager: ExtensionContext['sessionManager']): Histor
     const memory = e.type === 'message' && e.message.role === 'toolResult' && e.message.toolName.startsWith('hindsight_') ? e.message.details
       : e.type === 'custom_message' && e.customType === CONTEXT_TYPE ? e.details : undefined;
     if (memory !== undefined) {
-      const details = memory as { hindsight?: { echoTexts?: unknown } } | undefined;
-      if (Array.isArray(details?.hindsight?.echoTexts)) for (const text of details.hindsight.echoTexts) {
-        if (typeof text === 'string' && text.length >= 20) echoes.push(redact(text));
+      const details = memory as { hindsight?: { echoTexts?: unknown; late?: boolean; deliveryId?: string } };
+      const texts = addEchoes(details.hindsight?.echoTexts);
+      if (details.hindsight?.late) {
+        if (details.hindsight.deliveryId) staged.set(details.hindsight.deliveryId, texts);
+      } else echoes.push(...texts); // compatible with existing fast injections and tool results
+    }
+    if (e.type === 'custom' && e.customType === DELIVERY_TYPE) {
+      const delivery = e.data as Delivery | undefined;
+      // Register provenance at RELEASE, never retroactively at staging. Invalidation does not erase provenance.
+      if (delivery?.action === 'release') {
+        echoes.push(...(staged.get(delivery.id) ?? [])); staged.delete(delivery.id);
       }
     }
     if (e.type !== 'message' || (e.message.role !== 'user' && e.message.role !== 'assistant')) continue;

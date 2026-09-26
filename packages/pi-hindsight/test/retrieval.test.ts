@@ -65,7 +65,7 @@ describe('automatic retrieval', () => {
     } finally { await subject.dispose(); }
   });
 
-  it('real Pi: pre-run waits stay bounded even when fetches ignore abort, and a failure pauses later retrieval', { timeout: 30_000 }, async () => {
+  it('real Pi: foreground detaches from abort-ignoring Reflect; settlement cancels without a failure pause; Jev stays bounded', { timeout: 30_000 }, async () => {
     const r = root(), server = new Server(), manager = persisted(r), agentDir = join(r, 'agent');
     typesafe(agentDir, { timeoutMs: 30_000 }); process.env.TYPESAFE_API_KEY = 'test-typesafe-key';
     server.before = c => c.url.pathname.endsWith('/reflect') ? new Promise<void>(() => {}) : undefined;
@@ -76,7 +76,7 @@ describe('automatic retrieval', () => {
       await subject.session.prompt('official 20 s default is capped'); // Reflect <= 6 s
       expect(Date.now() - started).toBeGreaterThanOrEqual(5_500); expect(Date.now() - started).toBeLessThan(7_500);
       for (const n of [2, 3, 4, 5]) await subject.session.prompt(`prompt ${n}`);
-      expect(gate.calls).toHaveLength(0); expect(reflects(server)).toHaveLength(1); expect(contexts(manager)).toHaveLength(0);
+      expect(gate.calls).toHaveLength(1); expect(reflects(server)).toHaveLength(2); expect(contexts(manager)).toHaveLength(0);
       await subject.dispose();
       const other = persisted(r); for (let i = 0; i < 4; i++) exchange(other, `earlier ${i}`);
       const hung = jev(['hang']);
@@ -84,7 +84,7 @@ describe('automatic retrieval', () => {
       started = Date.now();
       await subject.session.prompt('Jev capped at 2 s');
       expect(Date.now() - started).toBeGreaterThanOrEqual(1_800); expect(Date.now() - started).toBeLessThan(3_500);
-      expect(hung.calls).toHaveLength(1); expect(reflects(server)).toHaveLength(1);
+      expect(hung.calls).toHaveLength(1); expect(reflects(server)).toHaveLength(2);
     } finally { await subject.dispose(); }
   });
 
@@ -205,7 +205,7 @@ describe('global cross-project memory', () => {
     const one = extensionFixture(persisted(r), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });
     const injected = await one.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first' } as any);
     expect(injected.message.details.hindsight.echoTexts).toEqual([server.reflectText]);
-    expect(one.status).toContain('1 Reflect failed, retrieval paused');
+    expect(one.status).toContain('Reflect failed, retrieval paused');
     writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', template: 'x', mapPathToBank: { '/': 'x' } }));
     server.before = undefined;
     const two = extensionFixture(persisted(root()), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });

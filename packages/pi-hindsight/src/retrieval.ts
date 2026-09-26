@@ -2,12 +2,15 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { noul, TypeSafeClient, type Fetch } from '@typesafe-ai/sdk';
 import type { CustomMessageEntry, SessionEntry } from '@earendil-works/pi-coding-agent';
-import { redact, stripMemory, textOf } from './safety.js';
+import { hash, redact, stripMemory, textOf } from './safety.js';
 
 // Automatic pre-run retrieval. Jev only decides WHEN to ask Reflect; it never
 // sees, filters or scores the answer and never affects capture. Constants are
 // provisional until usefulness is evaluated (plan stage 6).
 export const CONTEXT_TYPE = 'pi-hindsight-context';
+export const DELIVERY_TYPE = 'pi-hindsight-delivery';
+export const BACKGROUND_MAX_MS = 90_000;
+export type Delivery = { action: 'release'; id: string } | { action: 'invalidate'; ids: string[] };
 export const PERIODIC_EVERY = 4;
 export const GATE_THRESHOLD = 0.7;
 export const GATE_MAX_MS = 2_000;
@@ -21,7 +24,32 @@ const JEV_URL = 'https://api.typesafe.ai';
 const QUERY_CHARS = 4_000, MESSAGE_CHARS = 1_500;
 
 export type Trigger = 'initial' | 'periodic';
-export type ContextEntry = CustomMessageEntry<{ hindsight?: { echoTexts?: unknown } }>;
+export type ContextEntry = CustomMessageEntry<{ hindsight?: { echoTexts?: unknown; deliveryId?: string; late?: boolean } }>;
+/** Legacy/fast entries need no release receipt. Late entries become evidence provenance only at release. */
+export function deliveryKey(entry: Pick<ContextEntry, 'content' | 'details'>): string {
+  return entry.details?.hindsight?.deliveryId ?? hash(JSON.stringify(entry.content));
+}
+export function deliveryState(branch: SessionEntry[]) {
+  const released = new Set<string>(), invalidated = new Set<string>();
+  for (const e of branch) if (e.type === 'custom' && e.customType === DELIVERY_TYPE) {
+    const d = e.data as Delivery | undefined;
+    if (d?.action === 'release' && typeof d.id === 'string') released.add(d.id);
+    if (d?.action === 'invalidate' && Array.isArray(d.ids)) for (const id of d.ids) if (typeof id === 'string') invalidated.add(id);
+  }
+  return { released, invalidated };
+}
+/** Hash only the original input entries, applying current edits; new natural turns do not change it. */
+export function inputSnapshot(branch: SessionEntry[], ids: string[]): string {
+  const edits = new Map<string, unknown>();
+  for (const e of branch) if (e.type === 'context_edit') edits.set(e.targetId, e.replacement);
+  const entries = new Map(branch.map(e => [e.id, e]));
+  return JSON.stringify(ids.map(id => {
+    const e = entries.get(id);
+    const content = e?.type === 'message' && 'content' in e.message ? e.message.content
+      : e?.type === 'custom_message' ? [e.content, e.details] : null;
+    return [id, edits.has(id) ? edits.get(id) : content];
+  }));
+}
 
 export function injections(branch: SessionEntry[]): ContextEntry[] {
   return branch.filter((e): e is ContextEntry => e.type === 'custom_message' && e.customType === CONTEXT_TYPE);
@@ -45,7 +73,9 @@ export function gateState(branch: SessionEntry[], query: string) {
     const text = redact(stripMemory(textOf(edit ? edit.content : e.message.content))).trim().slice(0, MESSAGE_CHARS);
     if (text) recent.push({ role: e.message.role, text });
   }
-  const provided = injections(branch).flatMap(e => e.details?.hindsight?.echoTexts ?? [])
+  const { released, invalidated } = deliveryState(branch);
+  const provided = injections(branch).filter(e => !invalidated.has(deliveryKey(e)) && (!e.details?.hindsight?.late || released.has(deliveryKey(e))))
+    .flatMap(e => e.details?.hindsight?.echoTexts ?? [])
     .filter((t): t is string => typeof t === 'string').slice(-2).map(t => redact(t).slice(0, MESSAGE_CHARS));
   return { current_request: query, recent_messages: recent.slice(-6), memory_already_provided: provided };
 }
