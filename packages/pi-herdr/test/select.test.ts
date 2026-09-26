@@ -295,11 +295,11 @@ describe("Jev transport", () => {
 	});
 
 	const configure = () => {
-		writeFileSync(join(dir, "typesafe.json"), JSON.stringify({ model: "jev-1.13.0", timeoutMs: 2000, apiKeyFile: "typesafe.key", memory: { enabled: true } }));
+		writeFileSync(join(dir, "typesafe.json"), JSON.stringify({ model: "jev-1.13.0", timeoutMs: 30000, apiKeyFile: "typesafe.key", memory: { enabled: true } }));
 		writeFileSync(join(dir, "typesafe.key"), `${KEY}\n`);
 	};
 
-	it("reads the shared config and key file, pins the official endpoint and retries at most once", async () => {
+	it("reads the shared config (30 s maximum timeout) and key file, pins the official endpoint and retries at most once", async () => {
 		configure();
 		const calls: Array<{ url: string; auth: string | null; body: any }> = [];
 		const fetch = vi.fn(async (url: string, init?: RequestInit) => {

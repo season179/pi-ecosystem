@@ -65,7 +65,7 @@ The workers are:
 
 A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively.
 
-Jev settings follow the shared `~/.pi/agent/typesafe.json` convention (`model`, default `jev-1.13.0`; `timeoutMs`, default 3000 and at most 10000; `apiKeyFile`). `TYPESAFE_API_KEY` takes precedence. Requests go only to `https://api.typesafe.ai/v1/systemone` with bounded bodies and at most one retry. The whole call has a 30-second deadline and supports cancellation. Error messages are fixed and never include keys or provider bodies.
+Jev settings follow the shared `~/.pi/agent/typesafe.json` convention (`model`, default `jev-1.13.0`; `timeoutMs`, default 3000 and at most 30000; `apiKeyFile`). `TYPESAFE_API_KEY` takes precedence. Requests go only to `https://api.typesafe.ai/v1/systemone` with bounded bodies and at most one retry. The whole call has a 30-second deadline and supports cancellation; a `timeoutMs` near 30000 leaves no time for the retry inside it. Error messages are fixed and never include keys or provider bodies.
 
 Routing policies, `herdr_route`, `/limits` and quota caches were removed. Legacy files are ignored. Resumed sessions still filter automatic quota messages persisted by older versions.
 

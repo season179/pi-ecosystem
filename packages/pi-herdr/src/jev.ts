@@ -24,7 +24,7 @@ import {
 
 export const JEV_MODEL_DEFAULT = "jev-1.13.0";
 const JEV_TIMEOUT_MS_DEFAULT = 3_000;
-const JEV_MAX_TIMEOUT_MS = 10_000;
+const JEV_MAX_TIMEOUT_MS = 30_000;
 const MODEL_PATTERN = /^[a-zA-Z0-9._-]{1,80}$/;
 const OFFICIAL_BASE_URL = "https://api.typesafe.ai";
 const OFFICIAL_ENDPOINT = `${OFFICIAL_BASE_URL}/v1/systemone`;
