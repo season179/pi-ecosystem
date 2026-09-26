@@ -1,7 +1,8 @@
 import { openSync, closeSync, readFileSync, fstatSync } from 'node:fs';
 import type { FileEntry, ExtensionContext, SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { TransportTurn } from './upstream/chat.js';
-import { redact, stripMemory } from './safety.js';
+import { redact, stripMemory, textOf } from './safety.js';
+import { CONTEXT_TYPE } from './retrieval.js';
 
 export const HISTORY_BYTES = 256 * 1024;
 export const SESSION_BYTES = 8 * 1024 * 1024;
@@ -10,11 +11,6 @@ export interface History {
   entries: SessionEntry[]; branch: SessionEntry[]; turns: TransportTurn[];
 }
 function fail(): never { throw new Error('Hindsight persisted history is missing, malformed or ambiguous; capture blocked'); }
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.filter(p => p?.type === 'text' && typeof p.text === 'string').map(p => p.text).join('\n');
-}
 export function readHistory(manager: ExtensionContext['sessionManager']): History {
   const file = manager.getSessionFile(), leaf = manager.getLeafId();
   if (!file || !leaf) throw new Error('Hindsight capture requires a persisted Pi session with a completed reply');
@@ -52,9 +48,11 @@ export function readHistory(manager: ExtensionContext['sessionManager']): Histor
   const turns: TransportTurn[] = [];
   let lastRole = '', lastStop = '';
   for (const e of branch) {
-    // Only subsequent assistant prose can echo this result; never rewrite earlier evidence.
-    if (e.type === 'message' && e.message.role === 'toolResult' && e.message.toolName.startsWith('hindsight_')) {
-      const details = e.message.details as { hindsight?: { echoTexts?: unknown } } | undefined;
+    // Tool results and automatic injections: only subsequent assistant prose can echo them; never rewrite earlier evidence.
+    const memory = e.type === 'message' && e.message.role === 'toolResult' && e.message.toolName.startsWith('hindsight_') ? e.message.details
+      : e.type === 'custom_message' && e.customType === CONTEXT_TYPE ? e.details : undefined;
+    if (memory !== undefined) {
+      const details = memory as { hindsight?: { echoTexts?: unknown } } | undefined;
       if (Array.isArray(details?.hindsight?.echoTexts)) for (const text of details.hindsight.echoTexts) {
         if (typeof text === 'string' && text.length >= 20) echoes.push(redact(text));
       }

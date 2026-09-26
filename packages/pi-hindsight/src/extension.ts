@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { Fetch } from '@typesafe-ai/sdk';
 import { Type } from '@earendil-works/pi-ai';
 import { loadConfig, applyBankConfig, type Config } from './upstream/config.js';
 import { deriveBankIdOrSkip } from './upstream/bank.js';
@@ -9,11 +10,13 @@ import { fingerprintTurns } from './upstream/retain-cursor.js';
 import { readHistory } from './history.js';
 import { CURSOR_TYPE, latestCheckpoint, lockSession, retainHistory, type Checkpoint } from './retention.js';
 import { hash, inputText, modeOf, redact, safeError, untrusted, type Mode } from './safety.js';
+import { askGate, automaticQuery, BRANCH_INJECTIONS, CONTEXT_TYPE, COOLDOWN_MS, gateState, GATE_ATTEMPTS, GATE_THRESHOLD, INJECT_CHARS,
+  GATE_MAX_MS, injections, loadGate, loadKey, REFLECT_ATTEMPTS, REFLECT_MAX_MS, triggerFor } from './retrieval.js';
 
 interface Destination { cfg: Config; bank: string; key: string }
 export interface ExtensionOptions {
   /** Test seams only; production uses official config and Pi CLI flags. */
-  configPath?: string; fetch?: typeof fetch; mode?: Mode;
+  configPath?: string; fetch?: typeof fetch; mode?: Mode; agentDir?: string; jevFetch?: Fetch;
 }
 export function createHindsightExtension(options: ExtensionOptions = {}) {
   return (pi: ExtensionAPI): void => {
@@ -24,6 +27,8 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     let work: Promise<void> | undefined;
     let busy = false;
     let status = 'no operation yet';
+    // Per extension activation (reset only by reload/restart, not session switches).
+    let reflectAttempts = 0, gateAttempts = 0, pausedUntil = 0, retrieval = 'no automatic retrieval yet';
     const notify = (ctx: ExtensionContext, text: string) => { status = text; ctx.ui.setStatus('pi-hindsight', `Hindsight: ${text}`); };
 
     function destination(ctx: ExtensionContext, write: boolean, automatic = false): Destination {
@@ -48,10 +53,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       return { cfg, bank, key: hash(JSON.stringify([cfg.apiUrl, cfg.apiToken, bank, ctx.cwd, root, ctx.sessionManager.getSessionId(), current,
         automatic ? cfg.retainSessions : null])) };
     }
-    function operation(ctx: ExtensionContext, write: boolean, signal?: AbortSignal, automatic = false) {
+    function operation(ctx: ExtensionContext, write: boolean, signal?: AbortSignal, automatic = false, timeoutMs?: number) {
       const generation = epoch;
       const target = destination(ctx, write, automatic);
-      const signals = [controller.signal, AbortSignal.timeout(automatic ? 10_000 : Math.min(330_000, Math.max(100, target.cfg.reflectToolTimeoutMs)))];
+      const signals = [controller.signal, AbortSignal.timeout(timeoutMs ?? (automatic ? 10_000 : Math.min(330_000, Math.max(100, target.cfg.reflectToolTimeoutMs))))];
       if (signal) signals.push(signal);
       if (ctx.signal) signals.push(ctx.signal);
       const combined = AbortSignal.any(signals);
@@ -178,7 +183,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       }); } });
 
     pi.registerCommand('hindsight', { description: 'Show Hindsight mode/capture status (does not enable or mutate memory)',
-      handler: async (_args, ctx) => { ctx.ui.notify(`Hindsight mode=${mode()}; ${status}`, 'info'); } });
+      handler: async (_args, ctx) => { ctx.ui.notify(`Hindsight mode=${mode()}; capture: ${status}; retrieval: ${retrieval}`, 'info'); } });
     const invalidate = () => { epoch++; controller.abort(); controller = new AbortController(); };
     pi.on('session_start', invalidate);
     pi.on('session_before_switch', invalidate);
@@ -186,6 +191,56 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     pi.on('session_shutdown', async () => {
       invalidate(); controller.abort();
       if (work) await Promise.race([work, new Promise<void>(resolve => { const t = setTimeout(resolve, 1000); t.unref(); })]);
+    });
+    const note = (ctx: ExtensionContext, text: string) => { retrieval = text; ctx.ui.setStatus('pi-hindsight-retrieval', `Hindsight retrieval: ${text}`); };
+    /** Bounded pre-run retrieval: Jev <= 2 s then Reflect <= 6 s; no retry, fallback or substitute. */
+    async function retrieve(prompt: string, ctx: ExtensionContext, generation: number) {
+      const deadline = Date.now() + GATE_MAX_MS + REFLECT_MAX_MS;
+      const branch = ctx.sessionManager.getBranch();
+      const trigger = triggerFor(branch), injected = injections(branch);
+      if (!trigger) return undefined;
+      if (injected.length >= BRANCH_INJECTIONS) return note(ctx, 'branch injection cap reached; automatic retrieval stopped for this branch');
+      if (Date.now() < pausedUntil) return note(ctx, 'paused after a service failure; not retried');
+      const query = automaticQuery(prompt);
+      if (!query) return undefined;
+      const { cfg } = destination(ctx, false);
+      if (cfg.autoInject !== 'reflect') return note(ctx, cfg.autoInject === 'none' ? 'disabled by autoInject none'
+        : `autoInject ${cfg.autoInject} unsupported; automatic retrieval off (no pages/Recall substitution)`);
+      if (reflectAttempts >= REFLECT_ATTEMPTS) return note(ctx, 'automatic Reflect attempt budget used for this activation');
+      const fail = (text: string) => { if (generation === epoch) { pausedUntil = Date.now() + COOLDOWN_MS; note(ctx, `${text}; paused 10 minutes, not retried`); } };
+      if (trigger === 'periodic') {
+        const agentDir = options.agentDir ?? getAgentDir();
+        const gate = await loadGate(agentDir);
+        if (gate.kind !== 'enabled') return note(ctx, gate.kind === 'invalid' ? 'typesafe.json invalid; periodic gate off' : 'periodic Jev gate not enabled');
+        const apiKey = await loadKey(agentDir, gate.apiKeyFile);
+        if (!apiKey) return note(ctx, 'no TypeSafe key; periodic gate off');
+        if (gateAttempts >= GATE_ATTEMPTS) return note(ctx, 'Jev attempt budget used for this activation');
+        if (generation !== epoch) return undefined;
+        gateAttempts++;
+        const decision = await askGate(gateState(branch, query), { model: gate.model, timeoutMs: gate.timeoutMs, apiKey, signal: controller.signal, fetch: options.jevFetch });
+        if (generation !== epoch || decision.kind === 'aborted') return undefined;
+        if (decision.kind === 'unavailable') return fail('Jev gate unavailable');
+        if (decision.yes < GATE_THRESHOLD) return note(ctx, 'Jev gate negative; no Reflect');
+      }
+      const timeoutMs = Math.min(REFLECT_MAX_MS, Math.max(100, cfg.reflectTimeoutMs), deadline - Date.now());
+      if (timeoutMs < 100) return note(ctx, 'pre-run deadline used; no Reflect');
+      const target = operation(ctx, false, undefined, false, timeoutMs);
+      reflectAttempts++;
+      let text: string;
+      try { text = await target.client.reflect(query, 'low'); target.guard(); }
+      catch (error) { fail(safeError(error)); return undefined; }
+      const delivered = redact(text).slice(0, INJECT_CHARS);
+      const content = untrusted(text, INJECT_CHARS);
+      if (!delivered.trim()) return note(ctx, `${trigger} Reflect returned nothing; not injected`);
+      if (injected.some(e => e.content === content)) return note(ctx, `${trigger} Reflect repeated an earlier injection; not injected`);
+      note(ctx, `${trigger} context injected`);
+      return { message: { customType: CONTEXT_TYPE, content, display: true, details: { hindsight: { echoTexts: [delivered], trigger } } } };
+    }
+    pi.on('before_agent_start', async (event, ctx) => {
+      if (mode() === 'off') return undefined;
+      const generation = epoch;
+      try { return await retrieve(event.prompt, ctx, generation) ?? undefined; }
+      catch (error) { if (generation === epoch) note(ctx, safeError(error)); return undefined; }
     });
     pi.on('agent_settled', async (_event, ctx) => {
       if (mode() !== 'read-write') return;

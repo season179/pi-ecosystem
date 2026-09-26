@@ -14,6 +14,7 @@ describe('modes, privacy and identified tools', () => {
     const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'not captured');
     const off = extensionFixture(manager, server, { configPath: '/missing-and-must-not-be-read', mode: 'off' });
     await off.emit('session_start'); await off.emit('agent_settled');
+    expect(await off.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first prompt' } as any)).toBeUndefined();
     await expect(off.tool('hindsight_reflect', { query: 'question' })).rejects.toThrow('off'); expect(server.calls).toHaveLength(0);
     expect([...off.tools.keys()]).toEqual(['hindsight_reflect', 'hindsight_search_knowledge_pages', 'hindsight_read_knowledge_page', 'hindsight_retain', 'hindsight_manage_fact']);
     const ro = extensionFixture(manager, server, { configPath: config(r), mode: 'read-only' });

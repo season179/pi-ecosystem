@@ -1,6 +1,6 @@
 # pi-hindsight: replacement and shared-memory plan
 
-Current direction: 2026-09-26. **Stages 1–2 are complete for this repository. Stage 3 is implemented, tested and installed only in an isolated staging profile with memory off—not activated in the real profile. Later stages and migration require separate approval.** See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
+Current direction: 2026-09-26. **Stages 1–2 are complete for this repository. Stages 3–4 are implemented and tested only in isolated staging profiles with synthetic services—not activated in the real profile. Later stages and migration require separate approval.** See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
 
 The selected target is a new, thin **pi-hindsight** package derived from the official Pi integration, replacing pi-memory after verification. Claude Code uses the official integration. Both share one bank per repository; Jev gates proactive retrieval, and telemetry measures usefulness as well as operation health.
 
@@ -50,7 +50,7 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 
 **Implemented and staged 2026-09-26:** `@season179/pi-hindsight@26.9.0`, pinned official 0.7.0 core with license/provenance. Build/typecheck and 18 package tests passed; 58 existing memory tests also passed. Real Pi 0.87.1 loaded the compiled package from an isolated local installation with memory explicitly off and no package network attempts. Product default is **read-write with automatic capture**, but no real-profile installation/activation has occurred while the old writer is active.
 
-The [package README](../packages/pi-hindsight/README.md) records capability limits: append-only persisted history and small durable cursor; ambiguous/divergent/forked histories, unknown writes and unsafe replay fail closed; structural/chronological echo filtering only; fact edit/invalidate/revert, **no permanent single-fact DELETE** in the verified API; source/derivative freshness is not guaranteed. An explicit endpoint is required before any memory access. No Jev gate, automatic injection, page setup, new telemetry or migration was implemented in this stage.
+The [package README](../packages/pi-hindsight/README.md) records capability limits: append-only persisted history and small durable cursor; ambiguous/divergent/forked histories, unknown writes and unsafe replay fail closed; structural/chronological echo filtering only; fact edit/invalidate/revert, **no permanent single-fact DELETE** in the verified API; source/derivative freshness is not guaranteed. An explicit endpoint is required before any memory access. No Jev gate, automatic injection, page setup, new telemetry or migration was implemented in Stage 3; Step 4 later added the gate and injection.
 
 - Keep upstream changes small and reviewable; carry the history fix and required safeguards rather than rebuilding an unrelated adapter.
 - Automatically Retain coherent conversation updates after completed replies. Hindsight extracts memories; Jev no longer selects spans for automatic retention.
@@ -65,6 +65,8 @@ The [package README](../packages/pi-hindsight/README.md) records capability limi
 - Pi safeguards do not automatically protect Claude hooks. Review Claude redaction and worker-session capture separately; a loopback API does not imply local model processing.
 
 ### 4. Add initial retrieval and periodic Jev-gated Reflect
+
+**Implemented 2026-09-26 (staged, not activated):** see the [package README](../packages/pi-hindsight/README.md#automatic-retrieval). Pre-run `before_agent_start` only: ungated initial `low` Reflect at the first branch user entry; opted-in Jev Noul ≥ 0.7 at user-entry counts 5, 9, 13… (steering/follow-ups count, so values can be skipped). Persisted displayed untrusted custom message ≤ 4,000 chars, per-branch cap 8, exact-duplicate/empty suppression, capture echo exclusion. Pre-run wait ≤ 8 s (Jev ≤ 2 s, Reflect ≤ 6 s), not Esc-cancellable. Per activation ≤ 8 Reflect and ≤ 32 Jev attempts counted before requests; reset on reload. Failures: no retry, 10-minute pause. `autoInject: pages|recall` disables retrieval rather than substituting; the legacy configurable internal Recall preference is **reconciled as not delivered**. Read-only mode retrieves; off does nothing. Verified only with synthetic/mock services; live usefulness is Stage 6.
 
 - Initial relevant context uses Reflect as the intended first-prompt default. Every few turns, Jev checks whether additional memory would help; a positive gate invokes Reflect and injects bounded context, a negative gate does neither.
 - Jev controls retrieval timing, not truthfulness or automatic retention. It cannot certify the correctness of Reflect's synthesized answer.
@@ -114,7 +116,7 @@ The [package README](../packages/pi-hindsight/README.md) records capability limi
 
 - Global/cross-project knowledge destination and retrieval scope.
 - Worker capture/exclusion and Claude-path redaction; detailed transcript boundaries and processing limits.
-- Initial/periodic gate interaction, cadence, turn definition, budgets/cooldowns and legacy internal Recall preference.
+- Step 4 retrieval constants (cadence, 0.7 threshold, caps, cooldown) are provisional until Stage 6 evaluation; the initial/periodic interaction, turn definition and Recall reconciliation are settled in the package README.
 - Knowledge Page refresh policy, shared official-config ownership and compatibility handling.
 - External defaults: Git/history ingestion, codebase surveys, automatic runtime updates and their privacy/cost implications.
 - Curation/source consistency across replay, permanent-deletion semantics, explicit/automatic deduplication and operation-status tracking horizon.

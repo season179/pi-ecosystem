@@ -13,6 +13,7 @@ export class Server {
   facts = new Map<string, any>();
   pending = false;
   version = '0.10.1';
+  reflectText = 'Previously retrieved memory says the old timeout was thirty seconds.';
   before?: (call: Server['calls'][number]) => void | Promise<void>;
   fetch: typeof fetch = async (url, init) => {
     const call = { method: init?.method ?? 'GET', url: new URL(String(url)), body: init?.body ? JSON.parse(String(init.body)) : undefined };
@@ -36,7 +37,7 @@ export class Server {
       }
       return json({ operation_id: b.operation_id });
     }
-    if (path.endsWith('/reflect')) return json({ text: 'Previously retrieved memory says the old timeout was thirty seconds.' });
+    if (path.endsWith('/reflect')) return json({ text: this.reflectText });
     if (path.endsWith('/knowledge-base/search')) return json({ results: [{ id: 'kp-one', name: 'Decisions', snippet: 'Previously retrieved memory says the old timeout was thirty seconds.', score: 1 }] });
     if (path.endsWith('/knowledge-base/pages/kp-one')) return json({ id: 'kp-one', name: 'Decisions', body: 'Page content', markdown: 'duplicate', timestamp: '2026-01-01' });
     if (path.includes('/memories/')) {
@@ -92,7 +93,8 @@ export function extensionFixture(manager: SessionManager, server: Server, option
   };
 }
 
-export async function sdk(root: string, server: Server, sessionManager: SessionManager, replies: AssistantMessage[]) {
+export async function sdk(root: string, server: Server, sessionManager: SessionManager, replies: AssistantMessage[], options: ExtensionOptions = {}) {
+  const requests: unknown[] = [];
   const agentDir = join(root, 'agent'); mkdirSync(agentDir, { recursive: true });
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const model: Model<Api> = { id: 'fake', name: 'fake', api: 'openai-completions', provider: 'offline-hindsight',
@@ -100,7 +102,8 @@ export async function sdk(root: string, server: Server, sessionManager: SessionM
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   const provider = (pi: ExtensionAPI) => pi.registerProvider('offline-hindsight', {
     baseUrl: model.baseUrl, api: model.api, apiKey: 'fake-not-a-credential', models: [model],
-    streamSimple() {
+    streamSimple(_model, context) {
+      requests.push(JSON.parse(JSON.stringify(context.messages)));
       const stream = createAssistantMessageEventStream();
       const reply = replies.shift();
       if (!reply) throw new Error('Synthetic response queue exhausted');
@@ -112,9 +115,27 @@ export async function sdk(root: string, server: Server, sessionManager: SessionM
   const services = await createAgentSessionServices({ cwd: root, agentDir, modelRuntime,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, defaultProjectTrust: 'always', enableAnalytics: false, enableInstallTelemetry: false }, { projectTrusted: true }),
     resourceLoaderOptions: { noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: config(root), fetch: server.fetch })] },
+      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: config(root), fetch: server.fetch, ...options })] },
   });
   const { session } = await createAgentSessionFromServices({ services, sessionManager, model, thinkingLevel: 'off', tools: [] });
   await session.bindExtensions({ mode: 'print' });
-  return { session, async dispose() { session.dispose(); } };
+  return { session, requests, async dispose() { session.dispose(); } };
+}
+
+/** Mocked TypeSafe transport: each call consumes one Noul value, 'error' (HTTP 500) or 'hang' (ignores abort). */
+export function jev(answers: Array<number | 'error' | 'hang'>) {
+  const calls: Array<{ url: string; body: any }> = [];
+  const fetch = async (url: string, init?: RequestInit) => {
+    calls.push({ url, body: JSON.parse(String(init?.body)) });
+    const next = answers.shift();
+    if (next === undefined) throw new Error('Unexpected Jev call');
+    if (next === 'hang') return new Promise<Response>(() => {});
+    if (next === 'error') return new Response('{}', { status: 500 });
+    return new Response(JSON.stringify({ model: 'jev-1.13.0', answers: { memory: { type: 'noul', noul: next } }, usage: { input_tokens: 1, output_tokens: 1 } }));
+  };
+  return { calls, fetch };
+}
+export function typesafe(agentDir: string, extra: Record<string, unknown> = {}): void {
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'typesafe.json'), JSON.stringify({ hindsight: { enabled: true }, ...extra }));
 }

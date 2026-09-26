@@ -17,6 +17,7 @@
     "prepack": "npm run build"
   },
   "engines": { "node": ">=22.19.0" },
+  "dependencies": { "@typesafe-ai/sdk": "^0.6.0" },
   "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0", "@earendil-works/pi-ai": ">=0.87.1 <0.88.0", "typebox": "*" },
   "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true }, "@earendil-works/pi-ai": { "optional": true }, "typebox": { "optional": true } }
 }
