@@ -114,7 +114,7 @@ The [package README](../packages/pi-hindsight/README.md) records capability limi
 
 ## Stage 5–8 decisions and implementation status (2026-09-26)
 
-Implemented and tested offline in `packages/pi-hindsight`. **None of this is live yet**: config edits, setup, migration and cutover wait for the coordinator's approval of the dry run and the cutover design.
+Implemented and tested in `packages/pi-hindsight`. Live since 2026-09-26 12:40–12:55 UTC, after a fresh backup: old writer frozen, shared/global configs, Claude guard, global hook and MCP, and explicit page setup for 11 empty banks. The real migration apply, the Pi install and the pi-memory uninstall are still pending authorization.
 
 - **Global:** a read-only static bank `coding-agent::season179:global` in `~/.hindsight/coding-agent-global.json`. Pi gets parallel project and global Reflect plus `hindsight_reflect scope: global`. Claude gets a second official UserPromptSubmit hook and a second MCP server with its write tools denied. Contents: legacy-global curated notes and `user-wide` spans only. `$HOME`/`~/.pi` directory content is quarantined. Guaranteed `always` injection is intentionally lost.
 - **External defaults:** `autoSeed`, `gitIngest`, `codebaseSurvey` and `autoUpdate` are off in the shared config. Page setup is explicit, via `scripts/setup-bank.mjs` for each bank.
@@ -130,6 +130,24 @@ Implemented and tested offline in `packages/pi-hindsight`. **None of this is liv
   - a content-free 0600 manifest with expected payload hashes;
   - `--verify` fails unless every item is present, identical and extracted.
 - **Old writer off:** pi-memory `config.json` `defaultMode: "off"` plus `automation.json` `enabled: false`, before replacement capture.
+
+### Stage 6 synthetic baseline and migration rehearsal (2026-09-26, Hindsight 0.10.1)
+
+Disposable, ownership-marked banks only, all deleted and verified absent afterwards. Metadata only; no real memory.
+
+- **Baseline** (`scripts/eval-baseline.mjs`, gate-off Reflect, 14 cases): 13 answered.
+  - Label agreement passed for must-find (Pi and Claude origin), qualifier, speaker/uncertainty attribution, unrelated abstention, both isolation directions, and edit/invalidate before and after curation.
+  - The indirect-recall case hit its 150 s request deadline, so it is unmeasured rather than wrong.
+- **Non-resurrection, a measured limitation:** re-retaining an *unchanged* source document after curation brings back both the edited value and the invalidated fact, in the facts, observations and page. Curation, consolidation and page refresh alone did not resurrect them.
+  - The mitigations are to never resubmit curated sources: importer idempotence (existing documents are verified, never resubmitted), `captureSince` guards, quarantine of retired note versions, and Pi's session-local replay block after curation.
+  - Claude Stop capture re-sends the whole transcript and has no such block, so a fact curated from a live Claude session can come back at that session's next Stop.
+- **Latency:** the service LLM is serialized (max concurrency 1). Low-budget Reflect took 20–84 s, and 1 of 14 exceeded 150 s. The automatic caps (Pi's 6 s, the official hook's 20 s) will therefore usually time out on this service, and migration extraction drains slowly.
+- **API facts:** `GET /banks/{id}/profile` returns 410. Existence is checked with `GET /banks/{id}/config` (404 when missing), plus the exact `bank_id` in `GET /banks?q=` (`banks[].name` as the ownership marker). After DELETE, `/config` keeps answering 200 for about 20–30 s while the list already reflects the deletion. Fact detail uses `type`; list items use `fact_type`.
+- **Import rehearsal** (8 synthetic sources, 3 disposable banks):
+  - The dry run and apply routed 4 items (a project note and span, a global note and a user-wide span).
+  - They quarantined `not_durable`, the retired-note match, the unmapped project and the unknown `source_role`.
+  - `--verify` exited 1 before extraction, then 0 after the drain. A re-apply verified 4 items identical without resubmitting. A tag tamper made `--verify` exit 1 (`document tags mismatch`).
+  - Plain Reflect on the migrated banks returned the expected facts (37–44 s) and never the retired value.
 
 ## Decisions still required before rollout
 
