@@ -2,7 +2,7 @@
 
 Thin official-derived Hindsight integration for **Pi 0.87.1**. Product default: **read-write with automatic capture**, initial automatic Reflect and opted-in Jev-gated periodic Reflect. Automatic memory is best effort, **not guaranteed in the first answer**. See [provenance and patch list](NOTICE.md).
 
-**Local rollout, 2026-09-26:** installed from this workspace; updated Claude source-curation guard installed. Fresh-host/live-service acceptance is still in progress. The old pi-memory writer is disabled but its package and original data remain. Coordinator reports four already-failed migration parents awaiting separately authorized recovery; live model acceptance tests remain paused. Replacement installation is not migration completion or permission to uninstall the old package.
+**Local rollout, 2026-09-26:** installed from this workspace; updated Claude source-curation guard installed. Code `006f6de` is independently reviewed and accepted **offline** (55 tests and typecheck pass). Fresh installed-resource loading passes in all three modes with zero HTTP/model calls; live usefulness remains paused and unverified. The old pi-memory writer is disabled but its package and original data remain. Coordinator reports four already-failed migration parents awaiting separately authorized recovery; live model acceptance tests remain paused. Replacement installation is not migration completion or permission to uninstall the old package. Temporary bank pressure-relief settings still require restoration before final acceptance; at least two failed page refreshes also leave production background health unresolved.
 
 ## Activation boundary
 
