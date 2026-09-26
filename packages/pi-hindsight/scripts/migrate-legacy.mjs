@@ -5,6 +5,7 @@
 //   node scripts/migrate-legacy.mjs [--apply] [--backup-stores <dir>]
 //   node scripts/migrate-legacy.mjs --plan-map <json> --plan-global-bank <id>   (dry-run preview before config edits)
 //   node scripts/migrate-legacy.mjs --verify <manifest.jsonl>
+// Exit status is nonzero on any conflict, error, incomplete inventory (apply) or failed verification.
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
@@ -26,7 +27,9 @@ const SESSIONS = option('sessions') ?? join(HOME, '.pi/agent/sessions');
 const BACKUP_STORES = option('backup-stores') ?? join(HOME, '.hindsight/backups/20260926T090722Z/files/pi-memory');
 const MAIN_CONFIG = option('config') ?? join(HOME, '.hindsight/coding-agent.json');
 const GLOBAL_CONFIG = option('global-config') ?? join(HOME, '.hindsight/coding-agent-global.json');
+const OUT_ROOT = option('out-root') ?? join(HOME, '.hindsight/migrations');
 const OLD_BANK = 'pi-memory';
+const PAGE = 500;
 const RETIRED_MATCH = 0.6, RETIRED_MARGIN = 0.1, MIN_TOKENS = 8;
 
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -39,6 +42,39 @@ function client(cfg, bank) {
     guard: () => {}, signal: AbortSignal.timeout(60_000) });
 }
 const get = (cfg, bank, suffix) => { const c = client(cfg, bank); return c.request('GET', c.bankUrl(suffix)); };
+const canonical = value => JSON.stringify(Object.keys(value).sort().map(k => [k, value[k]]));
+
+/** Every item of a paginated list; the pages must add up to the (unchanged) reported total. */
+async function listAll(cfg, bank, path) {
+  const items = []; let total;
+  for (let offset = 0; ; offset += PAGE) {
+    const page = await get(cfg, bank, `${path}${path.includes('?') ? '&' : '?'}limit=${PAGE}&offset=${offset}`);
+    if (!Array.isArray(page?.items) || !Number.isInteger(page.total)) die(`invalid list response for ${path}`);
+    if (total !== undefined && page.total !== total) die(`${bank}${path} changed during listing (${total} -> ${page.total}); stop writers and rerun`);
+    total = page.total; items.push(...page.items);
+    if (page.items.length < PAGE || items.length >= total) break;
+  }
+  if (items.length !== total) die(`${bank}${path}: listed ${items.length} of reported ${total}`);
+  return items;
+}
+
+// Destination contract (Hindsight 0.10.1): with memory_defense unset and store_document_text on,
+// documents.original_text is the submitted content verbatim, so an exact hash comparison is valid.
+async function assertExactStorage(cfg, bank) {
+  const config = (await get(cfg, bank, '/config'))?.config ?? {};
+  if (config.memory_defense != null || config.store_document_text === false) die(`bank ${bank} transforms or drops document text; exact verification impossible`);
+}
+
+/** Compare a stored document with the manifest's expected redacted payload and shape. */
+function documentState(doc, row) {
+  if (doc === undefined) return 'missing';
+  if (typeof doc.original_text !== 'string' || sha(doc.original_text) !== row.expected_sha256) return 'content mismatch';
+  const tags = new Set(doc.tags ?? []);
+  if (!row.expected_tags.every(t => tags.has(t))) return 'tags mismatch';
+  const meta = doc.document_metadata ?? {};
+  const actual = Object.fromEntries(row.expected_metadata_keys.map(k => [k, meta[k]]));
+  return sha(canonical(actual)) === row.expected_metadata_sha256 ? 'match' : 'metadata mismatch';
+}
 
 function writer(path) {
   const fd = openSync(path, 'wx', 0o600);
@@ -63,7 +99,9 @@ async function migrate(apply) {
   const map = main.mapPathToBank ?? {};
   const bankFor = repo => {
     const id = deriveBankIdOrSkip(main, repo, 'pi', repo);
-    const explicit = Object.entries(map).some(([path, bank]) => bank === id && (repo === path || repo.startsWith(`${path}/`)));
+    const explicit = Object.entries(map).some(([path, bank]) => bank === id && (repo === path || repo.startsWith(`${path}/`))
+      // Remote-less banks carry a path-hash suffix so equal basenames can never share a bank.
+      && (!bank.startsWith('coding-agent::local:') || bank.endsWith(`-${sha(path).slice(0, 8)}`)));
     return explicit && id !== globalBank && id !== OLD_BANK ? id : undefined;
   };
 
@@ -102,9 +140,10 @@ async function migrate(apply) {
     readStore(join(MEMORY_ROOT, 'projects', dir), dir, destinationOf(id.identityHash.replace(/^sha256:/, '').slice(0, 16)));
   }
   const retired = []; // { body, currentBody? }
+  const inventory = { transcripts: sessionFiles.length, unreadable: 0, backup: existsSync(BACKUP_STORES) ? 'present' : 'MISSING' };
   const retire = (id, body) => { if (typeof body === 'string' && body !== current.get(id)) retired.push({ tokens: tokens(body), current: current.has(id) ? tokens(current.get(id)) : undefined }); };
   for (const file of sessionFiles) {
-    let text; try { text = readFileSync(file, 'utf8'); } catch { continue; }
+    let text; try { text = readFileSync(file, 'utf8'); } catch { inventory.unreadable++; continue; }
     if (!text.includes('"remember"')) continue;
     for (const line of text.split('\n')) {
       if (!line.includes('"toolName":"remember"')) continue;
@@ -120,13 +159,11 @@ async function migrate(apply) {
   }
 
   // Old bank: selected verbatim spans. Facts/observations are derived and never migrated.
-  const docs = (await get(main, OLD_BANK, '/documents?limit=10000')).items;
+  const inventoryComplete = inventory.backup === 'present' && inventory.unreadable === 0;
+  if (apply && !inventoryComplete) die(`retired-source inventory incomplete (backup ${inventory.backup}, ${inventory.unreadable} unreadable transcripts); refusing apply`);
+  const docs = await listAll(main, OLD_BANK, '/documents');
   const curatedDocs = new Set();
-  for (let offset = 0; ; offset += 500) {
-    const page = await get(main, OLD_BANK, `/memories/list?limit=500&offset=${offset}`);
-    for (const unit of page.items) if (unit.document_id && (unit.edited_at || unit.invalidated_at || (unit.state && unit.state !== 'valid'))) curatedDocs.add(unit.document_id);
-    if (offset + 500 >= page.total) break;
-  }
+  for (const unit of await listAll(main, OLD_BANK, '/memories/list')) if (unit.document_id && (unit.edited_at || unit.invalidated_at || (unit.state && unit.state !== 'valid'))) curatedDocs.add(unit.document_id);
 
   const items = [];
   for (const { memory, storeKey, dest } of curated) {
@@ -152,7 +189,9 @@ async function migrate(apply) {
     if (!dest.quarantine && span.size >= MIN_TOKENS && retired.some(r => { const c = containment(span, r.tokens); return c >= RETIRED_MATCH && c > (r.current ? containment(span, r.current) : 0) + RETIRED_MARGIN; })) {
       dest = { quarantine: 'matches retired or superseded curated note' };
     }
-    const role = meta.source_role === 'assistant' ? 'assistant' : 'user';
+    // Speaker provenance is never invented: anything but an explicit user/assistant role is quarantined.
+    const role = meta.source_role === 'assistant' || meta.source_role === 'user' ? meta.source_role : undefined;
+    if (!role && !dest.quarantine) dest = { quarantine: 'unknown source_role' };
     const when = doc.retain_params?.event_date ?? doc.created_at;
     items.push({ kind: 'bank-span', source_id: doc.id, source_sha256: sha(text), ...dest, document_id: `legacy-bank:pi-memory:${doc.id}`,
       content: redact(`[${role} message in Pi session ${meta.source_session ?? 'unknown'} at ${when}]\n${text}`), timestamp: when,
@@ -162,7 +201,7 @@ async function migrate(apply) {
         session_id: String(meta.source_session ?? ''), source_role: role, jev_label: String(meta.jev_label ?? '') } });
   }
 
-  const out = join(HOME, '.hindsight/migrations', `${new Date().toISOString().replace(/[:.]/g, '')}-${apply ? 'apply' : 'dryrun'}`);
+  const out = join(OUT_ROOT, `${new Date().toISOString().replace(/[:.]/g, '')}-${apply ? 'apply' : 'dryrun'}`);
   mkdirSync(out, { recursive: true, mode: 0o700 });
   const manifest = writer(join(out, 'manifest.jsonl'));
   const summary = new Map();
@@ -172,45 +211,80 @@ async function migrate(apply) {
     for (const bank of banks) {
       const pages = await get(main, bank, '/mental-models?limit=1').catch(() => undefined);
       if (!pages) die(`bank ${bank} missing or unreachable; run scripts/setup-bank.mjs first`);
+      await assertExactStorage(main, bank);
     }
     if (!await client(main, OLD_BANK).supportsIdempotentRetain()) die('server lacks idempotent retain');
   }
+  let failures = 0;
+  const outcomes = new Map();
+  const outcome = key => outcomes.set(key, (outcomes.get(key) ?? 0) + 1);
   for (const item of items) {
-    const row = { kind: item.kind, source_id: item.source_id, source_sha256: item.source_sha256, destination: item.bank ?? null,
+    const row = { mode: apply ? 'apply' : 'dryrun', kind: item.kind, source_id: item.source_id, source_sha256: item.source_sha256, destination: item.bank ?? null,
       document_id: item.document_id, quarantine: item.quarantine ?? null, injection: item.injection };
     if (item.quarantine) { count(`quarantine\t${item.kind}\t${item.quarantine}`); manifest.row({ ...row, outcome: 'quarantined; not imported' }); continue; }
     count(`${item.bank}\t${item.kind}${item.injection === 'always' ? ' (legacy always)' : ''}`);
+    // Expected evidence: hashes of the exact redacted payload and metadata, never the text itself.
+    const operationId = uuidV5(`${item.bank}\n${item.document_id}\nappend\n${item.content}`);
+    Object.assign(row, { operation_id: operationId, expected_sha256: sha(item.content), expected_tags: item.tags,
+      expected_metadata_keys: Object.keys(item.metadata).sort(), expected_metadata_sha256: sha(canonical(item.metadata)) });
     if (!apply) { manifest.row({ ...row, outcome: 'planned' }); continue; }
     const c = client(main, item.bank);
-    const operationId = uuidV5(`${item.bank}\n${item.document_id}\nappend\n${item.content}`);
+    let result;
     try {
-      const previous = await c.operation(operationId);
-      if (previous) { manifest.row({ ...row, operation_id: operationId, outcome: `already submitted (${previous.status})` }); continue; }
-      if (await c.document(item.document_id) !== undefined) { manifest.row({ ...row, outcome: 'document exists; skipped' }); continue; }
-      await c.retain(item.content, item.context, item.document_id, item.tags, 'document',
-        { timestamp: item.timestamp, metadata: item.metadata, operationId });
-      manifest.row({ ...row, operation_id: operationId, outcome: 'accepted' });
+      const existing = await c.document(item.document_id);
+      if (existing !== undefined) {
+        // Never silently skip: an existing document must be exactly this evidence, else it is a conflict.
+        const state = documentState(existing, row);
+        result = state === 'match' ? 'present; verified identical' : `CONFLICT: existing document ${state}; not overwritten`;
+      } else {
+        const previous = await c.operation(operationId);
+        if (previous?.status === 'failed') result = 'FAILED: earlier operation failed; not retried';
+        else if (previous?.status === 'completed') result = 'ERROR: operation completed but document absent';
+        else if (previous) result = `already submitted (${previous.status}); document not yet visible`;
+        else {
+          await c.retain(item.content, item.context, item.document_id, item.tags, 'document',
+            { timestamp: item.timestamp, metadata: item.metadata, operationId });
+          result = 'accepted';
+        }
+      }
     } catch (error) {
-      manifest.row({ ...row, operation_id: operationId, outcome: `error: ${error instanceof Error && error.message.startsWith('Hindsight ') ? error.message : 'request failed'}` });
+      result = `ERROR: ${error instanceof Error && error.message.startsWith('Hindsight ') ? error.message : 'request failed'}`;
     }
+    if (/^(CONFLICT|FAILED|ERROR)/.test(result)) failures++;
+    outcome(result.replace(/:.*/, '')); manifest.row({ ...row, outcome: result });
   }
   manifest.close();
   console.log(`${apply ? 'APPLIED' : 'DRY RUN'}: ${items.length} sources (${curated.length} curated notes, ${docs.length} old-bank spans); retired note versions considered: ${retired.length}`);
   for (const [key, n] of [...summary].sort()) console.log(`${String(n).padStart(4)}  ${key}`);
+  console.log(`retired-source inventory: ${inventory.transcripts} transcripts (${inventory.unreadable} unreadable), backup stores ${inventory.backup}${inventoryComplete ? '' : ' -> UNVERIFIED'}`);
+  for (const [key, n] of [...outcomes].sort()) console.log(`${String(n).padStart(4)}  outcome ${key}`);
   console.log(`manifest (no content): ${join(out, 'manifest.jsonl')}`);
+  if (failures) { console.error(`migrate-legacy: ${failures} conflict/failed/error item(s); see manifest`); process.exit(1); }
+  if (apply) console.log(`next: node scripts/migrate-legacy.mjs --verify ${join(out, 'manifest.jsonl')} (after extraction completes)`);
 }
 
 async function verify(path) {
   const main = loadConfig({ harness: 'pi', path: MAIN_CONFIG });
+  const rows = readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  if (!rows.length || rows.some(r => r.mode !== 'apply')) die('verify needs a non-empty apply manifest');
   const counts = new Map();
   const count = key => counts.set(key, (counts.get(key) ?? 0) + 1);
-  for (const line of readFileSync(path, 'utf8').split('\n').filter(Boolean)) {
-    const row = JSON.parse(line);
-    if (!row.destination) { count('quarantined'); continue; }
+  let bad = 0;
+  for (const bank of new Set(rows.map(r => r.destination).filter(Boolean))) await assertExactStorage(main, bank);
+  for (const row of rows) {
+    if (!row.destination) { count('quarantined (not imported)'); continue; }
     const c = client(main, row.destination);
-    const doc = await c.document(row.document_id);
-    const op = row.operation_id ? await c.operation(row.operation_id) : undefined;
-    count(`${row.destination}\tdocument ${doc ? 'present' : 'MISSING'}\toperation ${op?.status ?? 'n/a'}`);
+    let state;
+    try {
+      const doc = documentState(await c.document(row.document_id), row);
+      const op = await c.operation(row.operation_id);
+      // Evidence must be present, identical, and its extraction completed.
+      state = doc !== 'match' ? `document ${doc}` : op?.status === 'completed' ? 'ok' : `operation ${op?.status ?? 'unknown'}`;
+    } catch { state = 'request failed'; }
+    if (state !== 'ok') bad++;
+    count(`${row.destination}\t${state}`);
   }
   for (const [key, n] of [...counts].sort()) console.log(`${String(n).padStart(4)}  ${key}`);
+  if (bad) { console.error(`migrate-legacy: verification failed for ${bad} of ${rows.filter(r => r.destination).length} imported item(s)`); process.exit(1); }
+  console.log('verified: every imported item is present, identical and extracted');
 }

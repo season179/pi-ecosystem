@@ -34,6 +34,24 @@ It runs the installed official 0.7.0 `deepen.js` with a private copy of the conf
 
 **Pre-cutover guard.** `harnesses.pi.captureSince` (ISO time; a local key that official hosts ignore) skips automatic capture for sessions whose header predates it, with status. This stops a resumed pre-cutover session replaying history the legacy writer already captured. A malformed value blocks automatic capture. Explicit Retain is unaffected.
 
+Claude gets the same guarantee from `scripts/claude-stop-guard.mjs`, which replaces the official Stop command in `~/.claude/settings.json`:
+
+```sh
+node ~/.hindsight/pi-hindsight/claude-stop-guard.mjs --official ~/.hindsight/coding-agents/dist/claude-stop-hook.js --sha256 <pinned hash>
+```
+
+It reads `harnesses["claude-code"].captureSince` from the same official file. Only when the transcript's earliest timestamp is at or after that cutoff does it forward the unchanged hook stdin to the pinned official hook. A resumed Claude session appends to its original transcript, so the earliest entry is the original start.
+
+Anything uncertain is skipped with exit 0 and a metadata line in `~/.hindsight/coding-agents-logs/stop-guard.jsonl`. That covers:
+- a missing or invalid cutoff;
+- an undated or unreadable transcript;
+- entries from another session (fork);
+- an official hook whose hash changed, which needs re-review and a new pin.
+
+Fresh sessions are captured exactly as before. SessionStart and UserPromptSubmit stay official and unwrapped.
+
+**Remote-less repositories** use explicit bank names with a path-hash suffix, for example `coding-agent::local:<name>-<first 8 hex of sha256(realpath)>`. Two same-named directories therefore never share a bank. `$HOME` and `~/.pi` are never mapped.
+
 **Global cross-project memory (read-only).** If `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`) exists, it must name one static `bankId`, no `mapPathToBank`, an explicit endpoint, and not `pi-memory`. Automatic retrieval then runs the project and global Reflect in parallel under the same 8 s wall and attempt budget. `hindsight_reflect` accepts `scope: "global"`. Capture, Retain, curation and pages never target the global bank, and a repository that resolves to it is refused. A broken or failing global config never blocks project retrieval. Global is relevance-based: the legacy guaranteed `always` injection no longer exists. The same file serves Claude through a second official UserPromptSubmit hook (with `HINDSIGHT_CONFIG` pointing at it and a separate `TMPDIR`) and a second MCP server with its write tools denied.
 
 ## Automatic retrieval
@@ -76,7 +94,12 @@ Absent file/section or key → periodic gate off (initial still runs); malformed
 | `hindsight_retain` | Explicit evidence extraction; identical redacted content within a session deduplicates |
 | `hindsight_manage_fact` | Inspect/edit/invalidate/revert one identified world/experience fact |
 
-There is **no raw Recall**, broad delete, page-generation or migration tool. One-off legacy migration is the local operator script `scripts/migrate-legacy.mjs` (dry run by default, content-free manifest; not shipped). Curation requires the inspected fact's exact original text and document ID, rechecks them before PATCH, and reads back the requested change. Invalidation is reversible. **Permanent deletion is unavailable** because the verified API has no single-fact DELETE; it never falls back to document/bank/supporting-fact deletion. If a safe endpoint is later added, it still needs a separate explicit human confirmation design.
+There is **no raw Recall**, broad delete, page-generation or migration tool. One-off legacy migration uses the local operator script `scripts/migrate-legacy.mjs` (not shipped):
+- It is a dry run by default and writes a content-free manifest.
+- Each manifest row carries the expected SHA-256 of the exact redacted payload plus tag and metadata hashes.
+- Apply requires the complete retired-note inventory and destination banks that store text verbatim (`memory_defense` unset).
+- An existing document is either verified identical or reported as a conflict, never skipped or overwritten.
+- `--verify` exits nonzero unless every imported item is present, byte-identical and extracted. Curation requires the inspected fact's exact original text and document ID, rechecks them before PATCH, and reads back the requested change. Invalidation is reversible. **Permanent deletion is unavailable** because the verified API has no single-fact DELETE; it never falls back to document/bank/supporting-fact deletion. If a safe endpoint is later added, it still needs a separate explicit human confirmation design.
 
 Retain reports **accepted**, not completed extraction/consolidation. Curation verifies the fact change, then requests a refresh of up to 10 of the bank's Knowledge Pages, reported as "refresh requested; freshness not verified". It does not rewrite the source, scrub Pi transcripts, or prove observations/pages fresh. Other sessions/harnesses can replay old evidence. This session's auto-capture is durably blocked before curation, including on an uncertain PATCH outcome; there is no automatic unblock. No page or injected-memory cache is maintained.
 

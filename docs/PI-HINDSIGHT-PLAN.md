@@ -119,15 +119,16 @@ Implemented and tested offline in `packages/pi-hindsight`. **None of this is liv
 - **Global:** a read-only static bank `coding-agent::season179:global` in `~/.hindsight/coding-agent-global.json`. Pi gets parallel project and global Reflect plus `hindsight_reflect scope: global`. Claude gets a second official UserPromptSubmit hook and a second MCP server with its write tools denied. Contents: legacy-global curated notes and `user-wide` spans only. `$HOME`/`~/.pi` directory content is quarantined. Guaranteed `always` injection is intentionally lost.
 - **External defaults:** `autoSeed`, `gitIngest`, `codebaseSurvey` and `autoUpdate` are off in the shared config. Page setup is explicit, via `scripts/setup-bank.mjs` for each bank.
 - **Page refresh:** after verified curation, request a refresh of the bank's pages. Freshness is not verified.
-- **Replay:** the Pi `captureSince` guard. Claude has no official cutoff: a resumed pre-cutover Claude session re-uploads its transcript (residual).
+- **Replay:** `captureSince` guards in both harnesses. Pi checks it in-extension. Claude uses a pinned wrapper around the official Stop hook that forwards unchanged stdin only for sessions starting at or after the cutoff; anything uncertain fails closed.
 - **Telemetry:** bounded, metadata-only JSONL. Extraction, consolidation and queued states are recorded separately.
 - **Migration:** `scripts/migrate-legacy.mjs`, dry run by default. Rules:
-  - explicit `mapPathToBank` routing only;
+  - explicit `mapPathToBank` routing only; remote-less repositories get path-hash-suffixed bank names;
   - curated notes at their latest version;
   - old-bank spans as `document` strategy with provenance;
   - quarantine for edited/invalidated units, `not_durable` spans, unmapped or home/Pi directories, and spans matching retired note versions;
-  - deterministic operation IDs, with existing documents skipped;
-  - a content-free 0600 manifest.
+  - deterministic operation IDs; an existing document is verified identical or reported as a conflict;
+  - a content-free 0600 manifest with expected payload hashes;
+  - `--verify` fails unless every item is present, identical and extracted.
 - **Old writer off:** pi-memory `config.json` `defaultMode: "off"` plus `automation.json` `enabled: false`, before replacement capture.
 
 ## Decisions still required before rollout
