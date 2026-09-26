@@ -121,6 +121,8 @@ describe('modes, privacy and identified tools', () => {
     server.facts.get('fact-one').fact_type = 'world';
     const answer = await ext.tool('hindsight_manage_fact', { ...params, action: 'edit', text: 'new fact; only staging' });
     expect(JSON.stringify(answer)).toContain('not permanent erasure');
+    expect(JSON.stringify(answer)).toContain('refresh requested for 1 page');
+    expect(server.calls.filter(c => c.method === 'POST' && c.url.pathname.endsWith('/refresh')).map(c => decodeURIComponent(c.url.pathname))).toEqual([`/v1/default/banks/${BANK}/mental-models/kp-one/refresh`]);
     expect(server.calls.filter(c => c.method === 'PATCH').map(c => c.body)).toEqual([{ text: 'new fact; only staging' }]);
     await ext.tool('hindsight_manage_fact', { ...params, expected_text: 'new fact; only staging', action: 'invalidate', reason: 'superseded' });
     expect(server.facts.get('fact-one').state).toBe('invalidated');

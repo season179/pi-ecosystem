@@ -112,6 +112,24 @@ The [package README](../packages/pi-hindsight/README.md) records capability limi
 - During approved cutover, disable the old automatic writer before enabling replacement capture so both do not ingest the same Pi conversation. Keep rollback instructions and original data available.
 - **Uninstall pi-memory last**, only after replacement, both migrations and cross-harness checks pass. Rollback must avoid simultaneous writers; code rollback does not undo bank mutations.
 
+## Stage 5–8 decisions and implementation status (2026-09-26)
+
+Implemented and tested offline in `packages/pi-hindsight`. **None of this is live yet**: config edits, setup, migration and cutover wait for the coordinator's approval of the dry run and the cutover design.
+
+- **Global:** a read-only static bank `coding-agent::season179:global` in `~/.hindsight/coding-agent-global.json`. Pi gets parallel project and global Reflect plus `hindsight_reflect scope: global`. Claude gets a second official UserPromptSubmit hook and a second MCP server with its write tools denied. Contents: legacy-global curated notes and `user-wide` spans only. `$HOME`/`~/.pi` directory content is quarantined. Guaranteed `always` injection is intentionally lost.
+- **External defaults:** `autoSeed`, `gitIngest`, `codebaseSurvey` and `autoUpdate` are off in the shared config. Page setup is explicit, via `scripts/setup-bank.mjs` for each bank.
+- **Page refresh:** after verified curation, request a refresh of the bank's pages. Freshness is not verified.
+- **Replay:** the Pi `captureSince` guard. Claude has no official cutoff: a resumed pre-cutover Claude session re-uploads its transcript (residual).
+- **Telemetry:** bounded, metadata-only JSONL. Extraction, consolidation and queued states are recorded separately.
+- **Migration:** `scripts/migrate-legacy.mjs`, dry run by default. Rules:
+  - explicit `mapPathToBank` routing only;
+  - curated notes at their latest version;
+  - old-bank spans as `document` strategy with provenance;
+  - quarantine for edited/invalidated units, `not_durable` spans, unmapped or home/Pi directories, and spans matching retired note versions;
+  - deterministic operation IDs, with existing documents skipped;
+  - a content-free 0600 manifest.
+- **Old writer off:** pi-memory `config.json` `defaultMode: "off"` plus `automation.json` `enabled: false`, before replacement capture.
+
 ## Decisions still required before rollout
 
 - Global/cross-project knowledge destination and retrieval scope.

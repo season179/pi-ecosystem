@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { config, exchange, extensionFixture, jev, message, persisted, sdk, Server, typesafe } from './helpers.js';
+import { config, exchange, extensionFixture, GLOBAL_BANK, BANK, jev, message, persisted, sdk, Server, typesafe } from './helpers.js';
 import { CONTEXT_TYPE, GATE_MAX_MS, REFLECT_MAX_MS } from '../src/retrieval.js';
 // Seam: tests may defer the async local gate/key reads; otherwise the real ones run.
 const deferred = vi.hoisted(() => ({ loadGate: undefined as undefined | (() => Promise<unknown>), loadKey: undefined as undefined | (() => Promise<unknown>) }));
@@ -154,5 +154,44 @@ describe('automatic retrieval', () => {
       expect(gate.calls).toHaveLength(0); expect(server.calls).toHaveLength(0); expect(ext.status).toContain('deadline');
       vi.useRealTimers(); deferred.loadGate = deferred.loadKey = undefined;
     }
+  });
+});
+
+describe('global cross-project memory', () => {
+  it('real Pi: project and global Reflect share one opportunity; capture and writes never reach the global bank', async () => {
+    const r = root(), server = new Server(), manager = persisted(r), globalConfigPath = join(r, 'global.json');
+    writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK, mapPathToBank: {}, retainSessions: false }));
+    const subject = await sdk(r, server, manager, [message('reply 1')], { globalConfigPath });
+    try {
+      await subject.session.prompt('How should I answer?');
+      expect(reflects(server).map(c => decodeURIComponent(c.url.pathname)).sort()).toEqual([`/v1/default/banks/${BANK}/reflect`, `/v1/default/banks/${GLOBAL_BANK}/reflect`].sort());
+      const [context] = contexts(manager) as any[];
+      expect(context.content).toContain('Repository memory'); expect(context.content).toContain('Global cross-project memory');
+      expect(context.details.hindsight.echoTexts).toEqual([server.reflectText, server.globalText]);
+      expect(server.retains.map(c => decodeURIComponent(c.url.pathname))).toEqual([`/v1/default/banks/${BANK}/memories`]);
+      expect(JSON.stringify(server.retains[0].body)).not.toContain(server.globalText);
+    } finally { await subject.dispose(); }
+    const ext = extensionFixture(manager, server, { configPath: config(r), globalConfigPath, mode: 'read-write' });
+    await ext.tool('hindsight_reflect', { query: 'preferences?', scope: 'global' });
+    expect(decodeURIComponent(reflects(server).at(-1)!.url.pathname)).toBe(`/v1/default/banks/${GLOBAL_BANK}/reflect`);
+    // A repository routed to the global bank is refused rather than written into it.
+    const routed = extensionFixture(manager, server, { configPath: config(r, { bankId: GLOBAL_BANK }), globalConfigPath, mode: 'read-write' });
+    const writes = server.retains.length;
+    exchange(manager, 'must stay out of global'); await routed.emit('agent_settled');
+    expect(routed.status).toContain('global bank'); expect(server.retains).toHaveLength(writes);
+  });
+
+  it('a global failure or broken global config never blocks project retrieval', async () => {
+    const r = root(), server = new Server(), globalConfigPath = join(r, 'global.json');
+    writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK }));
+    server.before = c => { if (c.url.pathname.includes(encodeURIComponent(GLOBAL_BANK))) throw new Error('global down'); };
+    const one = extensionFixture(persisted(r), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });
+    const injected = await one.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first' } as any);
+    expect(injected.message.details.hindsight.echoTexts).toEqual([server.reflectText]);
+    expect(one.status).toContain('1 Reflect failed, retrieval paused');
+    writeFileSync(globalConfigPath, JSON.stringify({ apiUrl: 'http://hindsight.invalid', template: 'x', mapPathToBank: { '/': 'x' } }));
+    server.before = undefined;
+    const two = extensionFixture(persisted(root()), server, { configPath: config(r), globalConfigPath, mode: 'read-only' });
+    expect((await two.emit('before_agent_start', { type: 'before_agent_start', prompt: 'first' } as any)).message.details.hindsight.echoTexts).toEqual([server.reflectText]);
   });
 });

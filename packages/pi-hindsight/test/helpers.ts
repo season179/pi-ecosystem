@@ -6,6 +6,7 @@ import { createAgentSessionServices, createAgentSessionFromServices, ModelRuntim
 import { createHindsightExtension, type ExtensionOptions } from '../src/extension.js';
 
 export const BANK = 'coding-agent::test:project';
+export const GLOBAL_BANK = 'coding-agent::test:global';
 export class Server {
   calls: Array<{ method: string; url: URL; body: any }> = [];
   documents = new Map<string, string>();
@@ -14,6 +15,7 @@ export class Server {
   pending = false;
   version = '0.10.1';
   reflectText = 'Previously retrieved memory says the old timeout was thirty seconds.';
+  globalText = 'Global memory: the user prefers concise answers.';
   before?: (call: Server['calls'][number]) => void | Promise<void>;
   fetch: typeof fetch = async (url, init) => {
     const call = { method: init?.method ?? 'GET', url: new URL(String(url)), body: init?.body ? JSON.parse(String(init.body)) : undefined };
@@ -37,7 +39,9 @@ export class Server {
       }
       return json({ operation_id: b.operation_id });
     }
-    if (path.endsWith('/reflect')) return json({ text: this.reflectText });
+    if (path.endsWith('/reflect')) return json({ text: path.includes(GLOBAL_BANK) ? this.globalText : this.reflectText });
+    if (call.method === 'GET' && path.endsWith('/mental-models')) return json({ items: [{ id: 'kp-one' }], total: 1 });
+    if (call.method === 'POST' && path.endsWith('/refresh')) return json({ operation_id: 'refresh-op', status: 'pending' });
     if (path.endsWith('/knowledge-base/search')) return json({ results: [{ id: 'kp-one', name: 'Decisions', snippet: 'Previously retrieved memory says the old timeout was thirty seconds.', score: 1 }] });
     if (path.endsWith('/knowledge-base/pages/kp-one')) return json({ id: 'kp-one', name: 'Decisions', body: 'Page content', markdown: 'duplicate', timestamp: '2026-01-01' });
     if (path.includes('/memories/')) {
@@ -86,7 +90,7 @@ export function extensionFixture(manager: SessionManager, server: Server, option
   const ctx = { cwd: manager.getCwd(), sessionManager: manager, hasUI: false, signal: undefined,
     ui: { setStatus: (_name: string, text: string) => { lastStatus = text; }, notify: () => {} },
   } as unknown as ExtensionContext;
-  createHindsightExtension({ fetch: server.fetch, ...options })(pi);
+  createHindsightExtension({ fetch: server.fetch, globalConfigPath: join(manager.getCwd(), 'no-global.json'), ...options })(pi);
   return { ctx, tools, flags, get status() { return lastStatus; },
     emit: (name: string, event = { type: name }) => handlers.get(name)?.(event, ctx),
     tool: (name: string, args: any, signal?: AbortSignal) => tools.get(name)!.execute('test-tool', args, signal, undefined, ctx),
@@ -115,7 +119,7 @@ export async function sdk(root: string, server: Server, sessionManager: SessionM
   const services = await createAgentSessionServices({ cwd: root, agentDir, modelRuntime,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, defaultProjectTrust: 'always', enableAnalytics: false, enableInstallTelemetry: false }, { projectTrusted: true }),
     resourceLoaderOptions: { noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: config(root), fetch: server.fetch, ...options })] },
+      systemPrompt: 'Offline synthetic test', extensionFactories: [provider, createHindsightExtension({ configPath: config(root), globalConfigPath: join(root, 'no-global.json'), fetch: server.fetch, ...options })] },
   });
   const { session } = await createAgentSessionFromServices({ services, sessionManager, model, thinkingLevel: 'off', tools: [] });
   await session.bindExtensions({ mode: 'print' });

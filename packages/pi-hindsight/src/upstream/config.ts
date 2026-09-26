@@ -98,6 +98,9 @@ export interface RawConfig {
    *  cadence alike. Gates ONLY the transcript — recall, git ingest, seeding and the memory
    *  tools keep working (that is `disabled`'s job). */
   retainSessions?: boolean;
+  /** Local pi-hindsight patch (ignored by official code): ISO time; Pi sessions started earlier are
+   *  never captured automatically, so pre-cutover history is not replayed. */
+  captureSince?: string;
   /** Cap on concurrent retain-related requests the client sends to the API (default 10):
    *  drain()'s per-operation polls and deepen's chat/git retain pools. A single request returning
    *  200 while bursts get 429s means the server is rate-limiting concurrency, not total volume —
@@ -289,6 +292,7 @@ export interface Config {
   harness: string;
   disabled: boolean;
   retainSessions: boolean;
+  captureSince?: string;
   maxParallelRetains: number;
   reflectTimeoutMs: number;
   reflectToolTimeoutMs: number;
@@ -555,6 +559,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     harness: raw.harness ?? "opencode",
     disabled: raw.disabled ?? false,
     retainSessions: raw.retainSessions ?? true, // write sessions back by default, every harness
+    captureSince: raw.captureSince,
     manageBankConfig: raw.manageBankConfig ?? true,
     retainExtractionMode: RETAIN_EXTRACTION_MODES.includes(raw.retainExtractionMode!)
       ? raw.retainExtractionMode!

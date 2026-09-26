@@ -1,10 +1,11 @@
 import { afterEach, describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, appendFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { config, exchange, extensionFixture, message, persisted, sdk, Server, BANK } from './helpers.js';
 import { CURSOR_TYPE } from '../src/retention.js';
+import { TELEMETRY_BYTES, TELEMETRY_FILE } from '../src/telemetry.js';
 const roots: string[] = [];
 const root = () => { const p = mkdtempSync(join(tmpdir(), 'pi-hindsight-test-')); roots.push(p); return p; };
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -136,5 +137,35 @@ describe('persisted conversation evidence', () => {
     const fork = SessionManager.create(r, join(r, 'forks')); fork.newSession({ parentSession: manager.getSessionFile()! }); exchange(fork, 'fork');
     const f = extensionFixture(fork, server, { configPath: path, mode: 'read-write' });
     await f.emit('agent_settled'); expect(f.status).toContain('forked/cloned'); expect(server.retains).toHaveLength(1);
+  });
+
+  it('captureSince: pre-cutover sessions are never auto-captured; malformed cutoff blocks capture', async () => {
+    const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'OLD_HISTORY');
+    const future = extensionFixture(manager, server, { configPath: config(r, { captureSince: '2099-01-01T00:00:00Z' }), mode: 'read-write' });
+    await future.emit('agent_settled'); expect(future.status).toContain('pre-cutover'); expect(server.retains).toHaveLength(0);
+    const bad = extensionFixture(manager, server, { configPath: config(r, { captureSince: 'soon' }), mode: 'read-write' });
+    await bad.emit('agent_settled'); expect(bad.status).toContain('captureSince invalid'); expect(server.retains).toHaveLength(0);
+    const past = extensionFixture(manager, server, { configPath: config(r, { captureSince: '2000-01-01T00:00:00Z' }), mode: 'read-write' });
+    await past.emit('agent_settled'); expect(server.retains).toHaveLength(1);
+  });
+});
+
+describe('telemetry', () => {
+  it('real Pi: bounded 0600 metadata-only rows for retrieval and capture; nothing in off mode', async () => {
+    const r = root(), server = new Server(), agentDir = join(r, 'agent'), file = join(agentDir, TELEMETRY_FILE);
+    let subject = await sdk(r, server, persisted(r), [message('ASSISTANT_TEXT_CANARY')], { agentDir });
+    try { await subject.session.prompt('PROMPT_CANARY api_key=abcdef123456'); } finally { await subject.dispose(); }
+    const text = readFileSync(file, 'utf8'), rows = text.trim().split('\n').map(line => JSON.parse(line));
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(rows.map(row => row.event)).toEqual(['retrieval', 'capture']);
+    expect(rows[1]).toMatchObject({ retain: 'accepted', consolidation: 'not_observed', bank: BANK });
+    for (const canary of ['PROMPT_CANARY', 'abcdef123456', 'ASSISTANT_TEXT_CANARY', server.reflectText]) expect(text).not.toContain(canary);
+    writeFileSync(file, 'x'.repeat(TELEMETRY_BYTES), { mode: 0o600 });
+    subject = await sdk(r, server, persisted(r), [message('again')], { agentDir });
+    try { await subject.session.prompt('again'); } finally { await subject.dispose(); }
+    expect(statSync(`${file}.1`).size).toBe(TELEMETRY_BYTES); expect(statSync(file).size).toBeLessThan(4096);
+    const quiet = root(), off = await sdk(quiet, server, persisted(quiet), [message('off')], { agentDir: join(quiet, 'agent'), mode: 'off' });
+    try { await off.session.prompt('off'); } finally { await off.dispose(); }
+    expect(existsSync(join(quiet, 'agent', TELEMETRY_FILE))).toBe(false);
   });
 });

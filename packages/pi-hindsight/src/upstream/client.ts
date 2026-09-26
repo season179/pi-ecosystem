@@ -106,6 +106,18 @@ export class HindsightClient {
   curate(id: string, patch: Record<string, string>): Promise<any> {
     return this.request('PATCH', this.bankUrl(`/memories/${encodeURIComponent(id)}`), patch);
   }
+  /** Request (not await) regeneration of this bank's pages after curation; returns accepted page IDs. */
+  async refreshPages(max: number): Promise<string[]> {
+    const value = await this.request('GET', this.bankUrl(`/mental-models?limit=${max}`));
+    if (!Array.isArray(value?.items)) throw new Error('Hindsight invalid page list response');
+    const accepted: string[] = [];
+    for (const page of value.items.slice(0, max)) {
+      if (typeof page?.id !== 'string') continue;
+      await this.request('POST', this.bankUrl(`/mental-models/${encodeURIComponent(page.id)}/refresh`));
+      accepted.push(page.id);
+    }
+    return accepted;
+  }
 }
 // Official page response shaping: don't send body twice or the generation trace.
 export function shapePage(page: unknown): unknown {
