@@ -2,7 +2,8 @@
 // Legacy pi-memory -> per-repository Hindsight banks (plan stage 7). Local operator script, not shipped.
 // Dry run by default. Prints counts only and writes a content-free manifest; memory text is
 // processed locally and never printed. Sources (files, old bank, transcripts, backup) are read-only.
-//   node scripts/migrate-legacy.mjs [--apply] [--backup-stores <dir>]
+//   node scripts/migrate-legacy.mjs [--backup-stores <dir>]                  (dry run)
+//   node scripts/migrate-legacy.mjs --apply --expect <dryrun manifest.jsonl>  (refuses unless the plan is unchanged)
 //   node scripts/migrate-legacy.mjs --plan-map <json> --plan-global-bank <id>   (dry-run preview before config edits)
 //   node scripts/migrate-legacy.mjs --verify <manifest.jsonl>
 // Exit status is nonzero on any conflict, error, incomplete inventory (apply) or failed verification.
@@ -208,7 +209,19 @@ async function migrate(apply) {
   const summary = new Map();
   const count = key => summary.set(key, (summary.get(key) ?? 0) + 1);
   const banks = new Set(items.filter(i => i.bank).map(i => i.bank));
+  // Plan rows are computed before any write; an apply must reproduce the reviewed dry run exactly.
+  const plans = items.map(item => {
+    const row = { kind: item.kind, source_id: item.source_id, source_sha256: item.source_sha256, destination: item.bank ?? null,
+      document_id: item.document_id, quarantine: item.quarantine ?? null, injection: item.injection };
+    if (item.quarantine) return row;
+    // Expected evidence: hashes of the exact redacted payload and metadata, never the text itself.
+    return { ...row, operation_id: uuidV5(`${item.bank}\n${item.document_id}\nappend\n${item.content}`), expected_sha256: sha(item.content),
+      expected_tags: item.tags, expected_metadata_keys: Object.keys(item.metadata).sort(), expected_metadata_sha256: sha(canonical(item.metadata)) };
+  });
   if (apply) {
+    if (!option('expect')) die('--apply requires --expect <reviewed dry-run manifest.jsonl>');
+    const drift = planDrift(plans, option('expect'));
+    if (drift) die(`plan differs from the reviewed dry run (${drift}); refusing apply`);
     for (const bank of banks) {
       const pages = await get(main, bank, '/mental-models?limit=1').catch(() => undefined);
       if (!pages) die(`bank ${bank} missing or unreachable; run scripts/setup-bank.mjs first`);
@@ -219,15 +232,11 @@ async function migrate(apply) {
   let failures = 0;
   const outcomes = new Map();
   const outcome = key => outcomes.set(key, (outcomes.get(key) ?? 0) + 1);
-  for (const item of items) {
-    const row = { mode: apply ? 'apply' : 'dryrun', kind: item.kind, source_id: item.source_id, source_sha256: item.source_sha256, destination: item.bank ?? null,
-      document_id: item.document_id, quarantine: item.quarantine ?? null, injection: item.injection };
+  for (const [index, item] of items.entries()) {
+    const row = { mode: apply ? 'apply' : 'dryrun', ...plans[index] };
     if (item.quarantine) { count(`quarantine\t${item.kind}\t${item.quarantine}`); manifest.row({ ...row, outcome: 'quarantined; not imported' }); continue; }
     count(`${item.bank}\t${item.kind}${item.injection === 'always' ? ' (legacy always)' : ''}`);
-    // Expected evidence: hashes of the exact redacted payload and metadata, never the text itself.
-    const operationId = uuidV5(`${item.bank}\n${item.document_id}\nappend\n${item.content}`);
-    Object.assign(row, { operation_id: operationId, expected_sha256: sha(item.content), expected_tags: item.tags,
-      expected_metadata_keys: Object.keys(item.metadata).sort(), expected_metadata_sha256: sha(canonical(item.metadata)) });
+    const operationId = row.operation_id;
     if (!apply) { manifest.row({ ...row, outcome: 'planned' }); continue; }
     const c = client(main, item.bank);
     let result;
@@ -262,6 +271,25 @@ async function migrate(apply) {
   console.log(`manifest (no content): ${join(out, 'manifest.jsonl')}`);
   if (failures) { console.error(`migrate-legacy: ${failures} conflict/failed/error item(s); see manifest`); process.exit(1); }
   if (apply) console.log(`next: node scripts/migrate-legacy.mjs --verify ${join(out, 'manifest.jsonl')} (after extraction completes)`);
+}
+
+/** First difference between the recomputed plan and a dry-run manifest, as a content-free description. */
+function planDrift(plans, path) {
+  let rows;
+  try { rows = readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch { return 'expected manifest unreadable'; }
+  if (!rows.length || rows.some(r => r.mode !== 'dryrun')) return 'expected manifest is not a dry run';
+  const key = r => `${r.kind}\n${r.source_id}`;
+  const expected = new Map(rows.map(r => [key(r), r]));
+  if (expected.size !== rows.length) return 'expected manifest has duplicate sources';
+  if (plans.length !== rows.length) return `${plans.length} sources now vs ${rows.length} reviewed`;
+  for (const plan of plans) {
+    const want = expected.get(key(plan));
+    if (!want) return `new source ${plan.kind} ${plan.source_id}`;
+    for (const field of Object.keys(plan)) {
+      if (JSON.stringify(plan[field] ?? null) !== JSON.stringify(want[field] ?? null)) return `${field} changed for ${plan.kind} ${plan.source_id}`;
+    }
+  }
+  return undefined;
 }
 
 async function verify(path) {

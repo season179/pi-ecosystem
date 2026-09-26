@@ -79,6 +79,16 @@ function run(...args: string[]): Promise<{ code: number; out: string }> {
   return new Promise(resolve => execFile(process.execPath, [script, ...args, ...base], { env: { PATH: process.env.PATH, HOME: root } },
     (error, stdout, stderr) => resolve({ code: error ? (error as any).code ?? 1 : 0, out: stdout + stderr })));
 }
+/** Apply after a fresh dry run, as the operator does: --apply must reproduce the reviewed plan. */
+async function apply(...args: string[]) {
+  const dry = await run(...args);
+  if (dry.code) return dry;
+  return run('--apply', '--expect', latest('dryrun'), ...args);
+}
+const latest = (mode: string) => {
+  const dir = readdirSync(join(root, 'out')).filter(d => d.endsWith(mode)).sort().at(-1)!;
+  return join(root, 'out', dir, 'manifest.jsonl');
+};
 const manifest = (mode: string) => {
   const dir = readdirSync(join(root, 'out')).find(d => d.endsWith(mode))!;
   return join(root, 'out', dir, 'manifest.jsonl');
@@ -86,7 +96,7 @@ const manifest = (mode: string) => {
 
 describe('legacy migration importer', () => {
   it('imports, quarantines unknown speaker roles, and verifies exact content plus completed extraction', async () => {
-    const applied = await run('--apply');
+    const applied = await apply();
     expect(applied.code, applied.out).toBe(0);
     const rows = readFileSync(manifest('apply'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
     expect(rows.find(r => r.source_id === 'd3')).toMatchObject({ quarantine: 'unknown source_role', destination: null });
@@ -100,7 +110,7 @@ describe('legacy migration importer', () => {
 
   it('never skips a conflicting existing document and fails the run', async () => {
     api.bank(GLOBAL).set('legacy-bank:pi-memory:d1', { id: 'legacy-bank:pi-memory:d1', original_text: 'different', tags: [], document_metadata: {} });
-    const applied = await run('--apply');
+    const applied = await apply();
     expect(applied.code).toBe(1);
     expect(api.retained).not.toContain('legacy-bank:pi-memory:d1');
     expect(api.bank(GLOBAL).get('legacy-bank:pi-memory:d1').original_text).toBe('different');
@@ -108,13 +118,13 @@ describe('legacy migration importer', () => {
     expect(row.outcome).toBe('CONFLICT: existing document content mismatch; not overwritten');
     // A rerun recognizes already-imported identical documents instead of resubmitting them.
     const before = api.retained.length;
-    expect((await run('--apply')).code).toBe(1);
+    expect((await apply()).code).toBe(1);
     expect(api.retained).toHaveLength(before);
   });
 
   it('verify fails with counts on missing, pending and changed documents', async () => {
     api.completeOnRetain = false;
-    expect((await run('--apply')).code).toBe(0);
+    expect((await apply()).code).toBe(0);
     const bank = api.bank(GLOBAL);
     bank.delete('legacy-bank:pi-memory:d1');
     bank.get('legacy-file:legacy-global:m_aaaaaaaaaa').original_text += ' edited';
@@ -132,9 +142,24 @@ describe('legacy migration importer', () => {
     const dry = await run(...args);
     expect(dry.code, dry.out).toBe(0);
     expect(dry.out).toContain('backup stores MISSING -> UNVERIFIED');
-    const applied = await run('--apply', ...args);
+    const applied = await run('--apply', '--expect', latest('dryrun'), ...args);
     expect(applied.code).toBe(1);
     expect(applied.out).toContain('retired-source inventory incomplete');
+    expect(api.retained).toHaveLength(0);
+  });
+
+  it('refuses apply without, or with a drifted, reviewed dry-run manifest', async () => {
+    const bare = await run('--apply');
+    expect(bare.code).toBe(1);
+    expect(bare.out).toContain('--apply requires --expect');
+    expect((await run()).code).toBe(0);
+    const reviewed = latest('dryrun');
+    writeFileSync(join(root, 'memory/details.md'), note('m_aaaaaaaaaa', `${CANARY} prefer detailed answers`));
+    const drifted = await run('--apply', '--expect', reviewed);
+    expect(drifted.code).toBe(1);
+    expect(drifted.out).toMatch(/plan differs from the reviewed dry run \(source_sha256 changed for curated-note /);
+    expect(drifted.out).not.toContain(CANARY);
+    expect((await run('--apply', '--expect', join(root, 'absent.jsonl'))).out).toContain('expected manifest unreadable');
     expect(api.retained).toHaveLength(0);
   });
 
