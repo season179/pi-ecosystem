@@ -3,10 +3,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, exchange, extensionFixture, jev, message, persisted, sdk, Server, typesafe } from './helpers.js';
-import { CONTEXT_TYPE } from '../src/retrieval.js';
+import { CONTEXT_TYPE, GATE_MAX_MS, REFLECT_MAX_MS } from '../src/retrieval.js';
+// Seam: tests may defer the async local gate/key reads; otherwise the real ones run.
+const deferred = vi.hoisted(() => ({ loadGate: undefined as undefined | (() => Promise<unknown>), loadKey: undefined as undefined | (() => Promise<unknown>) }));
+vi.mock('../src/retrieval.js', async original => {
+  const real = await original<typeof import('../src/retrieval.js')>();
+  return { ...real, loadGate: (...a: Parameters<typeof real.loadGate>) => deferred.loadGate?.() ?? real.loadGate(...a),
+    loadKey: (...a: Parameters<typeof real.loadKey>) => deferred.loadKey?.() ?? real.loadKey(...a) };
+});
 const roots: string[] = [];
 const root = () => { const p = mkdtempSync(join(tmpdir(), 'pi-hindsight-retrieval-')); roots.push(p); return p; };
-afterEach(() => { vi.restoreAllMocks(); delete process.env.TYPESAFE_API_KEY; for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); deferred.loadGate = deferred.loadKey = undefined; delete process.env.TYPESAFE_API_KEY; for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 const reflects = (server: Server) => server.calls.filter(c => c.url.pathname.endsWith('/reflect'));
 const replies = (count: number) => Array.from({ length: count }, (_, i) => message(`reply ${i + 1}`));
 const contexts = (manager: ReturnType<typeof persisted>) => manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === CONTEXT_TYPE);
@@ -113,5 +120,39 @@ describe('automatic retrieval', () => {
     const ext = extensionFixture(capped, server, { configPath: config(r), mode: 'read-only', agentDir, jevFetch: gate.fetch });
     expect(await ext.emit('before_agent_start', start)).toBeUndefined();
     expect(ext.status).toContain('cap'); expect(gate.calls).toHaveLength(0); expect(server.calls).toHaveLength(calls);
+  });
+
+  it('opportunity is frozen: mode/config/scope changes during async reads or a positive gate, and the 8 s wall, stop later dispatch', async () => {
+    const r = root(), server = new Server(), manager = persisted(r), agentDir = join(r, 'agent'), start = { type: 'before_agent_start', prompt: 'periodic question' } as any;
+    for (let i = 0; i < 4; i++) exchange(manager, `earlier ${i}`);
+    typesafe(agentDir); process.env.TYPESAFE_API_KEY = 'test-typesafe-key';
+    const fixture = (gate: ReturnType<typeof jev>) => extensionFixture(manager, server, { configPath: config(r), agentDir, jevFetch: gate.fetch });
+    const hold = () => { let release!: () => void; return { wait: new Promise<void>(resolve => { release = resolve; }), release: () => release() }; };
+    // Mode off while the gate config is being read: no Jev.
+    let gate = jev([0.9]), ext = fixture(gate), read = hold();
+    deferred.loadGate = () => read.wait.then(() => ({ kind: 'enabled', model: 'jev-1.13.0', timeoutMs: 2000 }));
+    let pending = ext.emit('before_agent_start', start);
+    await new Promise(resolve => setTimeout(resolve, 5)); ext.flags.set('hindsight-mode', 'off'); read.release();
+    expect(await pending).toBeUndefined(); expect(gate.calls).toHaveLength(0); expect(server.calls).toHaveLength(0);
+    deferred.loadGate = undefined;
+    // Endpoint, bank or autoInject changed while a positive gate is pending: no Reflect into the new scope.
+    for (const change of [{ apiUrl: 'http://other.invalid' }, { bankId: 'coding-agent::test:other' }, { autoInject: 'none' }]) {
+      gate = jev([() => { config(r, change); return 0.9; }]); ext = fixture(gate);
+      expect(await ext.emit('before_agent_start', start)).toBeUndefined();
+      expect(gate.calls).toHaveLength(1); expect(server.calls).toHaveLength(0);
+    }
+    // Local reads that outlive the pre-run deadline: the hook returns at the wall and nothing is dispatched later.
+    for (const slow of ['loadGate', 'loadKey'] as const) {
+      vi.useFakeTimers();
+      gate = jev([0.9]); ext = fixture(gate); read = hold(); let done = false;
+      if (slow === 'loadKey') deferred.loadGate = async () => ({ kind: 'enabled', model: 'jev-1.13.0', timeoutMs: 2000 });
+      deferred[slow] = () => read.wait.then(() => slow === 'loadGate' ? { kind: 'enabled', model: 'jev-1.13.0', timeoutMs: 2000 } : 'test-typesafe-key');
+      pending = ext.emit('before_agent_start', start).then((value: unknown) => { done = true; return value; });
+      try { await vi.advanceTimersByTimeAsync(GATE_MAX_MS + REFLECT_MAX_MS); expect(done).toBe(true); }
+      finally { read.release(); }
+      expect(await pending).toBeUndefined(); await vi.advanceTimersByTimeAsync(10);
+      expect(gate.calls).toHaveLength(0); expect(server.calls).toHaveLength(0); expect(ext.status).toContain('deadline');
+      vi.useRealTimers(); deferred.loadGate = deferred.loadKey = undefined;
+    }
   });
 });

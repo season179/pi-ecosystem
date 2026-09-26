@@ -122,12 +122,12 @@ export async function sdk(root: string, server: Server, sessionManager: SessionM
   return { session, requests, async dispose() { session.dispose(); } };
 }
 
-/** Mocked TypeSafe transport: each call consumes one Noul value, 'error' (HTTP 500) or 'hang' (ignores abort). */
-export function jev(answers: Array<number | 'error' | 'hang'>) {
+/** Mocked TypeSafe transport: each call consumes one Noul value (or a callback returning one), 'error' (HTTP 500) or 'hang' (ignores abort). */
+export function jev(answers: Array<number | 'error' | 'hang' | (() => number)>) {
   const calls: Array<{ url: string; body: any }> = [];
   const fetch = async (url: string, init?: RequestInit) => {
     calls.push({ url, body: JSON.parse(String(init?.body)) });
-    const next = answers.shift();
+    const answer = answers.shift(), next = typeof answer === 'function' ? answer() : answer;
     if (next === undefined) throw new Error('Unexpected Jev call');
     if (next === 'hang') return new Promise<Response>(() => {});
     if (next === 'error') return new Response('{}', { status: 500 });

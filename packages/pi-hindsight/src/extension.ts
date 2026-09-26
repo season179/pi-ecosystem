@@ -193,9 +193,11 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (work) await Promise.race([work, new Promise<void>(resolve => { const t = setTimeout(resolve, 1000); t.unref(); })]);
     });
     const note = (ctx: ExtensionContext, text: string) => { retrieval = text; ctx.ui.setStatus('pi-hindsight-retrieval', `Hindsight retrieval: ${text}`); };
-    /** Bounded pre-run retrieval: Jev <= 2 s then Reflect <= 6 s; no retry, fallback or substitute. */
-    async function retrieve(prompt: string, ctx: ExtensionContext, generation: number) {
-      const deadline = Date.now() + GATE_MAX_MS + REFLECT_MAX_MS;
+    const fail = (ctx: ExtensionContext, generation: number, text: string) => {
+      if (generation === epoch) { pausedUntil = Date.now() + COOLDOWN_MS; note(ctx, `${text}; paused 10 minutes, not retried`); }
+    };
+    /** Pre-run retrieval under one wall deadline: Jev <= 2 s then Reflect <= 6 s; no retry, fallback or substitute. */
+    async function retrieve(prompt: string, ctx: ExtensionContext, generation: number, signal: AbortSignal, deadline: number) {
       const branch = ctx.sessionManager.getBranch();
       const trigger = triggerFor(branch), injected = injections(branch);
       if (!trigger) return undefined;
@@ -203,44 +205,59 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (Date.now() < pausedUntil) return note(ctx, 'paused after a service failure; not retried');
       const query = automaticQuery(prompt);
       if (!query) return undefined;
-      const { cfg } = destination(ctx, false);
+      // The opportunity is frozen to its first destination: mode, endpoint, bank and retrieval settings.
+      const scope = (d: Destination) => JSON.stringify([d.key, d.cfg.autoInject, d.cfg.observationScopes]);
+      const first = destination(ctx, false), { cfg } = first, original = scope(first);
       if (cfg.autoInject !== 'reflect') return note(ctx, cfg.autoInject === 'none' ? 'disabled by autoInject none'
         : `autoInject ${cfg.autoInject} unsupported; automatic retrieval off (no pages/Recall substitution)`);
       if (reflectAttempts >= REFLECT_ATTEMPTS) return note(ctx, 'automatic Reflect attempt budget used for this activation');
-      const fail = (text: string) => { if (generation === epoch) { pausedUntil = Date.now() + COOLDOWN_MS; note(ctx, `${text}; paused 10 minutes, not retried`); } };
-      if (trigger === 'periodic') {
-        const agentDir = options.agentDir ?? getAgentDir();
-        const gate = await loadGate(agentDir);
-        if (gate.kind !== 'enabled') return note(ctx, gate.kind === 'invalid' ? 'typesafe.json invalid; periodic gate off' : 'periodic Jev gate not enabled');
-        const apiKey = await loadKey(agentDir, gate.apiKeyFile);
-        if (!apiKey) return note(ctx, 'no TypeSafe key; periodic gate off');
-        if (gateAttempts >= GATE_ATTEMPTS) return note(ctx, 'Jev attempt budget used for this activation');
-        if (generation !== epoch) return undefined;
-        gateAttempts++;
-        const decision = await askGate(gateState(branch, query), { model: gate.model, timeoutMs: gate.timeoutMs, apiKey, signal: controller.signal, fetch: options.jevFetch });
-        if (generation !== epoch || decision.kind === 'aborted') return undefined;
-        if (decision.kind === 'unavailable') return fail('Jev gate unavailable');
-        if (decision.yes < GATE_THRESHOLD) return note(ctx, 'Jev gate negative; no Reflect');
-      }
-      const timeoutMs = Math.min(REFLECT_MAX_MS, Math.max(100, cfg.reflectTimeoutMs), deadline - Date.now());
-      if (timeoutMs < 100) return note(ctx, 'pre-run deadline used; no Reflect');
-      const target = operation(ctx, false, undefined, false, timeoutMs);
-      reflectAttempts++;
-      let text: string;
-      try { text = await target.client.reflect(query, 'low'); target.guard(); }
-      catch (error) { fail(safeError(error)); return undefined; }
-      const delivered = redact(text).slice(0, INJECT_CHARS);
-      const content = untrusted(text, INJECT_CHARS);
-      if (!delivered.trim()) return note(ctx, `${trigger} Reflect returned nothing; not injected`);
-      if (injected.some(e => e.content === content)) return note(ctx, `${trigger} Reflect repeated an earlier injection; not injected`);
-      note(ctx, `${trigger} context injected`);
-      return { message: { customType: CONTEXT_TYPE, content, display: true, details: { hindsight: { echoTexts: [delivered], trigger } } } };
+      const fresh = () => {
+        signal.throwIfAborted();
+        if (generation !== epoch || scope(destination(ctx, false)) !== original) throw new Error('Hindsight mode, scope or config changed; stale retrieval rejected');
+      };
+      try {
+        if (trigger === 'periodic') {
+          const agentDir = options.agentDir ?? getAgentDir();
+          const gate = await loadGate(agentDir); fresh();
+          if (gate.kind !== 'enabled') return note(ctx, gate.kind === 'invalid' ? 'typesafe.json invalid; periodic gate off' : 'periodic Jev gate not enabled');
+          const apiKey = await loadKey(agentDir, gate.apiKeyFile); fresh();
+          if (!apiKey) return note(ctx, 'no TypeSafe key; periodic gate off');
+          if (gateAttempts >= GATE_ATTEMPTS) return note(ctx, 'Jev attempt budget used for this activation');
+          gateAttempts++;
+          const decision = await askGate(gateState(branch, query), { model: gate.model, timeoutMs: Math.min(gate.timeoutMs, deadline - Date.now()), apiKey, signal, fetch: options.jevFetch });
+          fresh();
+          if (decision.kind !== 'decision') return fail(ctx, generation, 'Jev gate unavailable');
+          if (decision.yes < GATE_THRESHOLD) return note(ctx, 'Jev gate negative; no Reflect');
+        }
+        const timeoutMs = Math.min(REFLECT_MAX_MS, Math.max(100, cfg.reflectTimeoutMs), deadline - Date.now());
+        if (timeoutMs < 100) return note(ctx, 'pre-run deadline used; no Reflect');
+        fresh();
+        const target = operation(ctx, false, signal, false, timeoutMs);
+        if (target.key !== first.key) throw new Error('Hindsight mode, scope or config changed; stale retrieval rejected');
+        reflectAttempts++;
+        const text = await target.client.reflect(query, 'low'); target.guard(); fresh();
+        const delivered = redact(text).slice(0, INJECT_CHARS);
+        const content = untrusted(text, INJECT_CHARS);
+        if (!delivered.trim()) return note(ctx, `${trigger} Reflect returned nothing; not injected`);
+        if (injected.some(e => e.content === content)) return note(ctx, `${trigger} Reflect repeated an earlier injection; not injected`);
+        note(ctx, `${trigger} context injected`);
+        return { message: { customType: CONTEXT_TYPE, content, display: true, details: { hindsight: { echoTexts: [delivered], trigger } } } };
+      } catch (error) { fail(ctx, generation, safeError(error)); return undefined; }
     }
     pi.on('before_agent_start', async (event, ctx) => {
       if (mode() === 'off') return undefined;
-      const generation = epoch;
-      try { return await retrieve(event.prompt, ctx, generation) ?? undefined; }
+      const generation = epoch, local = new AbortController(), deadline = Date.now() + GATE_MAX_MS + REFLECT_MAX_MS;
+      const timer = setTimeout(() => local.abort(new Error('Hindsight pre-run deadline used')), deadline - Date.now());
+      const signal = AbortSignal.any([controller.signal, local.signal]);
+      // The wall also bounds awaits that ignore abort (local file reads, fetch/body parsing); later continuations fail fresh().
+      const wall = new Promise<undefined>(resolve => signal.addEventListener('abort', () => resolve(undefined), { once: true }));
+      try { return await Promise.race([retrieve(event.prompt, ctx, generation, signal, deadline), wall]) ?? undefined; }
       catch (error) { if (generation === epoch) note(ctx, safeError(error)); return undefined; }
+      finally {
+        clearTimeout(timer);
+        if (local.signal.aborted) fail(ctx, generation, 'Hindsight pre-run deadline used');
+        local.abort(new Error('Hindsight pre-run retrieval finished'));
+      }
     });
     pi.on('agent_settled', async (_event, ctx) => {
       if (mode() !== 'read-write') return;
