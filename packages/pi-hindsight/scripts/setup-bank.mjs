@@ -19,7 +19,10 @@ const RUNTIME = option('runtime') ?? join(HOME, '.hindsight/coding-agents');
 const HARNESS = 'claude-code';
 const die = message => { console.error(`setup-bank: ${message}`); process.exit(1); };
 // Forced everywhere a harness or bank section could re-enable them (sections shallow-merge).
-const SAFE = { retainSessions: false, gitIngest: 'none', autoSeed: false, codebaseSurvey: false, autoUpdate: false };
+// `pageTriggerType: 'manual'` is the durable page-freshness policy (2026-09-27): deepen.js seeds
+// AND re-syncs existing pages to the configured trigger, so a cron default here would put the
+// hourly `refresh_mental_model` load back on every bank. Pages refresh only on explicit request.
+const SAFE = { retainSessions: false, gitIngest: 'none', autoSeed: false, codebaseSurvey: false, autoUpdate: false, pageTriggerType: 'manual' };
 
 const global = argv.includes('--global');
 const repoArg = option('repo');
@@ -58,7 +61,8 @@ try {
   // --global has no repository: an empty private directory, with the bank passed explicitly.
   const args = [join(RUNTIME, 'dist/deepen.js'), '--repo', repo ?? dir, '--config', tmpConfig, '--harness', HARNESS, '--git-ingest', 'none', ...(global ? ['--bank', bank] : [])];
   const run = spawnSync(process.execPath, args, {
-    env: { ...process.env, HINDSIGHT_CONFIG: tmpConfig, HINDSIGHT_DISABLE_HOOKS: '1' },
+    // The private config file wins over these env fallbacks anyway; drop them so the child cannot see a cron request.
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('HINDSIGHT_PAGE_TRIGGER_'))), HINDSIGHT_CONFIG: tmpConfig, HINDSIGHT_DISABLE_HOOKS: '1' },
     encoding: 'utf8', timeout: 10 * 60_000,
   });
   status = run.status;
