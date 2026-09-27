@@ -15,14 +15,15 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) — Pre-release proof of concept for calmer assistant-message scanning.
 - [`@season179/pi-compaction`](./packages/pi-compaction) — Unpublished. Reversible, provider-valid pruning of stale tool results scored by TypeSafe's Jev, deferring Pi's summary when pruning is enough.
+- [`@season179/pi-hindsight`](./packages/pi-hindsight) — Unpublished. Thin official-derived Hindsight integration: automatic capture, Reflect-based retrieval, and scoped fact curation, sharing one bank per repository with the official Claude Code integration.
 
-Retired: `packages/pi-moa` (superseded by pi-buddy — see its
-[docs/DESIGN.md](./packages/pi-moa/docs/DESIGN.md)) and
-`packages/pi-delegate` (failed experiment, never published — see
-[docs/DELEGATE.md](./docs/DELEGATE.md)).
+Retired: `packages/pi-moa` (superseded by pi-buddy) and
+`packages/pi-delegate` (failed experiment, never published). Their source
+stays in-tree as a historical record only; full design records are in git
+history.
 
-Design docs live in `docs/` — at the repo root for cross-package history
-(shelved/retired designs), and per package for living or proposed work. The
+Cross-package reference docs live in `docs/`; per-package design notes live
+under each package. The
 [`pi-runbook` design](./packages/pi-runbook/docs/DESIGN.md) is design-stage
 only; it is not yet a package.
 

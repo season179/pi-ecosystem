@@ -63,7 +63,7 @@ The workers are:
 - Defaults: Pi + `openai-codex/gpt-6-sol` and Claude Code + `claude-opus-5-5`.
 - Other options: Claude Code + `claude-fable-5-1` (preferred for hard work), Pi + `openai-codex/gpt-6-astra`, `zai/glm-5.3`, and `zai/glm-5.3-flash` (vision).
 
-A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively.
+A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively. When launching a Pi worker, always use a provider-qualified model ID from the current Pi catalog and confirm the first prompt is processed: a bare model pattern can match an unauthenticated provider and leave the worker at a login prompt.
 
 Jev settings follow the shared `~/.pi/agent/typesafe.json` convention (`model`, default `jev-1.13.0`; `timeoutMs`, default 3000 and at most 30000; `apiKeyFile`). `TYPESAFE_API_KEY` takes precedence. Requests go only to `https://api.typesafe.ai/v1/systemone` with bounded bodies and at most one retry. The whole call has a 30-second deadline and supports cancellation; a `timeoutMs` near 30000 leaves no time for the retry inside it. Error messages are fixed and never include keys or provider bodies.
 
@@ -128,7 +128,7 @@ When a positive wake budget is exhausted, cards continue to arrive without start
 
 ## Status and Compatibility
 
-Implemented and locally installed. Automated checks cover activation, session recovery, watch delivery and bundle reloads. Historical live trials cover selected Herdr/Pi paths; see [validation and trial limits](docs/VALIDATION.md).
+Automated checks cover activation, session recovery, watch delivery and bundle reloads. Live trials have covered selected Herdr/Pi paths only; see the limits below.
 
 ### Code activation: rebuild + `/reload`
 
@@ -143,8 +143,6 @@ Note: `tsc` still emits the per-file tree under `dist/` (types, `.d.ts`, and leg
 Existing sessions must `/reload` to load this build; then use `/orchestrate`. New sessions load it normally. No push, publication, or release is implied. Historical watch evidence also covers agent-tail retrieval, wake-card delivery requests, and telemetry.
 
 Not yet verified live: `/watches` interaction, state-triggered notifications, output-mode watches, current wake-budget exhaustion UX, and SIGTERM→SIGKILL escalation. Output-card parsing covers Herdr 0.8.2's documented `result.matched_line` field in unit tests, but output mode remains unverified against a live 0.8.2 process.
-
-See the [design and decision history](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-herdr/docs/DESIGN.md) for architecture boundaries, retained evidence, and known hazards.
 
 ## Local Development
 

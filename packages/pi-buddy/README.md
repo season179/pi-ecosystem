@@ -137,13 +137,9 @@ mkdir -p /tmp/pi-buddy-smoke && cd /tmp/pi-buddy-smoke
 pi -e /path/to/pi-ecosystem/packages/pi-buddy/index.js
 ```
 
-See [docs/design-history.md](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/design-history.md) for the design decisions that still bind and why they were made.
-
 The extension is organized around three stateful capabilities: `BuddySession`,
 `ConsultationWorkflow`, and `AutomaticReview`. Pi-specific registration stays in
-the composition root. Contributors should use the
-[domain language](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/CONTEXT.md)
-and preserve the boundaries recorded in the
+the composition root. Contributors should preserve the boundaries recorded in the
 [architecture decision](https://github.com/season179/pi-ecosystem/blob/main/packages/pi-buddy/docs/adr/0001-capability-first-domain-modules.md).
 
 ## Compatibility

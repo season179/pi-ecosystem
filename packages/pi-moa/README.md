@@ -8,4 +8,4 @@ Do not install, build on, or treat this package as current guidance. It is not a
 
 Buddy is not a drop-in `moa/*` provider replacement. It is a Pi extension that supplies requested consultations and automatic reviews while the main model remains responsible for the answer and actions.
 
-See the [retired design record](./docs/DESIGN.md) for historical architecture and findings.
+The retired design record is in git history.

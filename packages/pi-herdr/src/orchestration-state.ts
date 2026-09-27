@@ -7,7 +7,6 @@
  * The role belongs to the whole conversation, so the decision is read from
  * every entry in the session (append order) rather than the active `/tree`
  * branch; navigating the tree never silently changes it.
- * Verified against Pi 0.85.1 on 2026-09-17; see docs/DESIGN.md.
  */
 
 import { readFileSync } from "node:fs";

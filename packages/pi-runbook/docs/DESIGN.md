@@ -178,6 +178,3 @@ explicit agreement. Notable resolutions:
   pushback; pi added the substantive-note rule and the 1-of-2 quota).
 - "Human-protected judge" is procedural, not a security boundary —
   interactive-source-only, documented honestly (pi's objection #2).
-
-Thread + research context also stored in Claude's project memory:
-`codegraff-thread.md`, `pi-runbook-plan.md`.

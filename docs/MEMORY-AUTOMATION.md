@@ -1,9 +1,9 @@
 # Automatic memory: Jev gating + local Hindsight
 
-Status: implemented, tested, and **activated** (shared bank `pi-memory` configured after
-user approval; first use creates the bank lazily). No real-conversation bank data exists:
-development used no live banks, and the one live validation (below) used a disposable
-synthetic bank that was deleted afterwards.
+Optional pi-memory feature. It is off unless `<agentDir>/pi-memory/automation.json`
+exists; the first retain creates the bank lazily. This document is the design
+reference for that feature; user-facing setup is in the
+[package README](../packages/pi-memory/README.md#automatic-memory-hindsight-optional).
 
 ## What it does
 
@@ -51,8 +51,8 @@ Recalled memory is scoped to the run:
 
 **Storage.** One Pi-owned bank (`pi-memory` by default) holds memories from
 every project. Projects are not given separate banks: a project entry can
-only opt out, and a per-project `bank` is rejected. Other banks, such as
-Hermes's and any existing stores, are never read or written.
+only opt out, and a per-project `bank` is rejected. Other banks are never
+read or written.
 
 **Units.** Each fresh user or assistant message (bounded to 1,500 characters,
 secret-redacted on a best-effort basis) is split into verbatim *source units*:
@@ -225,7 +225,7 @@ Feedback loops are cut in three ways:
   unknown, failed, dropped unjudged). Accepted retains are reported as "queued;
   not yet confirmed stored". "Reachable again" recovery notices render as info.
 
-## Proposed defaults (tunable, not user-approved individually)
+## Defaults (tunable)
 
 - `retainThreshold` is 0.6, `recallThreshold` is 0.5, the broad-scope
   confidence floor is 0.7, and the portability floor is 0.8.
@@ -258,80 +258,13 @@ Feedback loops are cut in three ways:
 - **Observations lose provenance metadata:** the source falls back to what the
   tags say.
 - **Classifier quality is unmeasured.** Jev's classification of real
-  conversations has not been evaluated, because no live or paid calls were made
-  during development.
+  conversations has not been evaluated.
 
-## Evidence
+## Tests
 
-- **Package tests:** 324 tests pass across 18 files. New coverage is in
-  `packages/pi-memory/test/automation.test.ts`:
-  - real Pi SDK sessions with fake Jev, Hindsight and provider;
-  - unit tests of `MemoryAutomation` for applicability, provenance, scope,
-    outages and stale work;
-  - a single mixed-scope message, a rule with its exception, run-end capture
-    with no later prompt, backlog catch-up and dropped accounting, read-only
-    to read-write, and shutdown drain and reporting.
-- **Mutation checks:**
-  - removing the client-side scope check,
-  - removing the user-role requirement,
-  - removing the tag filter,
-  - removing the confidence floor,
-  - removing the portability check or the qualifier guard,
-  - disabling run-end capture,
-  - newest-first selection or marking unjudged messages judged,
-  - not marking read-only messages considered,
-  - removing dropped accounting,
-  - flushing only the in-flight retain,
-  - or silencing the shutdown report
-
-  each fails a test.
-- **Installed Pi 0.87.1 probe** loaded the package from its local path, with
-  fetch fully faked and every other network call blocked:
-  - recall reached the first provider request exactly once;
-  - `tag_groups` carried the current project key;
-  - the retain was async with an `operation_id`, a fresh `document_id`,
-    project-fact tags and provenance metadata;
-  - injected memory was excluded from the retain;
-  - `agent_settled` fired and the run-end check (no recall question) retained
-    the final assistant reply, with still exactly one provider request.
-- **Live synthetic validation (2026-09-23, activation evidence):** one bounded
-  end-to-end run against the real Jev API (`jev-1.13.0`) and real local
-  Hindsight 0.10.1, through the built package's production automation loaded
-  into an installed Pi 0.87.1 SDK session with a fake main provider capturing
-  the assembled request. All service calls were real; only the chat model was
-  faked. Isolated temp `agentDir`/cwds and a one-off disposable bank
-  (`test-pi-memory-20260923-…`, verified absent first, deleted after).
-  Results:
-  - 8 real Jev gate calls (prompt + run-end per turn) produced well-formed
-    judgments; a first-prompt recall abstention (0.47 < 0.5) correctly meant no
-    recall, and task-chatter units were judged `not_durable` and not stored.
-  - 4 async retains (fresh `document_id`, provenance metadata, stable tags
-    only) were accepted; polling their `operation_id` in the test harness
-    showed every operation `completed`. The first retain created the bank
-    lazily; production code does not poll.
-  - Tags and scope survived Hindsight extraction server-side: the retained
-    user-wide preference came back tagged `pi-memory:user-wide` only, and
-    project facts came back with `project-fact` + the source project key.
-  - Cross-project isolation held on the wire: a second project's recall
-    (its own key in `tag_groups`) returned only user-wide items — the other
-    project's facts were excluded server-side and never injected.
-  - The production assembler injected the recalled block (untrusted advisory,
-    per-item applicability labels) into the capturing provider request; nothing
-    recalled was persisted to session history, and no block was injected while
-    the bank was empty.
-  - Real-Jev robustness data point: an assistant's acknowledgment ("Understood,
-    I will keep release notes concise") was labeled `user_preference` 0.60 but
-    correctly demoted to project-local by the deterministic user-role guard.
-  - Duplication observed in the first run (fixed the same day): extraction of
-    one retained item yielded both a fact and an observation, and recall
-    returned both, injecting the same preference twice. **Resolved narrowly**:
-    every recall now sends `prefer_observations: true` (Hindsight 0.10.1
-    `RecallRequest`), so the server drops raw facts consolidated into a
-    returned observation and backfills the freed slots; a regression test
-    pins the wire option, and a rerun of the live probe showed the preference
-    recalled and injected exactly once (same-project and cross-project). This
-    is not a semantic-dedup guarantee: distinct facts that were never
-    consolidated together can still coexist in results.
-  Limits: synthetic one-off traffic only — this is wiring evidence, not an
-  evaluation of classification quality on real conversations, and it says
-  nothing about long-run bank growth or consolidation behaviour.
+Coverage lives in `packages/pi-memory/test/automation.test.ts`: real Pi SDK
+sessions with fake Jev, Hindsight and provider; unit tests of
+`MemoryAutomation` for applicability, provenance, scope, outages and stale
+work; mixed-scope messages, rules with exceptions, run-end capture, backlog
+catch-up, read-only to read-write, and shutdown drain. No test uses the
+network.

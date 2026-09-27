@@ -61,7 +61,7 @@ tokens, all state + questions 64k tokens — callers keep payloads well below.
 ## Configuration
 
 Global per-user file `<agentDir>/typesafe.json` (each extension resolves
-`agentDir` through its existing mechanism; for this user `~/.pi/agent`).
+`agentDir` through its existing mechanism; `~/.pi/agent` by default).
 An absent file leaves both features disabled — no behavior change for other
 users. A malformed file yields a bounded visible warning and deterministic
 existing (non-Jev) behavior, never silent apparent success.

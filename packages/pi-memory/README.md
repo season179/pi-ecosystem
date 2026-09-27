@@ -626,9 +626,7 @@ pi --no-extensions -e ./packages/pi-memory --help
 ```
 
 The tarball should include `README.md`, `LICENSE`, `package.json`, and compiled
-files under `dist/`. In the workspace, see the
-[injection diagnosis and verification report](../../docs/MEMORY-INJECTION.md)
-for implementation evidence and known limitations.
+files under `dist/`.
 
 ## Security
 
