@@ -1,5 +1,6 @@
 // Derived from official 0.7.0 core/hindsight.ts and knowledge-tools.ts (MIT).
 // Patch: only Retain/Reflect/page reads; guarded abortable transport, no setup/deletes/retries.
+import { setTimeout as delay } from 'node:timers/promises';
 import type { ObservationScopes } from './defaults.js';
 
 export interface RetainOptions {
@@ -136,6 +137,24 @@ export class HindsightClient {
     }
     if (seen.size !== total) throw new Error('Hindsight source fact listing incomplete; curation state unknown');
     return { facts: total, edited, invalidated: archived.total };
+  }
+  /** Wait for the edit's derived observations before asking manual pages to refresh.
+   * Stats are cached by default; an uncached read is necessary after a just-verified PATCH.
+   * This is a bounded bank-local readiness check, not proof that a page's synthesis is correct. */
+  async waitForConsolidation(maxMs = 30_000): Promise<void> {
+    const deadline = Date.now() + maxMs;
+    const signal = AbortSignal.any([this.options.signal, AbortSignal.timeout(maxMs)]);
+    const scoped = new HindsightClient({ ...this.options, signal });
+    for (;;) {
+      const value = await scoped.request('GET', this.bankUrl('/stats?refresh=true'));
+      if (value?.bank_id !== this.options.bank || !Number.isSafeInteger(value.pending_consolidation) || value.pending_consolidation < 0 ||
+        !Number.isSafeInteger(value.failed_consolidation) || value.failed_consolidation < 0)
+        throw new Error('Hindsight consolidation status could not be verified');
+      if (value.failed_consolidation) throw new Error('Hindsight consolidation has failed facts; page refresh deferred');
+      if (value.pending_consolidation === 0) return;
+      if (Date.now() >= deadline) throw new Error('Hindsight consolidation still pending; page refresh deferred');
+      await delay(Math.min(2000, deadline - Date.now()), undefined, { signal });
+    }
   }
   /** Request (not await) regeneration of this bank's pages after curation; returns accepted page IDs. */
   async refreshPages(max: number): Promise<string[]> {

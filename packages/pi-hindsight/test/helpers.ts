@@ -13,6 +13,8 @@ export class Server {
   operations = new Map<string, { status: string }>();
   facts = new Map<string, any>();
   pending = false;
+  statsPending = [0];
+  statsFailed = 0;
   version = '0.10.1';
   reflectText = 'Previously retrieved memory says the old timeout was thirty seconds.';
   globalText = 'Global memory: the user prefers concise answers.';
@@ -40,6 +42,8 @@ export class Server {
       return json({ operation_id: b.operation_id });
     }
     if (path.endsWith('/reflect')) return json({ text: path.includes(GLOBAL_BANK) ? this.globalText : this.reflectText });
+    if (call.method === 'GET' && path.endsWith('/stats')) return json({ bank_id: BANK,
+      pending_consolidation: this.statsPending.length > 1 ? this.statsPending.shift() : this.statsPending[0], failed_consolidation: this.statsFailed });
     if (call.method === 'GET' && path.endsWith('/mental-models')) return json({ items: [{ id: 'kp-one' }], total: 1 });
     if (call.method === 'POST' && path.endsWith('/refresh')) return json({ operation_id: 'refresh-op', status: 'pending' });
     if (path.endsWith('/knowledge-base/search')) return json({ results: [{ id: 'kp-one', name: 'Decisions', snippet: 'Previously retrieved memory says the old timeout was thirty seconds.', score: 1 }] });

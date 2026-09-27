@@ -223,10 +223,15 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         await target.client.curate(args.fact_id, patch); target.guard();
         const verified = await target.client.fact(args.fact_id); target.guard();
         if (verified.id !== fact.id || verified.document_id !== fact.document_id || (patch.text !== undefined && verified.text !== patch.text) || (patch.state !== undefined && verified.state !== patch.state)) throw new Error('Hindsight curation accepted but resulting fact not verified; do not blindly retry');
-        // Derived pages would otherwise keep the old claim until their scheduled refresh.
+        // Manual pages will not retry a refresh that races the edit's observation consolidation.
         let pages: string;
-        try { const ids = await target.client.refreshPages(PAGE_REFRESH_MAX); target.guard(); pages = `refresh requested for ${ids.length} page(s); freshness not verified`; }
-        catch (error) { pages = `refresh not requested (${safeError(error)}); pages may stay stale until their scheduled refresh`; }
+        try {
+          await target.client.waitForConsolidation(); target.guard();
+          const ids = await target.client.refreshPages(PAGE_REFRESH_MAX); target.guard();
+          pages = `refresh requested for ${ids.length} page(s); freshness not verified`;
+        } catch (error) {
+          pages = `refresh deferred or not verified (${safeError(error)}); fact curation is verified, but pages may remain stale; request an explicit refresh later after consolidation`;
+        }
         return result({ status: 'fact curation verified', fact_id: args.fact_id, pages,
           source: 'unchanged; automatic capture blocked in this Pi session',
           warning: 'Other sessions/harnesses may replay the original source. Derived observations are not verified fresh. This is not permanent erasure.' });

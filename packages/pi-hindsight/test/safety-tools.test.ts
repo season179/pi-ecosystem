@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,6 +135,42 @@ describe('modes, privacy and identified tools', () => {
     await expect(ext.tool('hindsight_manage_fact', { ...params, action: 'permanent-delete' })).rejects.toThrow('unavailable');
     expect(server.calls).toHaveLength(calls);
     expect(server.calls.some(c => c.method === 'DELETE')).toBe(false);
+  });
+
+  it('waits for uncached consolidation after verified curation before requesting a manual page refresh', async () => {
+    const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'original');
+    server.statsPending = [1, 0];
+    server.facts.set('f', { id: 'f', bank_id: BANK, type: 'world', text: 'old', document_id: 'source' });
+    const ext = extensionFixture(manager, server, { configPath: config(r) });
+    const answer = await ext.tool('hindsight_manage_fact', { action: 'edit', fact_id: 'f', expected_text: 'old', document_id: 'source', text: 'corrected' });
+    const calls = server.calls.map(c => `${c.method} ${c.url.pathname}${c.url.search}`);
+    const stats = calls.flatMap((c, i) => c.endsWith('/stats?refresh=true') ? [i] : []);
+    const refresh = calls.findIndex(c => c.endsWith('/refresh'));
+    expect(stats).toHaveLength(2);
+    expect(refresh).toBeGreaterThan(stats[1]);
+    expect(JSON.stringify(answer)).toContain('refresh requested for 1 page');
+    expect(server.calls.filter(c => c.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it.each(['abort', 'timeout'] as const)('reports verified curation but defers page refresh on consolidation %s', async reason => {
+    const r = root(), server = new Server(), manager = persisted(r); exchange(manager, 'original');
+    server.statsPending = [1];
+    server.facts.set('f', { id: 'f', bank_id: BANK, type: 'world', text: 'old', document_id: 'source' });
+    const ext = extensionFixture(manager, server, { configPath: config(r) });
+    const controller = new AbortController();
+    if (reason === 'abort') server.before = call => { if (call.url.pathname.endsWith('/stats')) controller.abort(); };
+    else vi.useFakeTimers();
+    try {
+      const work = ext.tool('hindsight_manage_fact', { action: 'edit', fact_id: 'f', expected_text: 'old', document_id: 'source', text: 'corrected' }, controller.signal);
+      if (reason === 'timeout') await vi.advanceTimersByTimeAsync(31_000);
+      const answer = JSON.stringify(await work);
+      expect(answer).toContain('fact curation is verified');
+      expect(answer).toContain('refresh deferred or not verified');
+      expect(answer).toContain('explicit refresh later');
+      expect(server.facts.get('f').text).toBe('corrected');
+      expect(server.calls.filter(c => c.method === 'PATCH')).toHaveLength(1);
+      expect(server.calls.some(c => c.url.pathname.endsWith('/refresh'))).toBe(false);
+    } finally { vi.useRealTimers(); }
   });
 
   it('revalidates mode/scope after an awaited fact read, and propagates abort/shutdown without late writes', async () => {
