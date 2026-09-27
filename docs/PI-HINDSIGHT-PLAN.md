@@ -1,21 +1,23 @@
 # pi-hindsight: replacement and shared-memory plan
 
-Current checkpoint: 2026-09-26. **Stages 4–8 are authorized and in progress, not complete.** The user personally applied 359 migration items (10 quarantined) and restarted the service with global/retain concurrency 4/2. The replacement Pi package and latest Claude source-curation guard are locally installed; the old writer is disabled but its package/data remain. Four migration parents have failed on provider HTTP 429/code 1302 and await separately authorized recovery. Full exact/extracted verification and live host acceptance are outstanding; old-package removal is blocked. See the [audit record](HINDSIGHT-DATA-AUDIT.md), [routing record](HINDSIGHT-BANK-ROUTING.md) and [package status/limits](../packages/pi-hindsight/README.md).
+**Current local cutover, 2026-09-27:** replacement Pi package from `00bd827` resolves through the user-level local package declaration to the reviewed built extension (no reinstall needed); the old pi-memory package declaration was removed via supported `pi remove` after coordinator approval. Its config/automation remain **disabled** for already loaded sessions, which are not retroactively unloaded. Original bank/files/backups remain. The accepted migration outcome is **355/359 verified + 4 provider-throttled, unretried accepted skips + 10 quarantines**, not 359 successful imports. The four skips remain failed; no recovery retry is planned or authorized. No service/provider/SQL/production-bank operation changes, repeat migration, old-data deletion or push were part of cutover.
 
-Earlier dated implementation and baseline sections below are historical evidence, not current installation/authorization claims. **Do not repeat real migration apply, restart/signal the service, mutate production operations, or delete original data/backups under this plan.** Recovery needs coordinator authorization. While the provider is throttled, further live model tests are paused; offline/local loading checks may continue. No push is authorized.
+`00bd827` passed independent source review, **60/60 tests**, typecheck and build. Earlier cross-harness retrieval/append/correction passed, but its page refresh remained stale and global→Pi was unknown *in that earlier run*. A fresh reviewed owned fixture then showed an exact fact correction with persisted capture block, a single post-consolidation manual page refresh with corrected content/qualifier and old claim absent, and a genuine Pi global-only answer after late release; both fresh fixture banks were subsequently deleted after exact-owner/quiescence checks. See [package status/limits](../packages/pi-hindsight/README.md), `/tmp/pi-hindsight-retest-live-report.md` and `/tmp/pi-hindsight-retest-final-review.md`. Fast foreground delivery (≤6 s), every mixed-scope prompt and arbitrary page/scope freshness remain **unproven**. The 53 destination Knowledge Pages remain manual-refresh only. Older checkpoint sections below preserve dated findings, not current admission, authorization or installed-state claims. See the [audit record](HINDSIGHT-DATA-AUDIT.md) and [routing record](HINDSIGHT-BANK-ROUTING.md).
 
 The selected target is a new, thin **pi-hindsight** package derived from the official Pi integration, replacing pi-memory after verification. Claude Code uses the official integration. Both share one bank per repository; Jev gates proactive retrieval, and telemetry measures usefulness as well as operation health.
 
-This is the current plan, not a chronology. It supersedes conflicting recommendations in the [study](HINDSIGHT-STUDY.md), [integration comparison](HINDSIGHT-INTEGRATION-COMPARISON.md) and [earlier improvement plan](HINDSIGHT-IMPROVEMENT-PLAN.md). Their source findings and historical snapshots remain supporting evidence.
+The sections below are the original delivery plan and dated checkpoints, retained for provenance; the cutover status above supersedes their pending-work language. The [study](HINDSIGHT-STUDY.md), [integration comparison](HINDSIGHT-INTEGRATION-COMPARISON.md) and [earlier improvement plan](HINDSIGHT-IMPROVEMENT-PLAN.md) are supporting historical evidence.
 
-## Authorization and decision status
+## Historical authorization and decision status (pre-cutover)
 
 - Selected goals: official-derived Pi replacement, official Claude integration, per-repository sharing, coherent automatic Retain, deliberate Reflect and page search/read, Jev-gated additional Reflect, scoped corrections, and migration of both legacy sources.
 - The sequence below combines those goals with recommended safeguards and verification steps. Exact implementation, defaults and policies are not all user-approved; unresolved choices are listed explicitly.
 - Documentation and existing pi-memory changes were committed separately. Stages 1–3 were subsequently authorized: audit/protection, routing plus empty-bank creation for this repository, and replacement-package implementation with isolated staging verification. Live cutover and later stages require separate approval.
 - Beyond the completed scoped work above, this plan alone does not authorize further installation, migration, uninstall, bank mutation, provider/config/version change, network operation, push or release. No instruction files were edited.
 
-## Current completion status and verification limits
+## Historical completion checkpoints and verification limits (before fresh retest)
+
+The dated bullets below report what was known then. In particular, "pending recovery", "not accepted" and "uninstall awaits review" are superseded by the current local cutover status above; the four failed migration items were accepted as **unretried skips**, not recovered.
 
 - **Implemented, verified offline:** bounded automatic background retrieval. Initial foreground wait ≤6 seconds; periodic gate/key/Jev work ≤2 seconds, then Reflect foreground ≤6 seconds. The same requests may continue for at most 90 seconds total from dispatch, honoring lower configured deadlines. One owned opportunity, low budget, capped attempts, no retry/Recall fallback or induced turn.
 - **Delivery:** each eligible boundary snapshots the successful scope answers already available; a hung sibling cannot withhold healthy context. Selection locally cancels unused sibling requests and freezes one message, without a grace timer, new call or self-cancellation failure pause. Ready late context is staged after a natural tool-bearing turn, then released only into a fresh same-request model context. Image-normalization notes use the pinned host grammar plus exact original text, not arbitrary prefix matching. Discarded late drafts have explicit status and do not consume delivered-injection slots. A receipt means released to context, not provider use. New prompts never receive unreleased old results. Short one-answer requests can finish without memory.
@@ -41,7 +43,7 @@ This is the current plan, not a chronology. It supersedes conflicting recommenda
 - The service uses pg0-managed real **PostgreSQL 18.1 on port 5433**, separate from Homebrew PostgreSQL 18 on 5432. No database move is needed; 8888 is the integration API, not a database port.
 - Local repair evidence: `/tmp/hindsight-claude-fix-report.md` (ephemeral report; the durable verified facts are summarized above). No live checks are repeated by this documentation task.
 
-## Sequential delivery plan — after separate execution approval
+## Historical sequential delivery plan (not fresh execution approval)
 
 ### 1. Back up, audit sources and reproduce the upstream defect
 
@@ -129,7 +131,7 @@ The [package README](../packages/pi-hindsight/README.md) records capability limi
 - During approved cutover, disable the old automatic writer before enabling replacement capture so both do not ingest the same Pi conversation. Keep rollback instructions and original data available.
 - **Uninstall pi-memory last**, only after replacement, both migrations and cross-harness checks pass. Rollback must avoid simultaneous writers; code rollback does not undo bank mutations.
 
-## Stage 5–8 decisions and implementation status (2026-09-26)
+## Historical Stage 5–8 implementation checkpoint (2026-09-26)
 
 Implemented and tested in `packages/pi-hindsight`. Live since 2026-09-26 12:40–12:55 UTC, after a fresh backup: old writer frozen, shared/global configs, Claude guard, global hook and MCP, and explicit page setup for 11 empty banks. The real migration apply, the Pi install and the pi-memory uninstall are still pending authorization.
 
