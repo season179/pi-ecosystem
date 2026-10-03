@@ -123,7 +123,28 @@ each expected label (`omit`, `sufficient`, `low`) to be chosen with probability
 Sanitized synthetic example (not real data):
 
 ```json
-{"v":1,"ts":"2026-09-25T00:00:00.000Z","type":"jev_triage","sessionId":"s1","runId":"r1","policyRevision":"jev-triage-v1","outcome":"review","model":"jev-1.13.0","totalMs":412,"answers":{"action":{"choice":"omit","probabilities":{"omit":0.8499999999999999,"review":0.1500000000000001}},"context":{"choice":"sufficient","probabilities":{"sufficient":0.9,"unknown":0.1}},"risk":{"choice":"low","probabilities":{"low":0.95,"investigate":0.05}}},"skipThreshold":0.85,"phase":"periodic","opportunity":2}
+{
+  "v": 1,
+  "ts": "2026-09-25T00:00:00.000Z",
+  "type": "jev_triage",
+  "sessionId": "s1",
+  "runId": "r1",
+  "policyRevision": "jev-triage-v1",
+  "outcome": "review",
+  "model": "jev-1.13.0",
+  "totalMs": 412,
+  "answers": {
+    "action": {
+      "choice": "omit",
+      "probabilities": { "omit": 0.8499999999999999, "review": 0.1500000000000001 }
+    },
+    "context": { "choice": "sufficient", "probabilities": { "sufficient": 0.9, "unknown": 0.1 } },
+    "risk": { "choice": "low", "probabilities": { "low": 0.95, "investigate": 0.05 } }
+  },
+  "skipThreshold": 0.85,
+  "phase": "periodic",
+  "opportunity": 2
+}
 ```
 
 Rows written before this field existed have no `answers`/`skipThreshold`; treat

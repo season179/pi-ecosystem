@@ -23,21 +23,21 @@ Requirements:
 
 The buddy gets involved four ways:
 
-| Trigger | What happens |
-|---|---|
-| `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance |
-| `/buddy <question>` | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt |
-| Watchdog (automatic) | After 3 turns without a consult, the buddy investigates in the background while the agent keeps working |
-| Run-end (automatic) | Interactive runs of ≥ 2 turns without an actual consultation get a quiet background review at completion; Jev skips do not count as consultations. Print/JSON mode skips it because the process exits immediately |
+| Trigger              | What happens                                                                                                                                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance                                                                                                                                                     |
+| `/buddy <question>`  | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt                                                                                                               |
+| Watchdog (automatic) | After 3 turns without a consult, the buddy investigates in the background while the agent keeps working                                                                                                           |
+| Run-end (automatic)  | Interactive runs of ≥ 2 turns without an actual consultation get a quiet background review at completion; Jev skips do not count as consultations. Print/JSON mode skips it because the process exits immediately |
 
 Stances for `consult_buddy`:
 
-| Stance | Behavior |
-|---|---|
-| `discuss` | Open exploration: tradeoffs, alternatives, second-order effects |
-| `debate` | Steelmans the case *against* the proposal before giving a verdict |
+| Stance       | Behavior                                                                         |
+| ------------ | -------------------------------------------------------------------------------- |
+| `discuss`    | Open exploration: tradeoffs, alternatives, second-order effects                  |
+| `debate`     | Steelmans the case _against_ the proposal before giving a verdict                |
 | `fact_check` | Verifies claims against real files; cites VERIFIED / CONTRADICTED / UNVERIFIABLE |
-| `review` | Quality review of recent work, ordered by severity |
+| `review`     | Quality review of recent work, ordered by severity                               |
 
 Automatic reviews are designed to be quiet. Buddy submits a structured verdict; passes disappear and concerns remain private until revalidated against a stable current transcript snapshot during an active run. Concurrent input, messages, tools, shell activity, or model changes invalidate that snapshot. Only a currently confirmed or revised recommendation is steered into the active run; a suppressed candidate disappears.
 
