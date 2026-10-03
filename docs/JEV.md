@@ -10,8 +10,7 @@ Caller/session cancellation is different: stop the cancelled work;
 do not launch a fallback review.
 
 This page covers Buddy only. Other Jev consumers document their behavior in
-[pi-herdr](../packages/pi-herdr/README.md),
-[pi-compaction](../packages/pi-compaction/README.md), and
+[pi-herdr](../packages/pi-herdr/README.md) and
 [pi-hindsight](../packages/pi-hindsight/README.md).
 
 This describes the active integration contract, not proof that a running Pi

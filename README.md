@@ -13,14 +13,14 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-worktree`](./packages/pi-worktree) — Published. Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) — Pre-release proof of concept for calmer assistant-message scanning.
-- [`@season179/pi-compaction`](./packages/pi-compaction) — Unpublished. Reversible, provider-valid pruning of stale tool results scored by TypeSafe's Jev, deferring Pi's summary when pruning is enough.
 - [`@season179/pi-hindsight`](./packages/pi-hindsight) — Unpublished. Thin official-derived Hindsight integration: automatic capture, Reflect-based retrieval, and scoped fact curation, sharing one bank per repository with the official Claude Code integration.
 
 Retired: `packages/pi-moa` (superseded by pi-buddy) and
 `packages/pi-delegate` (failed experiment, never published). Their source
 stays in-tree as a historical record only; full design records are in git
-history. The failed `pi-memory` experiment and its legacy migration script
-were removed; their source remains available in git history.
+history. The failed `pi-memory` and `pi-compaction` experiments, including
+pi-memory's legacy migration script, were removed; their source remains
+available in git history.
 
 Cross-package reference docs live in `docs/`; per-package design notes live
 under each package. The
