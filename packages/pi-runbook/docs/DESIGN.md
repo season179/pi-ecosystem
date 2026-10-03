@@ -5,6 +5,9 @@ Date: 2026-08-20 (agreed after a two-round Claude ↔ pi debate; see
 Status: **agreed, not yet implemented**. Next step: scaffold the
 package and build the MVP in a worktree.
 
+Historical note: pi-memory, referenced below, has since been removed.
+Its source and the original design context remain in git history.
+
 ## The idea
 
 Inspired by @rachpradhan's CodeGraff thread

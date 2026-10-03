@@ -90,7 +90,7 @@ Opt in with `<agentDir>/typesafe.json` (`~/.pi/agent` by default; respects `PI_C
 }
 ```
 
-Provide `TYPESAFE_API_KEY` through your secure environment, or a private key file named by `apiKeyFile` (relative to agentDir or absolute; restrict permissions to `0600`). Environment takes precedence. Never paste a key into prompts or logs. Config and credentials are re-read at each decision; absent config or `buddy.enabled: false` leaves normal Buddy behavior. This file can also contain the separate `memory` settings used by pi-memory.
+Provide `TYPESAFE_API_KEY` through your secure environment, or a private key file named by `apiKeyFile` (relative to agentDir or absolute; restrict permissions to `0600`). Environment takes precedence. Never paste a key into prompts or logs. Config and credentials are re-read at each decision; absent config or `buddy.enabled: false` leaves normal Buddy behavior.
 
 This is **active, not shadow**: before a periodic investigation, Jev can skip the reviewer call for clearly routine, low-risk work. Every fifth periodic opportunity bypasses Jev for a full audit. A skip consumes one cadence opportunity but is not a Buddy consultation: eligible run-end reviews and explicit tool/user consultations still run normally. The gate pauses that turn boundary for up to the configured operation budget (default 3 seconds); the full investigation remains detached.
 
@@ -100,7 +100,7 @@ Jev receives only the current request and up to eight recent activity messages (
 
 Missing credentials, malformed config/answers, provider errors or deadlines use normal Buddy, with a bounded warning and `Jev: fallback` footer status. Cancellation, new activity, session/tree changes and Buddy off prevent stale gate results from launching or suppressing work. `/buddy status` shows the last gate state; `not checked` is not an activation claim. Telemetry uses distinct `jev_triage` rows, never synthetic passes. SDK logging is explicitly off, the endpoint is pinned to `https://api.typesafe.ai`, retries are disabled, and response bytes plus the complete parsed-result wait are bounded.
 
-`timeoutMs` accepts integer 1–30000 (shared with pi-memory and pi-herdr; Jev triage runs inside the awaited `turn_end` handler, so a long value can delay the next turn by up to that long), `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
+`timeoutMs` accepts integer 1–30000 (shared with pi-herdr; Jev triage runs inside the awaited `turn_end` handler, so a long value can delay the next turn by up to that long), `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
 
 ## Enable / Disable
 

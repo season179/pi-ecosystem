@@ -9,7 +9,6 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-buddy`](./packages/pi-buddy) — Published. Read-only sparring partner for requested consultations and automatic review.
 - [`@season179/pi-herdr`](./packages/pi-herdr) — Pre-release. Non-blocking watch/wake bridge for a Pi orchestrator already operating through Herdr.
 - [`@season179/pi-guard`](./packages/pi-guard) — Pre-release. Intent reviewer that blocks unauthorized or unrelated tool actions.
-- [`@season179/pi-memory`](./packages/pi-memory) — Pre-release. Scoped memory with explicit tools, on-demand recall, and mode-controlled always-body injection.
 - [`@season179/pi-model-fallback`](./packages/pi-model-fallback) — Published. Automatic model failover driven by a standalone `fallback-models.json` config.
 - [`@season179/pi-worktree`](./packages/pi-worktree) — Published. Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.
@@ -20,7 +19,8 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 Retired: `packages/pi-moa` (superseded by pi-buddy) and
 `packages/pi-delegate` (failed experiment, never published). Their source
 stays in-tree as a historical record only; full design records are in git
-history.
+history. The failed `pi-memory` experiment and its legacy migration script
+were removed; their source remains available in git history.
 
 Cross-package reference docs live in `docs/`; per-package design notes live
 under each package. The
