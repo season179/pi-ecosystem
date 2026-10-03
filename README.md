@@ -15,12 +15,11 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-readbeam`](./packages/pi-readbeam) — Pre-release proof of concept for calmer assistant-message scanning.
 - [`@season179/pi-hindsight`](./packages/pi-hindsight) — Unpublished. Thin official-derived Hindsight integration: automatic capture, Reflect-based retrieval, and scoped fact curation, sharing one bank per repository with the official Claude Code integration.
 
-Retired: `packages/pi-moa` (superseded by pi-buddy) and
-`packages/pi-delegate` (failed experiment, never published). Their source
+Retired: `packages/pi-delegate` (failed experiment, never published). Its source
 stays in-tree as a historical record only; full design records are in git
-history. The failed `pi-memory` and `pi-compaction` experiments, including
-pi-memory's legacy migration script, were removed; their source remains
-available in git history.
+history. `pi-moa` (superseded by pi-buddy) and the failed `pi-memory` and
+`pi-compaction` experiments, including pi-memory's legacy migration script,
+were removed; their source remains available in git history.
 
 Cross-package reference docs live in `docs/`; per-package design notes live
 under each package. The
