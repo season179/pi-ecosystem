@@ -5,19 +5,61 @@
   "type": "module",
   "license": "MIT",
   "author": "Season Saw",
-  "repository": { "type": "git", "url": "git+https://github.com/season179/pi-ecosystem.git", "directory": "packages/pi-hindsight" },
-  "keywords": ["pi-package", "pi-extension", "hindsight", "memory"],
-  "files": ["dist", "README.md", "LICENSE", "NOTICE.md", "src/upstream/provenance.json"],
-  "exports": { "./extension": { "types": "./dist/extension.d.ts", "import": "./dist/extension.js" } },
-  "pi": { "extensions": ["./dist/extension.js"] },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/season179/pi-ecosystem.git",
+    "directory": "packages/pi-hindsight"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "hindsight",
+    "memory"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md",
+    "src/upstream/provenance.json"
+  ],
+  "exports": {
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "vitest run",
     "check": "node scripts/build.mjs --check-tests",
     "prepack": "npm run build"
   },
-  "engines": { "node": ">=22.19.0" },
-  "dependencies": { "@typesafe-ai/sdk": "^0.6.0" },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88.0", "@earendil-works/pi-ai": ">=0.87.1 <0.88.0", "typebox": "*" },
-  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true }, "@earendil-works/pi-ai": { "optional": true }, "typebox": { "optional": true } }
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-ai": ">=0.87.1",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  }
 }

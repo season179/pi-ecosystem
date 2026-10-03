@@ -9,8 +9,21 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const out = process.argv[2];
-if (!out) { console.error('usage: bundle-claude-guard.mjs <out.mjs>'); process.exit(2); }
-await build({ entryPoints: [fileURLToPath(new URL('./claude-stop-guard.mjs', import.meta.url))], outfile: out,
-  bundle: true, platform: 'node', format: 'esm', target: 'node20', logLevel: 'warning', legalComments: 'inline' });
+if (!out) {
+  console.error('usage: bundle-claude-guard.mjs <out.mjs>');
+  process.exit(2);
+}
+await build({
+  entryPoints: [fileURLToPath(new URL('./claude-stop-guard.mjs', import.meta.url))],
+  outfile: out,
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  logLevel: 'warning',
+  legalComments: 'inline',
+});
 chmodSync(out, 0o600);
-console.log(`bundled ${out} sha256 ${createHash('sha256').update(readFileSync(out)).digest('hex')}`);
+console.log(
+  `bundled ${out} sha256 ${createHash('sha256').update(readFileSync(out)).digest('hex')}`,
+);

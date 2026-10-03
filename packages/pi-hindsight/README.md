@@ -1,6 +1,6 @@
 # @season179/pi-hindsight
 
-Hindsight memory for **Pi 0.87.1**: retrieve relevant memories, capture completed conversations, and expose explicit memory tools.
+Hindsight memory for **Pi**: retrieve relevant memories, capture completed conversations, and expose explicit memory tools.
 
 **Default: read-write, including automatic capture.** Disable legacy pi-memory automation before loading; do not run simultaneous writers. Use `--hindsight-mode read-only` for retrieval without writes, or `off` for no memory access. `/hindsight` shows status.
 
@@ -75,6 +75,6 @@ npm run check --workspace @season179/pi-hindsight
 npm test --workspace @season179/pi-hindsight
 ```
 
-Checks require an installed Pi 0.87.1, resolved from the Node prefix or `PI_HINDSIGHT_PI_ROOT`. Tests use mocked services; they do not prove live-service behavior.
+Checks use the installed Pi: `PI_HINDSIGHT_PI_ROOT` overrides discovery, otherwise the Node-prefix installation is preferred over the workspace dependency. New releases are not blocked by an exact-version check; build/tests detect API incompatibilities. Tests use mocked services, not live models or banks.
 
 - [Provenance and local patches](NOTICE.md).

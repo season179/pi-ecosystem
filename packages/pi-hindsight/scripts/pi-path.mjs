@@ -1,30 +1,58 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-const require = createRequire(import.meta.url);
-// Local-only override: never installs or upgrades the workspace's older Pi.
+// Use an installed Pi without downloading it or requiring an exact release.
 export function piPaths() {
-  const candidates = [process.env.PI_HINDSIGHT_PI_ROOT,
-    resolve(dirname(process.execPath), '../lib/node_modules/@earendil-works/pi-coding-agent'),
-    resolve(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), '..')].filter(Boolean);
-  const root = candidates.find(p => {
-    try { return JSON.parse(readFileSync(join(p, 'package.json'), 'utf8')).version === '0.87.1'; }
-    catch { return false; }
+  const override = process.env.PI_HINDSIGHT_PI_ROOT;
+  const candidates =
+    override !== undefined
+      ? [override]
+      : [
+          resolve(dirname(process.execPath), '../lib/node_modules/@earendil-works/pi-coding-agent'),
+          resolve(
+            dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))),
+            '..',
+          ),
+        ];
+  const root = candidates.find((path) => {
+    try {
+      const manifest = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8'));
+      return (
+        manifest.name === '@earendil-works/pi-coding-agent' &&
+        existsSync(join(path, 'dist/index.js'))
+      );
+    } catch {
+      return false;
+    }
   });
-  if (!root) throw new Error('Offline checks need Pi 0.87.1; set PI_HINDSIGHT_PI_ROOT to its existing package directory.');
+  if (!root)
+    throw new Error(
+      override !== undefined
+        ? 'PI_HINDSIGHT_PI_ROOT must point to an installed @earendil-works/pi-coding-agent package.'
+        : 'Checks need an installed Pi; set PI_HINDSIGHT_PI_ROOT to its package directory.',
+    );
   const fromPi = createRequire(join(root, 'package.json'));
   function entry(name) {
     for (const base of fromPi.resolve.paths(name) ?? []) {
       try {
         const manifest = JSON.parse(readFileSync(join(base, name, 'package.json'), 'utf8'));
         const target = manifest.exports?.['.']?.import;
-        return join(base, name, typeof target === 'string' ? target : target?.default ?? manifest.main);
-      } catch { /* try next local module root */ }
+        const path = join(
+          base,
+          name,
+          typeof target === 'string' ? target : (target?.default ?? manifest.main),
+        );
+        if (existsSync(path)) return path;
+      } catch {
+        /* try next local module root */
+      }
     }
     throw new Error(`Missing offline Pi dependency: ${name}`);
   }
-  return { '@earendil-works/pi-coding-agent': join(root, 'dist/index.js'),
-    '@earendil-works/pi-ai': entry('@earendil-works/pi-ai'), 'typebox': entry('typebox') };
-
+  return {
+    '@earendil-works/pi-coding-agent': join(root, 'dist/index.js'),
+    '@earendil-works/pi-ai': entry('@earendil-works/pi-ai'),
+    typebox: entry('typebox'),
+  };
 }

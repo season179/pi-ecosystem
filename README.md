@@ -35,6 +35,19 @@ npm run build          # all workspaces
 npm run validate       # build + configured npm pack dry-runs (not every pre-release workspace yet)
 ```
 
+### Formatting
+
+Prettier is shared at the workspace root. Run from the root with an explicit target:
+
+```bash
+npm run format -- 'packages/pi-hindsight/**/*.{ts,mjs,json}'
+npm run format:check -- 'packages/pi-hindsight/**/*.{ts,mjs,json}'
+```
+
+Replace the package path to format another package, or use `.` for the whole repository.
+Generated files and Hindsight's vendored source are excluded. Only pi-hindsight has
+been formatted so far; other packages can adopt the shared style separately.
+
 ## Publishing
 
 Calver versioning (`YY.M.PATCH`). Use the GitHub Actions `Publish`

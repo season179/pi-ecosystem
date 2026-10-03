@@ -10,6 +10,8 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
+    "format": "prettier --write",
+    "format:check": "prettier --check",
     "pack:worktree": "npm pack --workspace @season179/pi-worktree",
     "pack:skills-status": "npm pack --workspace @season179/pi-skills-status",
     "pack:readbeam": "npm pack --workspace @season179/pi-readbeam",
@@ -29,6 +31,7 @@
     "@earendil-works/pi-coding-agent": "^0.80.10",
     "@earendil-works/pi-tui": "^0.80.10",
     "@types/node": "^22.15.3",
+    "prettier": "3.9.9",
     "typescript": "^5.9.2",
     "vitest": "^4.1.9"
   }

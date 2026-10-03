@@ -1,0 +1,8 @@
+# Generated files and dependencies
+**/node_modules/
+**/dist/
+**/coverage/
+package-lock.json
+
+# Preserve vendored source and its provenance for upstream comparisons
+packages/pi-hindsight/src/upstream/
