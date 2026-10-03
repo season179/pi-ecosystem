@@ -1,147 +1,71 @@
 # @season179/pi-hindsight
 
-Thin official-derived Hindsight integration for **Pi 0.87.1**. Product default: **read-write with automatic capture**, initial automatic Reflect and opted-in Jev-gated periodic Reflect. Automatic memory is best effort, **not guaranteed in the first answer**. See [provenance and patch list](NOTICE.md).
+Hindsight memory for **Pi 0.87.1**: retrieve relevant memories, capture completed conversations, and expose explicit memory tools.
 
-**Status:** unpublished. Verified offline with mocked services, plus bounded disposable-bank fixtures that observed Claude→Pi, Pi→Claude and global→Claude retrieval, session capture across resume/compaction, and one harness-tagged fact correction followed by a manual page refresh. Not proven: the ≤6-second foreground fast path, global delivery on every mixed-scope prompt, and semantic freshness across all pages/scopes after curation. A refresh request alone never proves page content is correct.
+**Default: read-write, including automatic capture.** Disable legacy pi-memory automation before loading; do not run simultaneous writers. Use `--hindsight-mode read-only` for retrieval without writes, or `off` for no memory access. `/hindsight` shows status.
 
-## Activation boundary
+## Configuration
 
-**Do not run simultaneous writers.** If pi-memory's Hindsight automation was in use, disable it (`automation.json` `enabled: false`, or mode `off`) before loading this package, and keep that disabled config in place until every session that loaded the old extension has exited or reloaded. New Pi hosts load this package normally; no activation flags are needed. Any isolated staging host must explicitly use `--hindsight-mode off`; only credential-free mocked tests deliberately exercise the read-write default.
+Uses `~/.hindsight/coding-agent.json` (or `HINDSIGHT_CONFIG`). Configure an explicit `apiUrl` and review the destination bank before loading. Prefer `mapPathToBank` for explicit repository routing; default dynamic routing can share a bank between same-named repositories. The legacy `pi-memory` bank is blocked.
 
-- `--hindsight-mode read-write` (default): automatic completed-conversation capture, explicit Retain, curation and deliberate reads. Official `retainSessions: false` still disables automatic capture.
-- `--hindsight-mode off`: all memory operations denied, including config/HTTP access.
-- `--hindsight-mode read-only`: deliberate Reflect, existing page/fact reads and automatic retrieval only; no capture, Retain or curation. Queries still go to the configured service and Reflect can invoke its model.
-- `/hindsight`: show status only; cannot activate memory or modify configuration.
+- `autoInject: "reflect"` enables automatic retrieval (default); `"none"` disables it. Pages/Recall injection is unsupported.
+- `retainSessions: false` disables automatic capture without disabling explicit writes.
+- Optional read-only global memory uses `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`) with an explicit endpoint and static `bankId`.
 
-There is one mode control, no separate capture opt-in flag. The extension factory itself starts no HTTP, config reads, seeding, installs or background work, but a completed reply in default mode **will** capture. No settings/install command is needed for building/testing. Worker hosts that load this extension must explicitly use off/read-only when capture is not intended; no worker detector is invented.
-
-## Configuration and routing
-
-Uses the official `~/.hindsight/coding-agent.json` (or `HINDSIGHT_CONFIG`): defaults → environment fallback → file → `harnesses.pi`, then `banks.<resolved-id>`. Official `mapPathToBank`, static bank IDs, worktree-aware default resolution, opt-in rules, bank overrides, tags/metadata, endpoint/auth, observation scopes, Reflect budget/timeout and page-search limit are retained. The legacy `pi-memory` bank is explicitly blocked. With default dynamic routing, unmapped repositories that share a basename share a bank; a path-mapped checkout that is moved or recloned outside every matching map prefix falls back to that default unless a static ID, custom template or other mapping applies, so update the mapping before capture resumes to the intended bank.
-
-An explicit effective endpoint is required before any HTTP: supply `apiUrl` through the official environment/file/harness/bank layers, or deliberately choose `serverMode: "cloud"` or `"daemon"` for its official endpoint. Missing config, implicit Cloud defaults, and `serverMode: "self-hosted"` without a URL fail closed with status, not an upload. Bank overrides must authorize the actual effective URL; a mode-only override that leaves a different implicit URL is refused. Review the endpoint before installation/loading: even a loopback Hindsight service may send text to remote models. Read-only describes memory mutations, not network/cost-free operation. Redaction is best effort, not a secret-detection guarantee.
-
-The package deliberately **does not execute** upstream autoInject pages/Recall injection or its Reflect→pages→Recall fallback, autoSeed, Git ingest, surveys, page setup, manageBankConfig or autoUpdate. Daemon configuration selects its endpoint but does not start/install a daemon. An absent `conversation` retain strategy is left to server defaults. No extra router/registry exists.
-
-**Recommended shared-file settings** (they also govern Claude): `autoSeed: false`, `gitIngest: "none"`, `codebaseSurvey: false`, `autoUpdate: false`. Official `autoSeed` does more than page setup: its detached `deepen.js` imports every past host conversation for the repository and ingests git history.
-
-**Bank and Knowledge Page setup** is an explicit operator step, run once per destination bank (and again after adding a `mapPathToBank` entry for a new Pi-first repository):
-
-```sh
-node packages/pi-hindsight/scripts/setup-bank.mjs --repo <path>   # repository must be explicitly mapped
-node packages/pi-hindsight/scripts/setup-bank.mjs --global        # global bank below
-```
-
-It runs the installed official 0.7.0 `deepen.js` with a private copy of the config that forces `retainSessions: false`, `gitIngest: none`, `autoSeed`/`codebaseSurvey`/`autoUpdate` off and `pageTriggerType: manual` at the top, harness and bank levels (page-trigger env fallbacks are dropped from the child). So only the official additive bank config and predefined **manual-refresh** page seeding run; a cron in the shared config never reaches the seeder, and a later setup run re-syncs existing pages to manual rather than back to cron. Then it lists the bank's pages.
-
-**Pre-cutover guard.** `harnesses.pi.captureSince` (ISO time; a local key that official hosts ignore) skips automatic capture for sessions whose header predates it, with status. This stops a resumed pre-cutover session replaying history the legacy writer already captured. A malformed value blocks automatic capture. Explicit Retain is unaffected.
-
-Claude gets the same guarantee from `scripts/claude-stop-guard.mjs`, which replaces the official Stop command in `~/.claude/settings.json`. It is installed as one bundled file carrying the vendored 0.7.0 config and bank resolution:
-
-```sh
-npm run build -w @season179/pi-hindsight
-node packages/pi-hindsight/scripts/bundle-claude-guard.mjs ~/.hindsight/pi-hindsight/claude-stop-guard.mjs   # 0600
-node ~/.hindsight/pi-hindsight/claude-stop-guard.mjs --official ~/.hindsight/coding-agents/dist/claude-stop-hook.js --sha256 <pinned hash>
-```
-
-It reads `harnesses["claude-code"].captureSince` from the same official file. Only when the transcript's earliest timestamp is at or after that cutoff does it forward the unchanged hook stdin to the pinned official hook. A resumed Claude session appends to its original transcript, so the earliest entry is the original start.
-
-**Curated sources are not replayed.** Re-retaining an unchanged source re-extracts claims that were edited or invalidated; a synthetic baseline measured this. Before any append, both harnesses therefore read the facts of the session's own source document (`conversation:<session>`) in the bank the host resolves:
-- live facts come from `GET …/memories/list?document_id=…`, checked for `edited_at`;
-- archived facts come from the same listing with `state=invalidated`.
-
-The read is bounded: 200 facts per page, at most 5,000, and every item must match the filter. If any fact was curated, capture is refused, whichever session or harness did the curation.
-- **Pi** records the refusal as a durable block in the session's checkpoint; the existing cursor is preserved.
-- **The Claude guard** resolves the bank exactly as the official Stop hook does. It reads the recorded session root without writing it.
-
-A failed, oversized or unfiltered read also refuses capture. A permanently deleted fact leaves no trace, so this cannot prevent resurrection after external deletion.
-
-Anything uncertain is skipped with exit 0 and a metadata line in `~/.hindsight/coding-agents-logs/stop-guard.jsonl`, which rotates at 2 MiB to one `.1`. That covers:
-- a missing or invalid cutoff;
-- an undated or unreadable transcript;
-- entries from another session (fork);
-- an unresolved destination, curated source facts or a failed curation read;
-- an official hook whose hash changed, which needs re-review and a new pin;
-- hook input over 1 MiB or a transcript over 256 MiB.
-
-Fresh sessions are captured exactly as before. SessionStart and UserPromptSubmit stay official and unwrapped.
-
-**Remote-less repositories** use explicit bank names with a path-hash suffix, for example `coding-agent::local:<name>-<first 8 hex of sha256(realpath)>`. Two same-named directories therefore never share a bank. `$HOME` and `~/.pi` are never mapped.
-
-**Global cross-project memory (read-only).** If `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`) exists, it must name one static `bankId`, no `mapPathToBank`, an explicit endpoint, and not `pi-memory`. Automatic retrieval then runs the project and global Reflect in parallel under the same bounded foreground wait, 90-second maximum total background lifetime and attempt budget, but only while the global file's own `autoInject` is `reflect`; its endpoint, bank, mode, `autoInject` and `observationScopes` are part of the frozen retrieval snapshot, so a mid-flight change rejects the result. `hindsight_reflect` accepts `scope: "global"`. Capture, Retain, curation and pages never target the global bank, and a repository that resolves to it is refused. A broken or failing global config never blocks project retrieval. Global is relevance-based: the legacy guaranteed `always` injection no longer exists. The same file serves Claude through a second official UserPromptSubmit hook (with `HINDSIGHT_CONFIG` pointing at it and a separate `TMPDIR`) and a second MCP server with its write tools denied.
+Conversation text goes to the configured service; even a local Hindsight server may use remote models. Redaction is best effort. Read-only still makes network/model requests.
 
 ## Automatic retrieval
 
-Starts in Pi's `before_agent_start` hook, i.e. when an idle `prompt()` starts a new run. Steering/follow-up messages do not trigger it, but they are persisted user entries and count toward cadence. `n` = user-message entries on the active branch plus the new prompt, recomputed from the persisted branch (resume/branch/fork follow it; no special resumed-session Reflect).
-
-| `n` | Action |
-|---|---|
-| 1 | **Initial**: one `low`-budget Reflect of the current prompt, ungated (official default) |
-| 5, 9, 13 … (`(n-1) % 4 === 0`) | **Periodic**: Jev Noul ≥ 0.7 → one `low` Reflect; negative/unavailable → nothing |
-| other | nothing |
-
-Because steering/follow-ups also increase `n`, a periodic value can be skipped; cadence is not "every four hook calls". Mid-run tool loops can receive the already-started result at a natural next turn; they never start another retrieval or induce a model turn. Short one-answer requests may finish without memory. Use `hindsight_reflect` when consultation must precede the answer. **Jev decides timing only**: it never sees, filters or scores the Reflect answer, and never affects capture/retention. It cannot certify Reflect's correctness.
-
-**Injection.** With a global bank configured, the message has labelled `Repository memory` / `Global cross-project memory` sections, each within an equal share of the limit. If one Reflect fails, the other still injects and retrieval pauses as below. A positive result becomes a persisted, displayed `custom_message` (`pi-hindsight-context`), using the same untrusted-evidence framing as tools. Its redacted evidence payload is limited to **4,000** characters; JSON escaping and the framing add overhead. A fast result appears after the user prompt; a late result is staged after a completed tool-bearing turn. Before a late result first enters model context, the originating user entry must still be the current, unchanged request on the same lineage, with unchanged original/gate inputs and authorized mode/config/scopes. Natural assistant/tool progress does not invalidate that snapshot. Steering/new input, edits, missing effective request context, expiry or lost ownership refuse delivery. Origin binding occurs after Pi persists the first user entry. Full prompt text must match exactly, allowing only Pi 0.87.1's recognized appended image-normalization notes when images were supplied; changed/steered requests are refused, not accepted by arbitrary prefix matching. A small persisted receipt means **released to model context**, not that the provider received or used it. Unreleased drafts never become model context after restart and never strip assistant evidence; refusal or settlement reports them as discarded rather than indefinitely staged. Echo exclusion starts chronologically at release (fast/legacy messages retain their existing behavior), so earlier capture prefixes remain unchanged. Released content remains ordinary branch context; local curation persistently filters prior automatic injections without erasing their historical echo provenance. Aborting a staged release also filters it from subsequent requests. An empty answer, or content identical to an injection already on the branch, is not injected. At most **8** injections per active branch.
-
-**Foreground deadline.** Initial retrieval waits at most **6 seconds** for Reflect. Periodic retrieval allows at most **2 seconds total** for gate/key reads and Jev, then at most 6 seconds for Reflect. The hook returns even when transport ignores abort. Jev cannot dispatch later from an expired gate window. Foreground Reflect expiry means **pending**, not failure: the same request continues, without resubmission. Synchronous local config/git work cannot be timer-interrupted. Esc cannot cancel the pre-run wait because Pi supplies no active-run signal yet; session changes/shutdown do.
-
-**Background deadline.** At most one owned opportunity, with parallel project/global legs, exists until delivery or final settlement. Each Reflect obeys `min(reflectTimeoutMs, 90000)` milliseconds, measured from its original dispatch, never an extra 90 seconds after the foreground wait. At the end of the bounded foreground wait, or the next eligible natural tool boundary, delivery snapshots all nonempty answers then available. A hung sibling cannot hold a healthy result hostage. Selecting that **one message per opportunity** cancels unused sibling requests locally without a failure pause; later completions cannot amend staged/released content. There is no grace timer or shortened sibling deadline before selection. Late delivery only happens at an existing tool-turn boundary and a fresh same-request context check: no steering, follow-up, induced turn or carry to a new prompt. Final settlement, run abort, session/tree/fork change, curation or shutdown cancels pending work. Shutdown joins owned work for at most one second. Timers/listeners are disposed. Remote model cancellation is **not guaranteed** by client abort.
-
-The official default timeout is 20 seconds. Raising `harnesses.pi.reflectTimeoutMs` (capped at 90000) lengthens only the background lifetime of an automatic Reflect; it does not extend foreground waiting or change Claude's timeout. Lower configured deadlines remain respected. Deliberate tool deadlines remain separately configured.
-
-**Budgets.** At most **8 automatic Reflect requests** and **32 Jev requests** per activation, counted before dispatch, including failed/empty/duplicate results; project/global each count. Session switches do not reset these counts; reload/restart does. At most 8 fast/released injections per branch; unreleased/discarded late drafts do not consume this cap. Low Reflect budget, no retry. These bound request count and local lifetime, not lifetime dollars or already-started remote work.
-
-**Failure.** Jev failure or an actual Reflect failure/deadline uses the opportunity with **no retry**, pausing automatic retrieval for **10 minutes**. Foreground detachment and final-settlement cancellation do not count as service failures. Each opportunity freezes mode, endpoint, bank, `autoInject`, observation scopes and deadlines, rechecked before dispatch and delivery; stale work is refused. There is no pages/Recall fallback or deterministic substitute for an unavailable gate.
-
-**Configuration.** Mode `off` makes zero config/HTTP/Jev access. Official `autoInject: "reflect"` (default) enables retrieval; `"none"` (or deprecated `autoReflect: false`) disables it; `"pages"`/`"recall"` **disable it with a status message** rather than substituting Reflect or Recall. `recallOptions` is unused. The periodic gate additionally needs the shared `<agentDir>/typesafe.json` (as used by Buddy/Herdr) with a dedicated section and a key (`TYPESAFE_API_KEY`, then `apiKeyFile`):
-
-```json
-{ "model": "jev-1.13.0", "timeoutMs": 2000, "apiKeyFile": "typesafe.key", "hindsight": { "enabled": true } }
+```text
+user request → initial Reflect, or periodic Jev gate → Reflect → agent context
 ```
 
-Absent file/section or key → periodic gate off (initial still runs); malformed → gate off with status. The endpoint is pinned to `https://api.typesafe.ai`, SDK logging off, retries 0. Jev receives the redacted current request, the last six visible branch messages (context edits honored, 1,500 chars each) and the last two injected memory texts. **This sends conversation excerpts to TypeSafe**; enable it only if that is acceptable. Cadence, threshold, caps and cooldown are constants pending evaluation on real sessions. `/hindsight` shows the last retrieval outcome.
-
-**Telemetry.** `<agentDir>/hindsight-telemetry.jsonl` (0600, rotates at 2 MiB to one `.1`, nothing when mode is `off`). A pre-existing current or rotated file with broader permissions is repaired to 0600 before each write; the Claude guard's log follows the same policy. It holds metadata only: tool/outcome/timing, retrieval trigger, gate decision, Reflect count and injected character count. For capture it records retain `accepted`/`unchanged`/`blocked`/`not_sent`/`skipped_pre_cutover` separately from prior extraction `completed`/`pending`/`failed_or_unknown`. Consolidation is always `not_observed`, because the API exposes no per-document signal. It never records prompts, answers, memory text or credentials.
-
-**Legacy internal Recall preference.** Explicitly reconciled as *not delivered*: automatic paths use Reflect only, no Recall tool exists, and configured Recall/pages injection is refused instead of approximated. Revisit only if evaluation shows Reflect misses cases that Recall recovers, under separate approval.
-
-## Tools
-
-| Tool | Operation |
+| User-message count¹ | Action |
 |---|---|
-| `hindsight_reflect` | Deliberate synthesized answer, bounded and abortable; `scope: project` (default) or `global` (read-only) |
-| `hindsight_search_knowledge_pages` | Search existing official pages; returns page IDs/snippets |
-| `hindsight_read_knowledge_page` | Read an existing page; no generation/refresh |
-| `hindsight_retain` | Explicit evidence extraction; identical redacted content within a session deduplicates |
-| `hindsight_manage_fact` | Inspect/edit/invalidate/revert one identified world/experience fact |
+| 1 | Reflect without Jev |
+| 5, 9, 13, … | Reflect only if Jev's yes-probability is ≥ 0.7 |
+| Other | No new automatic retrieval |
 
-There is **no raw Recall**, broad delete, page-generation or migration tool. The legacy pi-memory migration script was removed with that experiment; its source remains in git history.
+¹ Active-branch user entries plus the new prompt. Retrieval starts only when an idle prompt starts a run; steering/follow-ups count but do not trigger it.
 
-Curation requires the inspected fact's exact original text and document ID, rechecks them before PATCH, and reads back the requested change. Invalidation is reversible. **Permanent deletion is unavailable** because the verified API has no single-fact DELETE; it never falls back to document/bank/supporting-fact deletion. If a safe endpoint is later added, it still needs a separate explicit human confirmation design.
+Periodic retrieval requires `<agentDir>/typesafe.json`:
 
-Retain reports **accepted**, not completed extraction/consolidation. Curation verifies the fact change, waits up to 30 seconds for uncached bank consolidation status to clear, then requests a refresh of up to 10 of the bank's Knowledge Pages, reported as "refresh requested; freshness not verified". If consolidation stays pending, fails or cannot be checked, it reports the verified fact change but defers page refresh; an explicit refresh is then needed after consolidation. No page content is asserted correct merely because a refresh was accepted. **Manual page-freshness limitation:** pages have no cron and do not refresh after consolidation, so outside this explicit post-curation request (or a deliberate operator refresh) a page keeps reflecting the memories present at its last successful refresh; new retained sessions do not update pages on their own. It does not rewrite the source, scrub Pi transcripts, or prove observations/pages fresh. Other sessions/harnesses can replay old evidence. This session's auto-capture is durably blocked before curation, including on an uncertain PATCH outcome; other sessions and Claude refuse to replay a source with curated facts (see above). There is no automatic unblock. No page cache or cross-request retrieval cache is maintained. Curation cancels pending automatic retrieval without aborting the curation operation itself, and records text-free invalidation of this session's earlier automatic injections. Those injections remain visible historical records and retain echo provenance, but are no longer fed to the model. This does not rewrite sources, remove earlier assistant restatements, or invalidate other sessions' context.
+```json
+{
+  "model": "jev-1.13.0",
+  "timeoutMs": 2000,
+  "apiKeyFile": "typesafe.key",
+  "hindsight": { "enabled": true }
+}
+```
 
-## History and failure behavior
+`TYPESAFE_API_KEY` overrides the key file. Missing configuration/key disables periodic retrieval, not initial Reflect. **Enabling Jev sends redacted conversation excerpts and previously injected memory to TypeSafe.** Jev decides whether to retrieve; it never judges the Reflect answer or controls capture.
 
-Capture runs at Pi's final `agent_settled` boundary. It reads the current persisted session JSONL, validates its session/header/active parent chain against `SessionManager`, and retains original user/assistant text, roles, statement timestamps and entry IDs. Compaction summaries do not replace original evidence; context edits are respected. It never uses run-local `agent_end.messages`, a tail-truncated transcript, or an in-memory-only history accumulator.
+- Waits up to **2 seconds for the gate**, then **6 seconds for Reflect**. Memory is not guaranteed in the first answer; use `hindsight_reflect` when consultation must precede it.
+- Pending Reflect can deliver at a natural tool-turn boundary for the same unchanged request, within its configured timeout (maximum **90 seconds total**). No forced extra turn or carry to a new prompt.
+- Limits: **8 Reflect requests and 32 Jev requests per activation**, **8 injections per branch**, **4,000 evidence characters per injection**. Project/global requests each count.
+- Service failures pause automatic retrieval for **10 minutes**, without retries or Recall/pages fallback.
 
-The official document is `conversation:<sessionId>`, strategy `conversation`, tags `source:chat`/`harness:pi`, context `coding agent session`, configured observation scopes (default shared). The official UUIDv5 identity covers bank, document, append mode and content. A small non-context Pi custom entry holds the official cursor plus the outstanding operation ID. On resume, extraction must be verifiably completed before appending another interval; the stored document must match the expected prefix. The adapter never replaces existing documents or retries uncertain writes.
+### Read the code
 
-Supported: straight-line multi-run sessions, reopen/resume, compaction, returning to the already-retained lineage. Deliberately fail-closed:
+For **user request → optional Jev gate**, read these two files:
 
-- Divergent branch, rewind/source-edit that changes the retained prefix; old branch evidence stays untouched. No suffix-document scheme is invented.
-- Fork/clone ancestry (avoids treating copied history as fresh corroboration), ephemeral `--no-session`, incomplete reply, torn/invalid JSONL, missing cursor for an existing document, destination drift, changed remote source, failed/pruned/unknown operation.
-- Session JSONL over **8 MiB**, or full sanitized evidence/payload over **256 KiB**. No destructive truncation fallback.
-- Concurrent/interrupted capture lock. A transient adjacent `.pi-hindsight.lock` excludes concurrent writers; a crash leaves it fail-closed. Review the pending operation and ensure no writer runs before an operator removes a stale lock. Do not erase cursor entries or reset documents to bypass a safety refusal.
+1. `src/extension.ts`: the `before_agent_start` handler, from `triggerFor()` through the `trigger === 'periodic'` block. This connects the request to the gate and acts on its answer.
+2. `src/retrieval.ts`: `triggerFor()` → `automaticQuery()` → `gateState()` → `loadGate()` / `loadKey()` → `askGate()`. `INSTRUCTIONS` and `CRITERIA` contain the actual question Jev answers.
 
-Pending extraction is checked on the next completed reply; there is no polling daemon or new telemetry system. Automatic capture has a 10-second request budget, tool work a bounded configured deadline, and shutdown cancels owned work with at most a one-second wait. A server mutation may already have been accepted when cancellation occurs; status never claims it was undone.
+## Tools and capture
 
-## Privacy and attribution
+| Tool | Purpose |
+|---|---|
+| `hindsight_reflect` | Synthesize an answer from project or read-only global memory |
+| `hindsight_search_knowledge_pages` | Search existing pages |
+| `hindsight_read_knowledge_page` | Read an existing page |
+| `hindsight_retain` | Submit evidence for extraction |
+| `hindsight_manage_fact` | Inspect, edit, invalidate or revert one identified fact |
 
-Exclude raw tool inputs/results, thinking, system/custom messages and generated summaries. Strip known official and pi-memory injection wrappers before processing; redact common credential patterns before outbound queries/content/tags/metadata. Hindsight keeps retained source text verbatim by default (`store_document_text`), and a loopback endpoint may still forward text to remote models, so redaction must happen before upload. Retrieved content is framed as untrusted historical evidence, not authority. Exact retained/retrieved strings from this package's tool results are excluded only from **subsequent assistant text** on the active branch. Later results never rewrite earlier evidence, and primary user statements are preserved before and after retrieval. Semantic paraphrases are **not** detected. Explicit-Retain deduplication does not promise cross-path deduplication of primary user evidence also captured automatically. Jev never selects spans or classifies retention; Hindsight performs extraction.
+Automatic capture appends sanitized, persisted user/assistant history after a completed reply. It excludes raw tools, thinking and summaries; uncertain writes, changed retained history and curated sources block capture rather than overwrite evidence. Retain acceptance does not mean extraction is complete. Fact edits do not rewrite sources or guarantee fresh pages. No permanent-delete tool exists.
 
-## Offline validation
+## Development and reference
 
 From the workspace root:
 
@@ -149,7 +73,8 @@ From the workspace root:
 npm run build --workspace @season179/pi-hindsight
 npm run check --workspace @season179/pi-hindsight
 npm test --workspace @season179/pi-hindsight
-npm --offline pack --workspace @season179/pi-hindsight --dry-run --ignore-scripts
 ```
 
-The repo currently has Pi 0.80.10. Local check scripts instead resolve an **already installed 0.87.1** from the Node prefix, or `PI_HINDSIGHT_PI_ROOT`. No installation, root dependency upgrade or machine-specific path is bundled. Pi/TypeBox are peers; the only runtime dependency is the official `@typesafe-ai/sdk` (already used by the other Jev consumers here). Jev calls in tests use a mocked SDK `fetch`. Tests strip inherited credential variables, deny live HTTP, use temporary files/config and a synthetic provider with the real Pi SDK lifecycle; no live extensions/models/banks are loaded. Mocked document/extraction behavior is not a live-server extraction or cross-harness guarantee.
+Checks require an installed Pi 0.87.1, resolved from the Node prefix or `PI_HINDSIGHT_PI_ROOT`. Tests use mocked services; they do not prove live-service behavior.
+
+- [Provenance and local patches](NOTICE.md).
