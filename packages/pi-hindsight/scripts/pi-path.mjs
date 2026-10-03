@@ -53,6 +53,7 @@ export function piPaths() {
   return {
     '@earendil-works/pi-coding-agent': join(root, 'dist/index.js'),
     '@earendil-works/pi-ai': entry('@earendil-works/pi-ai'),
+    '@earendil-works/pi-tui': entry('@earendil-works/pi-tui'),
     typebox: entry('typebox'),
   };
 }

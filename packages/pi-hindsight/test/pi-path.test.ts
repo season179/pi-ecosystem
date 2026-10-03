@@ -17,6 +17,7 @@ function installedPi(version: string) {
   for (const [path, name] of [
     [root, '@earendil-works/pi-coding-agent'],
     [join(root, 'node_modules/@earendil-works/pi-ai'), '@earendil-works/pi-ai'],
+    [join(root, 'node_modules/@earendil-works/pi-tui'), '@earendil-works/pi-tui'],
     [join(root, 'node_modules/typebox'), 'typebox'],
   ]) {
     mkdirSync(join(path, 'dist'), { recursive: true });
@@ -37,6 +38,7 @@ it.each(['1.0.0', '2.0.0'])(
     expect(piPaths()).toEqual({
       '@earendil-works/pi-coding-agent': join(root, 'dist/index.js'),
       '@earendil-works/pi-ai': join(root, 'node_modules/@earendil-works/pi-ai/dist/index.js'),
+      '@earendil-works/pi-tui': join(root, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
       typebox: join(root, 'node_modules/typebox/dist/index.js'),
     });
   },

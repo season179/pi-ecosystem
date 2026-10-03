@@ -47,8 +47,9 @@
     "@typesafe-ai/sdk": "^0.6.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.87.1",
-    "@earendil-works/pi-ai": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-tui": ">=1.0.0",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
@@ -56,6 +57,9 @@
       "optional": true
     },
     "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     },
     "typebox": {

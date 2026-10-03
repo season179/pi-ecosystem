@@ -1,5 +1,5 @@
 // Derived from official 0.7.0 core/hindsight.ts and knowledge-tools.ts (MIT).
-// Patch: only Retain/Reflect/page reads; guarded abortable transport, no setup/deletes/retries.
+// Patch: Retain/Recall/Reflect/page reads and guarded curation; abortable transport, no setup/deletes/retries.
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ObservationScopes } from './defaults.js';
 
@@ -7,6 +7,12 @@ export interface RetainOptions {
   timestamp: string;
   metadata: Record<string, string>;
   operationId: string;
+}
+/** RecallResult fields verified against Hindsight HTTP API 0.10.1. */
+export interface RecalledMemory {
+  id: string;
+  text: string;
+  context?: string;
 }
 export interface ClientOptions {
   apiUrl: string; apiToken?: string; bank: string;
@@ -88,6 +94,18 @@ export class HindsightClient {
     if (value === undefined) return undefined;
     if (value.operation_id !== id) throw new Error('Hindsight operation identity mismatch');
     return value.status === 'not_found' ? undefined : value;
+  }
+  /** Discrete candidates, not synthesized Reflect text. No entity/chunk expansion. */
+  async recall(query: string, options: Record<string, unknown>): Promise<RecalledMemory[]> {
+    const value = await this.request('POST', this.bankUrl('/memories/recall'), {
+      types: ['observation'], budget: 'low', max_tokens: 2000,
+      ...options, query, include: { entities: null, chunks: null }, trace: false,
+    });
+    if (!Array.isArray(value?.results) || value.results.some((x: any) =>
+      typeof x?.id !== 'string' || typeof x?.text !== 'string' ||
+      (x.context != null && typeof x.context !== 'string')))
+      throw new Error('Hindsight invalid Recall response');
+    return value.results.slice(0, 6).map((x: any) => ({ id: x.id, text: x.text, ...(x.context ? { context: x.context } : {}) }));
   }
   async reflect(query: string, budget: string): Promise<string> {
     const value = await this.request('POST', this.bankUrl('/reflect'), { query, budget });

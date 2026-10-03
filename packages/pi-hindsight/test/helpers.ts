@@ -31,6 +31,8 @@ export class Server {
   version = '0.10.1';
   reflectText = 'Previously retrieved memory says the old timeout was thirty seconds.';
   globalText = 'Global memory: the user prefers concise answers.';
+  recallMemories?: Array<{ id: string; text: string; context?: string }>;
+  globalMemories?: Array<{ id: string; text: string; context?: string }>;
   before?: (call: Server['calls'][number]) => void | Promise<void>;
   fetch: typeof fetch = async (url, init) => {
     const call = {
@@ -68,6 +70,18 @@ export class Server {
         this.operations.set(b.operation_id, { status: this.pending ? 'pending' : 'completed' });
       }
       return json({ operation_id: b.operation_id });
+    }
+    if (path.endsWith('/memories/recall')) {
+      const global = path.includes(GLOBAL_BANK);
+      return json({
+        results: (global ? this.globalMemories : this.recallMemories) ?? [
+          {
+            id: global ? 'global-fact' : 'project-fact',
+            text: global ? this.globalText : this.reflectText,
+            context: 'Prior session',
+          },
+        ],
+      });
     }
     if (path.endsWith('/reflect'))
       return json({ text: path.includes(GLOBAL_BANK) ? this.globalText : this.reflectText });
@@ -183,27 +197,37 @@ export function extensionFixture(
   server: Server,
   options: ExtensionOptions = {},
 ) {
-  const handlers = new Map<string, Function>();
+  const handlers = new Map<string, Function[]>();
+  const commands = new Map<string, any>();
+  const renderers = new Map<string, any>();
+  const widgets = new Map<string, any>();
   const tools = new Map<string, ToolDefinition>();
   const flags = new Map<string, unknown>();
   let lastStatus = '';
   const pi = {
     on: (name: string, handler: Function) => {
-      handlers.set(name, handler);
-      return () => handlers.delete(name);
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+      return () =>
+        handlers.set(
+          name,
+          (handlers.get(name) ?? []).filter((h) => h !== handler),
+        );
     },
     registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
     registerFlag: (name: string, value: { default: unknown }) => flags.set(name, value.default),
     getFlag: (name: string) => flags.get(name),
-    registerCommand: () => {},
+    registerCommand: (name: string, command: any) => commands.set(name, command),
+    registerMessageRenderer: (name: string, renderer: any) => renderers.set(name, renderer),
     appendEntry: (name: string, data: unknown) => manager.appendCustomEntry(name, data),
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: manager.getCwd(),
     sessionManager: manager,
     hasUI: false,
+    mode: 'tui',
     signal: undefined,
     ui: {
+      setWidget: (name: string, value: any) => widgets.set(name, value),
       setStatus: (_name: string, text: string) => {
         lastStatus = text;
       },
@@ -226,10 +250,29 @@ export function extensionFixture(
     ctx,
     tools,
     flags,
+    commands,
+    renderers,
+    widgets,
     get status() {
-      return lastStatus;
+      return lastStatus ?? '';
     },
-    emit: (name: string, event = { type: name }) => handlers.get(name)?.(event, ctx),
+    get memoryStatus() {
+      const factory = widgets.get('pi-hindsight-memory');
+      return typeof factory === 'function'
+        ? factory({ requestRender() {} }, { fg: (_color: string, text: string) => text })
+            .render(160)
+            .join('\n')
+            .trim()
+        : '';
+    },
+    emit: async (name: string, event = { type: name }) => {
+      let result: any;
+      for (const handler of handlers.get(name) ?? []) {
+        const next = await handler(event, ctx);
+        if (next !== undefined) result = next;
+      }
+      return result;
+    },
     tool: (name: string, args: any, signal?: AbortSignal) =>
       tools.get(name)!.execute('test-tool', args, signal, undefined, toolContext),
   };
@@ -242,6 +285,7 @@ export async function sdk(
   replies: AssistantMessage[],
   options: ExtensionOptions = {},
   tools: ToolDefinition[] = [],
+  onRequest?: (index: number) => Promise<void>,
 ) {
   const requests: unknown[] = [];
   const agentDir = join(root, 'agent');
@@ -271,7 +315,9 @@ export async function sdk(
         const stream = createAssistantMessageEventStream();
         const reply = replies.shift();
         if (!reply) throw new Error('Synthetic response queue exhausted');
-        queueMicrotask(() => {
+        const requestIndex = requests.length - 1;
+        queueMicrotask(async () => {
+          await onRequest?.(requestIndex);
           stream.push({ type: 'start', partial: reply });
           stream.push({ type: 'done', reason: 'stop', message: reply });
         });
@@ -334,10 +380,11 @@ export async function sdk(
 }
 
 /** Mocked TypeSafe transport: each call consumes one Noul value (or a callback returning one), 'error' (HTTP 500) or 'hang' (ignores abort). */
-export function jev(answers: Array<number | 'error' | 'hang' | (() => number)>) {
+export function jev(answers: Array<number | number[] | 'error' | 'hang' | (() => number)>) {
   const calls: Array<{ url: string; body: any }> = [];
   const fetch = async (url: string, init?: RequestInit) => {
-    calls.push({ url, body: JSON.parse(String(init?.body)) });
+    const body = JSON.parse(String(init?.body));
+    calls.push({ url, body });
     const answer = answers.shift(),
       next = typeof answer === 'function' ? answer() : answer;
     if (next === undefined) throw new Error('Unexpected Jev call');
@@ -346,7 +393,12 @@ export function jev(answers: Array<number | 'error' | 'hang' | (() => number)>) 
     return new Response(
       JSON.stringify({
         model: 'jev-1.13.0',
-        answers: { memory: { type: 'noul', noul: next } },
+        answers: Object.fromEntries(
+          Object.keys(body.questions).map((key, i) => [
+            key,
+            { type: 'noul', noul: Array.isArray(next) ? next[i] : next },
+          ]),
+        ),
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
     );
