@@ -41,7 +41,7 @@ All automatic retrieval, **including the first message**, requires `<agentDir>/t
 
 `TYPESAFE_API_KEY` overrides the key file. Missing/invalid configuration or credentials means **no automatic retrieval or unjudged injection**. Jev is the current assessment model; code and function names are model-neutral. Other APIs, including Clef, are not implemented.
 
-**Content is not redacted in this automatic path.** The assessment service receives bounded conversation excerpts, previously available memory and actual candidate memory content. Selected excerpts also enter model context and the persisted session without content redaction. Size limits are not privacy protection. Transport credentials are never added to assessment state or telemetry. Capture and explicit tools retain their existing redaction protections. Memories remain untrusted historical evidence, not instructions.
+**Content is not redacted in this automatic path.** The assessment service receives bounded conversation excerpts, previously available memory and actual candidate memory content. Selected excerpts also enter model context and the persisted session without content redaction. Size limits are not privacy protection. Transport credentials are never added to assessment state or telemetry. Capture and explicit tools retain their existing redaction protections. Injected memory arrives in a `<hindsight_memory>` block that identifies it as supplementary background from past sessions, not a user message; memory text is escaped (`&`, `<`, `>`) so it cannot close the block. Memories remain untrusted historical evidence, not instructions.
 
 ### Timing and limits
 

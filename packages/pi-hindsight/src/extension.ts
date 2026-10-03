@@ -53,6 +53,7 @@ import {
   loadKey,
   prepareCandidates,
   formatInjection,
+  escapeMemory,
   recallQuery,
   type ContextEntry,
   type CandidateProvenance,
@@ -989,7 +990,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             display: true,
             details: {
               hindsight: {
-                echoTexts: decision.selected.map((c) => c.text),
+                // Later replies may quote either the raw or the escaped delivered form.
+                echoTexts: [
+                  ...new Set(decision.selected.flatMap((c) => [c.text, escapeMemory(c.text)])),
+                ],
                 deliveryId: p.id,
                 late: true,
                 candidates: decision.selected.map(
