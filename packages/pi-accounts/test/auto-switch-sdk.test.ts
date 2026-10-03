@@ -7,13 +7,14 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/compat";
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
+import { Type } from "typebox";
 import accountsExtension from "../src/accounts.js";
 import { AccountStore, InMemoryAccountStorageBackend } from "../src/account-store.js";
 import type { AccountProviderAdapter } from "../src/oauth.js";
 import { QUOTA_STATE_FILE, QuotaStateStore } from "../src/quota-state.js";
 import { FileAccountStorageBackend } from "../src/storage.js";
 
-test("real Pi loop retries the same prompt under fallback auth and returns to primary after reset", async () => {
+test.each([false, true])("real Pi loop resumes under fallback auth and returns to primary (tool update: %s)", async (toolUpdate) => {
   const root = await mkdtemp(join(tmpdir(), "pi-accounts-sdk-"));
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
@@ -28,14 +29,35 @@ test("real Pi loop retries the same prompt under fallback auth and returns to pr
       oauth: { login: async () => credential("unused"), refresh: async current => current, toAuth: async current => ({ apiKey: current.access }) },
     };
     let now = Date.now();
+    let toolExecutions = 0;
+    let fallbackRoles: string[] | undefined;
     const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({
       cwd: root, agentDir: root, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [pi => accountsExtension(pi, {
-        store, providers: [provider], now: () => now,
-        checkQuota: async () => ({ exhausted: true, resetAt: now + 60_000 }),
-      })],
+      extensionFactories: [pi => {
+        accountsExtension(pi, {
+          store, providers: [provider], now: () => now,
+          checkQuota: async () => ({ exhausted: true, resetAt: now + 60_000 }),
+        });
+        if (toolUpdate) {
+          pi.registerTool({
+            name: "enable_tool", label: "Enable tool", description: "Enable a new tool",
+            parameters: Type.Object({}),
+            async execute() {
+              toolExecutions++;
+              pi.setActiveTools(["enable_tool", "new_tool"]);
+              return { content: [{ type: "text", text: "tool enabled" }], details: undefined };
+            },
+          });
+          pi.registerTool({
+            name: "new_tool", label: "New tool", description: "Newly enabled tool",
+            parameters: Type.Object({}),
+            async execute() { throw new Error("New tool should not be called"); },
+          });
+          pi.on("session_start", () => pi.setActiveTools(["enable_tool"]));
+        }
+      }],
     });
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
@@ -44,7 +66,8 @@ test("real Pi loop retries the same prompt under fallback auth and returns to pr
     assert.ok(model);
     const manager = SessionManager.inMemory(root);
     ({ session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime, model,
-      sessionManager: manager, settingsManager, resourceLoader, noTools: "all" }));
+      sessionManager: manager, settingsManager, resourceLoader, noTools: "all",
+      ...(toolUpdate ? { tools: ["enable_tool", "new_tool"] } : {}) }));
     await session.bindExtensions({});
     await session.prompt("/accounts-auto primary backup");
     const requests: string[] = [];
@@ -59,21 +82,33 @@ test("real Pi loop retries the same prompt under fallback auth and returns to pr
         const aborted = options?.signal?.aborted;
         if (aborted) cancelledRequests++;
         else requests.push(auth.apiKey ?? "missing");
-        const fail = requests.length === 1 || allExhausted;
+        const callTool = toolUpdate && requests.length === 1;
+        const fail = requests.length === (toolUpdate ? 2 : 1) || allExhausted;
+        if (toolUpdate && requests.length === 3) {
+          fallbackRoles = _context.messages.map(message => message.role);
+        }
         const message = {
           role: "assistant", api: model.api, provider: model.provider, model: model.id,
-          content: fail ? [] : [{ type: "text", text: "done" }],
-          stopReason: aborted ? "aborted" : fail ? "error" : "stop", errorMessage: aborted ? "Aborted" : fail ? "You have hit your ChatGPT usage limit." : undefined,
+          content: callTool ? [{ type: "toolCall", id: "enable-1", name: "enable_tool", arguments: {} }] : fail ? [] : [{ type: "text", text: "done" }],
+          stopReason: aborted ? "aborted" : fail ? "error" : callTool ? "toolUse" : "stop", errorMessage: aborted ? "Aborted" : fail ? "You have hit your ChatGPT usage limit." : undefined,
           timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         } as any;
-        stream.push(aborted || fail ? { type: "error", reason: aborted ? "aborted" : "error", error: message } : { type: "done", reason: "stop", message });
+        stream.push(aborted || fail ? { type: "error", reason: aborted ? "aborted" : "error", error: message } : { type: "done", reason: callTool ? "toolUse" : "stop", message });
         stream.end();
       })().catch(error => { stream.end(); throw error; });
       return stream;
     };
     await session.prompt("one original request");
-    assert.deepEqual(requests, ["primary-token", "backup-token"]);
+    const initialRequests = toolUpdate ? ["primary-token", "primary-token", "backup-token"] : ["primary-token", "backup-token"];
+    assert.deepEqual(requests, initialRequests);
+    assert.equal(toolExecutions, toolUpdate ? 1 : 0, "completed tools are not replayed");
+    if (toolUpdate) {
+      assert.ok(fallbackRoles);
+      assert.equal(fallbackRoles.filter(role => role === "toolResult").length, 1);
+      assert.equal(fallbackRoles.at(-1), "system", "tool update survives recovery");
+      assert.ok(session.getActiveToolNames().includes("new_tool"));
+    }
     assert.equal(session.getLastAssistantText(), "done");
     assert.equal(session.messages.filter(message => message.role === "user").length, 1);
     const failed = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error");
@@ -81,12 +116,12 @@ test("real Pi loop retries the same prompt under fallback auth and returns to pr
     assert.ok(manager.getEntries().some(entry => entry.type === "context_edit" && entry.targetId === failed.id && entry.replacement === null));
     now += 61_001;
     await session.prompt("next request");
-    assert.deepEqual(requests, ["primary-token", "backup-token", "primary-token"]);
+    assert.deepEqual(requests, [...initialRequests, "primary-token"]);
     allExhausted = true;
     await session.prompt("both accounts are now exhausted");
-    assert.deepEqual(requests.slice(3), ["primary-token", "backup-token"]);
+    assert.deepEqual(requests.slice(initialRequests.length + 1), ["primary-token", "backup-token"]);
     await session.prompt("do not send a request while both cooldowns are active");
-    assert.equal(requests.length, 5, "turn_start abort must prevent any exhausted-account request");
+    assert.equal(requests.length, initialRequests.length + 3, "turn_start abort must prevent any exhausted-account request");
     assert.equal(cancelledRequests, 1);
   } finally {
     session?.dispose();

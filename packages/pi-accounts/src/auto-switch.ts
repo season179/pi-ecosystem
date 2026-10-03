@@ -186,7 +186,9 @@ export class CodexAutoSwitch {
       // Pi also omits failed recovery attempts with append-only context edits. Do not
       // replay tools or remove another extension's replacement/continuation message.
       const last = event.context.contextEntries.filter(entry => entry.messages.length > 0).at(-1);
-      const previous = event.context.llmMessages.at(-2);
+      // Tool/prompt updates can insert system messages between a completed tool
+      // result (or user prompt) and the failed attempt. Keep those updates in context.
+      const previous = event.context.llmMessages.slice(0, -1).filter(message => message.role !== "system").at(-1);
       if (last?.sourceEntry.id === failure.entryId && last.messages.length === 1 &&
           last.messages[0].role === "assistant" && last.messages[0].stopReason === "error" &&
           (previous?.role === "user" || previous?.role === "toolResult")) {

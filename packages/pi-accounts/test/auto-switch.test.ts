@@ -264,6 +264,40 @@ test("unknown reset uses a bounded retry, not a busy loop; no continuation witho
   assert.equal(f.selected, null);
 });
 
+test.each(["tool update", "intervening assistant", "replaced failure"])("recovery across system updates: %s", async scenario => {
+  const f = await fixture();
+  await f.sut.prepare(f.ctx);
+  f.sut.observe(error());
+  const failed = { role: "assistant", stopReason: "error", content: [] };
+  const result = await f.sut.recover({
+    outcome: "error",
+    context: {
+      canContinue: false,
+      contextEntries: [{
+        sourceEntry: { id: scenario === "replaced failure" ? "another-entry" : "failed-entry" },
+        messages: [failed],
+      }],
+      llmMessages: [
+        { role: "user", content: "do the work" },
+        { role: "assistant", content: [{ type: "toolCall", id: "enable", name: "web_enable", arguments: {} }] },
+        { role: "toolResult", toolCallId: "enable", content: [] },
+        ...(scenario === "intervening assistant" ? [{ role: "assistant", content: [] }] : []),
+        { role: "system", content: "new tools enabled" },
+        failed,
+      ],
+    },
+  } as never, f.ctx);
+  assert.equal(f.selected, "backup");
+  if (scenario === "tool update") {
+    assert.deepEqual(result, {
+      entries: [{ type: "context_edit", targetId: "failed-entry", replacement: null }], continue: true,
+    });
+    assert.match(f.notifications.at(-1)?.message ?? "", /Resuming/);
+  } else {
+    assert.equal(result, undefined, "do not skip another assistant or remove another entry");
+  }
+});
+
 test("manual out-of-pair account pauses policy; disabled and malformed policies do not select another account", async () => {
   const f = await fixture();
   f.select("other");

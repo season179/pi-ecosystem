@@ -1,5 +1,9 @@
 # @season179/pi-accounts
 
+## Unreleased
+
+- Fix automatic continuation after quota fallback when a tool or prompt update inserts a system message before the failed request. Preserve the update and completed tool results without replaying tools.
+
 ## 26.9.0 (local, unpublished)
 
 - Fork upstream 0.52.2 with its MIT license, authentication/storage implementation, and regression suites.
