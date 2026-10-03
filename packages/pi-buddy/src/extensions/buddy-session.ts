@@ -17,7 +17,8 @@ import {
   seedBuddyEnabledFromFlag,
 } from './switch.js';
 
-const DEFAULT_ADVISORY_LEVEL: AdvisoryLevel = 0;
+/** Level -1 = watchdog cadence 6. */
+const DEFAULT_ADVISORY_LEVEL: AdvisoryLevel = -1;
 
 /**
  * Owns state whose lifetime is one Buddy process/session, not one request.

@@ -7,7 +7,7 @@
  *   web tools (lookup_docs via deepwiki, read_webpage via agent-browser) to
  *   verify claims beyond both models' knowledge cutoffs.
  * - `/buddy <question>` command: the human summons the buddy directly.
- * - Detached watchdog: if 3 turns elapse in a run without a consultation, the
+ * - Detached watchdog: if 6 turns (default) elapse in a run without a consultation, the
  *   buddy investigates IN THE BACKGROUND while the agent keeps working — like
  *   a colleague who checks his suspicion before interrupting. Structured pass
  *   verdicts are suppressed; concerns remain private until revalidated against
@@ -33,7 +33,6 @@ import type {
 import { Type } from 'typebox';
 import { Box, Text } from '@earendil-works/pi-tui';
 import { AutomaticReview } from './automatic-review.js';
-import { LiveJevTriage } from './jev-triage.js';
 import type { BuddyTool } from './buddy-tool.js';
 import { BUDDY_FEEDBACKS, formatBuddyFeedbackResult, type BuddyFeedback } from './calibration.js';
 import { BuddySession } from './buddy-session.js';
@@ -148,7 +147,6 @@ export default function setup(pi: ExtensionAPI): void {
     reviewMessageType: BUDDY_REVIEW_TYPE,
     backgroundStatusKey: BG_STATUS_KEY,
     runEndReviewMinTurns: RUN_END_REVIEW_MIN_TURNS,
-    jev: new LiveJevTriage(),
   });
 
   pi.registerFlag('buddy-disabled', {
@@ -505,10 +503,7 @@ export default function setup(pi: ExtensionAPI): void {
       const parsed = parseBuddyCommand(args);
       if (parsed.kind === 'control') {
         if (parsed.action === 'status') {
-          notify(
-            ctx,
-            `Buddy is ${session.enabled ? 'on' : 'off'}. ${automaticReview.triageStatus()}.`,
-          );
+          notify(ctx, `Buddy is ${session.enabled ? 'on' : 'off'}.`);
           return;
         }
         setBuddyEnabled(parsed.action === 'on', ctx);

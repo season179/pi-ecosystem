@@ -1,9 +1,9 @@
 /**
  * TypeSafe Jev access for `herdr_select`.
  *
- * Follows the shared `<agentDir>/typesafe.json` convention used by pi-buddy and
+ * Follows the shared `<agentDir>/typesafe.json` convention used by
  * pi-hindsight (top-level `model`, `timeoutMs`, `apiKeyFile`; `TYPESAFE_API_KEY`
- * wins) without importing those packages. Settings and key are re-read per
+ * wins) without importing that package. Settings and key are re-read per
  * selection. The destination is pinned to the official endpoint, bodies are
  * bounded, SDK logging is off, and every error is replaced by a fixed,
  * credential-free message.

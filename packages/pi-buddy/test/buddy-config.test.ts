@@ -29,19 +29,19 @@ describe('buddy config watchdog.initialCadence', () => {
     assert.deepEqual(missing.warnings, []);
   });
 
-  it('warns and ignores malformed settings so the session falls back to three', () => {
+  it('warns and ignores malformed settings so the session falls back to six', () => {
     for (const initialCadence of [0, -1, 4, 48, 6.5, '6', null, true, [], {}, NaN, Infinity]) {
       const result = parseBuddyConfig({ watchdog: { initialCadence } }, path);
       assert.equal(result.initialCadence, undefined);
       assert.deepEqual(result.warnings, [
-        `${path}: watchdog.initialCadence must be one of the integers 2, 3, 6, 12, 24; using default 3.`,
+        `${path}: watchdog.initialCadence must be one of the integers 2, 3, 6, 12, 24; using default 6.`,
       ]);
     }
     for (const watchdog of [6, '6', null, true, []]) {
       const result = parseBuddyConfig({ watchdog }, path);
       assert.equal(result.initialCadence, undefined);
       assert.deepEqual(result.warnings, [
-        `${path}: "watchdog" must be an object; using default initialCadence 3.`,
+        `${path}: "watchdog" must be an object; using default initialCadence 6.`,
       ]);
     }
   });

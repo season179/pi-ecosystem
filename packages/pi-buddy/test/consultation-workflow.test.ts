@@ -59,7 +59,7 @@ describe('ConsultationWorkflow', () => {
     const launchContext = {
       sessionId: 'session-origin',
       runId: 'run-origin',
-      policyRevision: 'held-candidate-v1',
+      policyRevision: 'cadence-6-v1',
       initialCadence: 3,
       effectiveCadence: 6,
     };

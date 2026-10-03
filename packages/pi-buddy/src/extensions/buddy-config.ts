@@ -22,7 +22,7 @@ export interface BuddyConfigLoadResult {
   perModelRetries?: number;
   /** Per-source-class hard output caps; absent means use built-in defaults. */
   outputMaxTokens?: OutputMaxTokensConfig;
-  /** Session-start seed only; absent/invalid means the built-in cadence of 3. */
+  /** Session-start seed only; absent/invalid means the built-in cadence of 6. */
   initialCadence?: number;
   warnings: string[];
 }
@@ -91,7 +91,7 @@ export function parseBuddyConfig(
 function parseInitialCadence(value: unknown, path: string, warnings: string[]): number | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
-    warnings.push(`${path}: "watchdog" must be an object; using default initialCadence 3.`);
+    warnings.push(`${path}: "watchdog" must be an object; using default initialCadence 6.`);
     return undefined;
   }
   const initialCadence = value.initialCadence;
@@ -102,7 +102,7 @@ function parseInitialCadence(value: unknown, path: string, warnings: string[]): 
     advisoryLevelForCadence(initialCadence) === undefined
   ) {
     warnings.push(
-      `${path}: watchdog.initialCadence must be one of the integers 2, 3, 6, 12, 24; using default 3.`,
+      `${path}: watchdog.initialCadence must be one of the integers 2, 3, 6, 12, 24; using default 6.`,
     );
     return undefined;
   }

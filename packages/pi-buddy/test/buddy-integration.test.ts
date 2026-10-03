@@ -106,15 +106,15 @@ describe('Buddy run telemetry integration', () => {
     );
     assert.deepEqual(
       runs.map((run) => run.initialCadence),
-      [3, 3],
+      [6, 6],
     );
     assert.deepEqual(
       runs.map((run) => run.effectiveCadence),
-      [3, 6],
+      [6, 12],
     );
     assert.deepEqual(
       runs.map((run) => run.finalCadence),
-      [6, 6],
+      [12, 12],
     );
     assert.ok(
       runs.every((run) => run.sessionId === 'session-integration' && run.outcome === 'ended'),
@@ -123,7 +123,7 @@ describe('Buddy run telemetry integration', () => {
     assert.equal(feedback.runId, runs[0].runId);
     assert.equal(feedback.sessionId, 'session-integration');
     assert.equal(feedback.policyRevision, runs[0].policyRevision);
-    assert.equal(feedback.effectiveCadence, 6);
+    assert.equal(feedback.effectiveCadence, 12);
   });
 });
 
@@ -267,7 +267,7 @@ describe('Buddy concern disposition integration', () => {
       undefined,
       harness.ctx,
     );
-    assert.equal(valid.details.previousLevel, 0);
-    assert.equal(valid.details.newLevel, -1);
+    assert.equal(valid.details.previousLevel, -1);
+    assert.equal(valid.details.newLevel, -2);
   });
 });

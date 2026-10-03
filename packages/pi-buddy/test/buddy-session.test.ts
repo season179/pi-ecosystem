@@ -35,11 +35,11 @@ describe('BuddySession', () => {
 
   it('owns calibration, injection context, warning locality, and resource flags', () => {
     const session = createSession();
-    assert.equal(session.initialCadence(), 3);
+    assert.equal(session.initialCadence(), 6);
     const feedback = session.applyFeedback('less', 'Wait for material concerns');
-    assert.equal(feedback.newLevel, -1);
-    assert.equal(session.watchdogThreshold(), 6);
-    assert.equal(session.initialCadence(), 3);
+    assert.equal(feedback.newLevel, -2);
+    assert.equal(session.watchdogThreshold(), 12);
+    assert.equal(session.initialCadence(), 6);
     const injection = session.buildInjection('project', false, {
       ...emptyReview,
       verdictDigest: '# Recent verdicts\nPASS',
@@ -57,8 +57,8 @@ describe('BuddySession', () => {
     assert.equal(session.shouldCloseBrowser, false);
 
     session.resetForSession();
-    assert.equal(session.watchdogThreshold(), 3);
-    assert.equal(session.initialCadence(), 3);
+    assert.equal(session.watchdogThreshold(), 6);
+    assert.equal(session.initialCadence(), 6);
     assert.equal(session.buildInjection('project', false, emptyReview).block, undefined);
     assert.deepEqual(session.configWarningsToShow(['bad config']), ['bad config']);
   });
@@ -95,8 +95,8 @@ describe('BuddySession', () => {
 
     for (const cadence of [undefined, 5]) {
       session.resetForSession(cadence);
-      assert.equal(session.initialCadence(), 3);
-      assert.equal(session.watchdogThreshold(), 3);
+      assert.equal(session.initialCadence(), 6);
+      assert.equal(session.watchdogThreshold(), 6);
       assert.equal(session.buildInjection('project', false, emptyReview).block, undefined);
     }
   });

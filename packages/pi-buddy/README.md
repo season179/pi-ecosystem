@@ -23,12 +23,12 @@ Requirements:
 
 The buddy gets involved four ways:
 
-| Trigger              | What happens                                                                                                                                                                                                      |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance                                                                                                                                                     |
-| `/buddy <question>`  | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt                                                                                                               |
-| Watchdog (automatic) | After 3 turns without a consult, the buddy investigates in the background while the agent keeps working                                                                                                           |
-| Run-end (automatic)  | Interactive runs of ≥ 2 turns without an actual consultation get a quiet background review at completion; Jev skips do not count as consultations. Print/JSON mode skips it because the process exits immediately |
+| Trigger              | What happens                                                                                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `consult_buddy` tool | The main agent requests a consultation mid-run, with a stance                                                                                                            |
+| `/buddy <question>`  | You ask directly; renders immediately when the agent is idle, otherwise queues for your next prompt                                                                      |
+| Watchdog (automatic) | After 6 turns (default) without a consult, the buddy investigates in the background while the agent keeps working                                                        |
+| Run-end (automatic)  | Interactive runs of ≥ 2 turns without an actual consultation get a quiet background review at completion. Print/JSON mode skips it because the process exits immediately |
 
 Stances for `consult_buddy`:
 
@@ -49,7 +49,7 @@ Both automatic prompts ask Buddy to interrupt for defects actionable within the 
 
 Each delivered concern has a short ID. The main agent can use `give_buddy_feedback` to mark it `fixed` or `rebutted` with a reason; use cadence feedback `same` when only recording the disposition. Future watchdog checks receive a compact, branch-aware concern history so they do not repeat settled concerns without new evidence. This adds no extra Buddy call and survives reload, resume, fork, tree navigation, and compaction within the session.
 
-**Cadence** — the watchdog's 3-turn trigger is only the default. `give_buddy_feedback` (`more` | `same` | `less`) moves a session-scoped advisory level between +1 and −3, mapping to a watchdog cadence of 2, 3, 6, 12, or 24 turns: `less` backs off exponentially, `more` steps back toward normal, `same` records that the current level is fine without changing it. The level resets whenever a session starts or switches (new, resume, fork, or reload), is never persisted, and never disables run-end review or explicit consultations.
+**Cadence** — the watchdog's 6-turn trigger is only the default. `give_buddy_feedback` (`more` | `same` | `less`) moves a session-scoped advisory level between +1 and −3, mapping to a watchdog cadence of 2, 3, 6, 12, or 24 turns: `less` backs off exponentially, `more` steps back toward normal, `same` records that the current level is fine without changing it. The level resets whenever a session starts or switches (new, resume, fork, or reload), is never persisted, and never disables run-end review or explicit consultations.
 
 **Evidence order** — repository first, `lookup_docs` (DeepWiki, for open-source repos) second, `read_webpage` third. `read_webpage` exposes only read verbs (open/wait/snapshot/get text) in an isolated browser session — no click, fill, type, or eval. Fetched web content is treated as data to evaluate, never instructions.
 
@@ -69,38 +69,13 @@ Optional. Lives in `~/.pi/agent/buddy.json`. Models, retries, and output caps ar
   ],
   "retry": { "perModelRetries": 1 },
   "outputMaxTokens": { "watchdog": 2048, "consult": 4096 },
-  "watchdog": { "initialCadence": 3 }
+  "watchdog": { "initialCadence": 6 }
 }
 ```
 
 - **Models** — a priority failover chain (ascending). Buddy retries the current model on transient failures, then falls back to the next. `perModelRetries: 0` means immediate failover. A configured `models` chain takes precedence over `--buddy-model`; when no usable chain exists, `pi --buddy-model provider/id` applies for that Pi process before the built-in default.
 - **Output caps** — Buddy caps visible output so verdicts stay tight: 2048 tokens for automatic reviews, 4096 for requested consults (defaults). Values below 1024 are ignored; `null` disables a cap. Automatic reviews must finish with the structured verdict tool; an incomplete prose answer is an error and is never published. Buddy never requests extended thinking, so the cap bounds the answer directly.
-- **Starting cadence** — `watchdog.initialCadence` accepts only 2, 3, 6, 12, or 24; absent means 3, invalid values warn and fall back to 3. This seeds the existing advisory level on startup/new/resume/fork/reload, without fabricating feedback. Starting at 6, `more` goes to 3 then 2; `less` goes to 12 then 24. Run-end and requested reviews are unchanged. Default remains 3; changing cadence is a separate opt-in experiment.
-
-### Optional active Jev triage
-
-Opt in with `<agentDir>/typesafe.json` (`~/.pi/agent` by default; respects `PI_CODING_AGENT_DIR`):
-
-```json
-{
-  "model": "jev-1.13.0",
-  "timeoutMs": 3000,
-  "apiKeyFile": "typesafe.key",
-  "buddy": { "enabled": true, "skipThreshold": 0.85, "auditEvery": 5 }
-}
-```
-
-Provide `TYPESAFE_API_KEY` through your secure environment, or a private key file named by `apiKeyFile` (relative to agentDir or absolute; restrict permissions to `0600`). Environment takes precedence. Never paste a key into prompts or logs. Config and credentials are re-read at each decision; absent config or `buddy.enabled: false` leaves normal Buddy behavior.
-
-This is **active, not shadow**: before a periodic investigation, Jev can skip the reviewer call for clearly routine, low-risk work. Every fifth periodic opportunity bypasses Jev for a full audit. A skip consumes one cadence opportunity but is not a Buddy consultation: eligible run-end reviews and explicit tool/user consultations still run normally. The gate pauses that turn boundary for up to the configured operation budget (default 3 seconds); the full investigation remains detached.
-
-At candidate revalidation, Jev can also suppress clearly irrelevant or explicitly already-handled concerns **for the current request**. Repetition alone is insufficient; unclear context or ongoing material risk gets normal Buddy revalidation. Suppression requires the coordinator's unchanged, active-run snapshot and is not proof fixed or a `resolved` Buddy verdict. Surviving candidates retain full revalidation before publication.
-
-Jev receives only the current request and up to eight recent activity messages (16 KB serialized state limit), plus bounded candidate/evidence/history when applicable—not the full transcript or hidden thinking. Verbose requests, read/bash output, tool arguments and candidate/history text use UTF-8-safe head/tail excerpts with visible middle-omission markers and original/omitted byte counts. The request gets priority; older activity and omitted evidence items are explicitly disclosed. Excerpts are not full evidence: independent context/risk questions judge whether the visible evidence suffices, rather than automatically rejecting ordinary verbosity. Genuinely missing intent, unrepresentable nontext content or failed state construction goes to normal Buddy. Three independent choice questions must agree above the probability threshold; `confidence` alone never authorizes a skip. This is probabilistic routing, not a guarantee of correctness.
-
-Missing credentials, malformed config/answers, provider errors or deadlines use normal Buddy, with a bounded warning and `Jev: fallback` footer status. Cancellation, new activity, session/tree changes and Buddy off prevent stale gate results from launching or suppressing work. `/buddy status` shows the last gate state; `not checked` is not an activation claim. Telemetry uses distinct `jev_triage` rows, never synthetic passes. SDK logging is explicitly off, the endpoint is pinned to `https://api.typesafe.ai`, retries are disabled, and response bytes plus the complete parsed-result wait are bounded.
-
-`timeoutMs` accepts integer 1–30000 (shared with pi-herdr; Jev triage runs inside the awaited `turn_end` handler, so a long value can delay the next turn by up to that long), `skipThreshold` 0.5–1, and `auditEvery` integer 1–100 (defaults shown above). Invalid active settings fall back to normal Buddy. For a local-path installation, build this package and use `/reload` or a new Pi session to load changed code; installing a key alone does not reload code. Credential-free tests verify routing/lifecycle behavior, not live provider accuracy.
+- **Starting cadence** — `watchdog.initialCadence` accepts only 2, 3, 6, 12, or 24; absent means 6, invalid values warn and fall back to 6. This seeds the existing advisory level on startup/new/resume/fork/reload, without fabricating feedback. Starting at 6, `more` goes to 3 then 2; `less` goes to 12 then 24. Run-end and requested reviews are unchanged. The default was 3 until telemetry showed about 90% of cadence-3 reviews passed and agents asked for `less` far more than `more`.
 
 ## Enable / Disable
 
@@ -113,7 +88,7 @@ When off, automatic reviews are skipped and `consult_buddy` refuses model calls.
 
 ## Telemetry
 
-Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. `watchdog_commit` rows record handoff, suppression, or deferral—not proof of insertion. Separate candidate rows record holds/expiry, insertion rows observe the live message stream, and low-level run summaries supply turn denominators. Session/run IDs, policy revision, and starting/effective cadence support comparisons over real usage. Feedback rows retain `fixed`/`rebutted` dispositions; these are agent reports, not accuracy scores. Older records without correlation fields remain legacy/unknown.
+Each consultation appends one JSONL record to `~/.pi/agent/buddy-telemetry.jsonl` (local only, best-effort): source, stance, outcome, tool-call count, provider-reported token usage and cost, retry/failover metadata, concern-history counts, and duration. `watchdog_commit` rows record handoff, suppression, or deferral—not proof of insertion. Separate candidate rows record holds/expiry, insertion rows observe the live message stream, and low-level run summaries supply turn denominators. Session/run IDs, policy revision, and starting/effective cadence support comparisons over real usage. Feedback rows retain `fixed`/`rebutted` dispositions; these are agent reports, not accuracy scores. Older records without correlation fields remain legacy/unknown. Past 10 MB the file rotates to `buddy-telemetry.jsonl.1`, replacing the previous rotation.
 
 ```bash
 jq -r '[.type // .source,.outcome]|join(" ")' ~/.pi/agent/buddy-telemetry.jsonl | sort | uniq -c
@@ -149,7 +124,5 @@ the composition root. Contributors should preserve the boundaries recorded in th
 - OS: developed on macOS and tested in Linux CI. Core Buddy code uses cross-platform Node path, filesystem, and process APIs and has no shell dependency, so Windows is expected to work, including backslash/drive-letter project paths, but it is not tested in CI. `read_webpage` additionally depends on `agent-browser` being installable and available on that platform.
 
 ## Security
-
-Opting into Jev sends the bounded current request/recent activity and candidate context described above to TypeSafe AI, in addition to Buddy's configured model providers. Jev telemetry contains routing metadata only, not request/response bodies or credentials.
 
 Pi extensions execute with your user permissions. The buddy's tools are read-only by construction: no write or edit tool, no shell or bash tool (only fixed `read`/`grep`/`find`/`ls` repository tools), and read-only browser verbs. It sends your persisted session transcript, current working-directory path, durable Buddy memory, and repository excerpts to whichever model providers you configure. `lookup_docs` additionally sends Buddy's questions—which may quote transcript or repository content—to the third-party DeepWiki service at `mcp.deepwiki.com`; `read_webpage` fetches Buddy-chosen URLs through a local isolated `agent-browser` session. Fetched web content is treated as untrusted data, never as instructions. Review the source before installing.

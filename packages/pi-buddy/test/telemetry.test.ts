@@ -93,3 +93,33 @@ it('writes narrow correlated lifecycle records and tolerates unavailable storage
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it('rotates a full telemetry file instead of growing it without bound', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'buddy-telemetry-rotation-'));
+  const path = join(dir, 'events.jsonl');
+  const run = {
+    turns: 1,
+    startedAt: '2026-10-03T00:00:00.000Z',
+    endedAt: '2026-10-03T00:01:00.000Z',
+    outcome: 'ended' as const,
+    finalCadence: 6,
+  };
+  try {
+    __setTelemetryPathForTests(path, 1);
+    await recordBuddyRun({ ...run, runId: 'old' });
+    await recordBuddyRun({ ...run, runId: 'new' });
+    const current = (await readFile(path, 'utf8')).trim().split('\n');
+    const rotated = (await readFile(`${path}.1`, 'utf8')).trim().split('\n');
+    assert.deepEqual(
+      current.map((line) => JSON.parse(line).runId),
+      ['new'],
+    );
+    assert.deepEqual(
+      rotated.map((line) => JSON.parse(line).runId),
+      ['old'],
+    );
+  } finally {
+    __setTelemetryPathForTests(undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+});

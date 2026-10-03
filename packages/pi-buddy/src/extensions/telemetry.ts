@@ -18,17 +18,16 @@
  * Best-effort: telemetry failures never break a consultation.
  */
 
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BuddyOutcome, BuddySource, BuddyTrigger } from './buddy-context.js';
 import type { ConcernDisposition } from './concern-history.js';
-import type { JevAnswers } from './jev-triage.js';
 
 export type { BuddyOutcome, BuddySource, BuddyTrigger } from './buddy-context.js';
 export type BuddyFeedback = 'more' | 'same' | 'less';
 
-export const BUDDY_POLICY_REVISION = 'jev-triage-v1';
+export const BUDDY_POLICY_REVISION = 'cadence-6-v1';
 
 /** Captured at invocation, never inferred from the current run at completion. */
 export interface BuddyTelemetryContext {
@@ -191,31 +190,6 @@ export interface BuddyWatchdogInsertedTelemetryRecord extends BuddyTelemetryCont
   handedOffAt?: string;
 }
 
-/** Jev routing is not a Buddy consultation, pass, or proof of resolution. */
-export interface BuddyJevTelemetryRecord extends BuddyTelemetryContext {
-  v: 1;
-  ts: string;
-  type: 'jev_triage';
-  phase: 'periodic' | 'candidate';
-  outcome:
-    'disabled' | 'review' | 'skip' | 'suppress' | 'audit' | 'fallback' | 'cancelled' | 'stale';
-  reason?: 'config' | 'no_key' | 'error' | 'deadline' | 'malformed' | 'incomplete';
-  model?: string;
-  totalMs: number;
-  opportunity?: number;
-  concernId?: string;
-  /** Validated Jev labels/probabilities; absent when no complete valid answer set existed. */
-  answers?: JevAnswers;
-  /** Effective skip/suppress threshold, recorded with answers. */
-  skipThreshold?: number;
-}
-
-export async function recordJevTriage(
-  record: Omit<BuddyJevTelemetryRecord, 'v' | 'ts' | 'type'>,
-): Promise<void> {
-  await appendTelemetry({ type: 'jev_triage', ...record });
-}
-
 export interface BuddyRunTelemetryRecord extends BuddyTelemetryContext {
   v: 1;
   ts: string;
@@ -234,10 +208,15 @@ type TelemetryInput<T> = T extends unknown ? Omit<T, 'v' | 'ts' | 'type'> : neve
 
 const TELEMETRY_FILE = join(homedir(), '.pi', 'agent', 'buddy-telemetry.jsonl');
 
-let testTelemetryPath: string | undefined;
+/** Rotate to `<file>.1` past this size, bounding disk use to about twice it. */
+const TELEMETRY_MAX_BYTES = 10 * 1024 * 1024;
 
-export function __setTelemetryPathForTests(path: string | undefined): void {
+let testTelemetryPath: string | undefined;
+let testTelemetryMaxBytes: number | undefined;
+
+export function __setTelemetryPathForTests(path: string | undefined, maxBytes?: number): void {
   testTelemetryPath = path;
+  testTelemetryMaxBytes = maxBytes;
 }
 
 export function telemetryPath(): string {
@@ -287,15 +266,25 @@ async function appendTelemetry(
     | Omit<BuddyWatchdogCommitTelemetryRecord, 'v' | 'ts'>
     | (Omit<BuddyWatchdogCandidateTelemetryBase, 'v' | 'ts'> & BuddyWatchdogCandidateEvent)
     | Omit<BuddyWatchdogInsertedTelemetryRecord, 'v' | 'ts'>
-    | Omit<BuddyRunTelemetryRecord, 'v' | 'ts'>
-    | Omit<BuddyJevTelemetryRecord, 'v' | 'ts'>,
+    | Omit<BuddyRunTelemetryRecord, 'v' | 'ts'>,
 ): Promise<void> {
   try {
     const path = telemetryPath();
     await mkdir(dirname(path), { recursive: true });
+    await rotateIfFull(path);
     const line = `${JSON.stringify({ v: 1, ts: new Date().toISOString(), ...record })}\n`;
     await appendFile(path, line);
   } catch {
     // Best-effort: never let telemetry break a consultation.
   }
+}
+
+async function rotateIfFull(path: string): Promise<void> {
+  const size = await stat(path).then(
+    (info) => info.size,
+    () => 0,
+  );
+  if (size < (testTelemetryMaxBytes ?? TELEMETRY_MAX_BYTES)) return;
+  // Another process may rotate first; appending to a fresh file is fine.
+  await rename(path, `${path}.1`).catch(() => undefined);
 }

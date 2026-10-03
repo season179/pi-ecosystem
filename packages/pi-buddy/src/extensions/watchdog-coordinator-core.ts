@@ -11,7 +11,6 @@ export interface WatchdogSnapshot<TEntry extends WatchdogEntry> {
 
 export type WatchdogRevalidation<T> =
   | { decision: 'resolved' }
-  | { decision: 'irrelevant' }
   | { decision: 'confirm'; candidate: T }
   | { decision: 'replace'; candidate: T };
 
@@ -20,7 +19,7 @@ export type WatchdogCommitResult<T, TEntry extends WatchdogEntry> =
   | { status: 'deferred'; reason: 'activity' | 'tool_in_flight' | 'commit_in_flight' }
   | {
       status: 'suppressed';
-      reason: 'resolved' | 'irrelevant';
+      reason: 'resolved';
       snapshot: WatchdogSnapshot<TEntry>;
       revalidationCount: number;
     }
@@ -160,14 +159,11 @@ export class WatchdogCoordinator<T, TEntry extends WatchdogEntry> {
       ) {
         return { status: 'deferred', reason: 'activity' };
       }
-      if (verdict.decision === 'irrelevant' && canPublish && !canPublish()) {
-        return { status: 'deferred', reason: 'activity' };
-      }
-      if (verdict.decision === 'resolved' || verdict.decision === 'irrelevant') {
+      if (verdict.decision === 'resolved') {
         this.pending = undefined;
         return {
           status: 'suppressed',
-          reason: verdict.decision,
+          reason: 'resolved',
           snapshot,
           revalidationCount,
         };
