@@ -28,7 +28,6 @@ it('one above-editor indicator; header click toggles only its receipt, exact tex
   expect(component.render(100).join('\n')).toContain('1 memory injected');
   const widget = f.ext.widgets.get('pi-hindsight-memory')({ requestRender() {} }, theme);
   expect(widget.render(30)[0].length).toBeLessThanOrEqual(30);
-  expect(f.ext.status).not.toContain('retrieval'); // no new footer noise
   component.handleMouse({ type: 'click', button: 'left', x: 1, y: 0, width: 100, height: 1 });
   expect(component.render(100).join('\n')).toContain('▾ Hindsight');
   expect(component.render(48).every((line: string) => visibleWidth(line) <= 48)).toBe(true);
@@ -84,4 +83,6 @@ it('one above-editor indicator; header click toggles only its receipt, exact tex
   await f.ext.commands.get('hindsight').handler('memories', f.ext.ctx);
   expect(notify.at(-1)).toContain('(never delivered; no injected memory)');
   expect(notify.at(-1)).not.toContain(undelivered.content);
+  // Capture and retrieval status stay out of the footer; /hindsight reports capture.
+  expect(f.ext.footerWrites).toEqual([]);
 });

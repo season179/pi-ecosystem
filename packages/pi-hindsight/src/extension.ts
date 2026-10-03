@@ -101,9 +101,9 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       retrieval = 'no automatic retrieval yet';
     const retrievalUI = createRetrievalUI(pi, () => pending?.id);
 
-    const notify = (ctx: ExtensionContext, text: string) => {
+    // Capture status is shown only by /hindsight, not the footer.
+    const notify = (_ctx: ExtensionContext, text: string) => {
       status = text;
-      ctx.ui.setStatus('pi-hindsight', `Hindsight: ${text}`);
     };
 
     /** Metadata-only local telemetry; nothing in off mode. */

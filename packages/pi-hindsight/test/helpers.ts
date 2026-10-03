@@ -203,7 +203,7 @@ export function extensionFixture(
   const widgets = new Map<string, any>();
   const tools = new Map<string, ToolDefinition>();
   const flags = new Map<string, unknown>();
-  let lastStatus = '';
+  const footerWrites: string[] = [];
   const pi = {
     on: (name: string, handler: Function) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
@@ -228,8 +228,8 @@ export function extensionFixture(
     signal: undefined,
     ui: {
       setWidget: (name: string, value: any) => widgets.set(name, value),
-      setStatus: (_name: string, text: string) => {
-        lastStatus = text;
+      setStatus: (name: string, text: string | undefined) => {
+        if (text !== undefined) footerWrites.push(name);
       },
       notify: () => {},
     },
@@ -239,6 +239,20 @@ export function extensionFixture(
     globalConfigPath: join(manager.getCwd(), 'no-global.json'),
     ...options,
   })(pi);
+  // The command handler notifies synchronously, so the getter can read it inline.
+  const report = () => {
+    const notify = ctx.ui.notify;
+    let text = '';
+    ctx.ui.notify = (value: string) => {
+      text = value;
+    };
+    try {
+      void commands.get('hindsight').handler('', ctx);
+    } finally {
+      ctx.ui.notify = notify;
+    }
+    return text;
+  };
   const toolContext = {
     ...ctx,
     tools: [],
@@ -253,8 +267,10 @@ export function extensionFixture(
     commands,
     renderers,
     widgets,
+    footerWrites,
+    /** Capture status as reported by `/hindsight`. */
     get status() {
-      return lastStatus ?? '';
+      return report().split('; retrieval: ')[0].split('capture: ')[1] ?? '';
     },
     get memoryStatus() {
       const factory = widgets.get('pi-hindsight-memory');

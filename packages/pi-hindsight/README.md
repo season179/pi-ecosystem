@@ -2,7 +2,7 @@
 
 Hindsight memory for **Pi**: retrieve relevant memories, capture completed conversations, and expose explicit memory tools.
 
-**Default: read-write, including automatic capture.** Disable legacy pi-memory automation before loading; do not run simultaneous writers. Use `--hindsight-mode read-only` for retrieval without writes, or `off` for no memory access. `/hindsight` shows status.
+**Default: read-write, including automatic capture.** Disable legacy pi-memory automation before loading; do not run simultaneous writers. Use `--hindsight-mode read-only` for retrieval without writes, or `off` for no memory access. `/hindsight` shows status; Hindsight adds nothing to the footer.
 
 ## Configuration
 
