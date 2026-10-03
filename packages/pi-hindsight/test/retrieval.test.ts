@@ -9,6 +9,8 @@ import {
   RECALL_MAX_MS,
   COOLDOWN_MS,
   INJECT_CHARS,
+  RECALL_QUERY_BYTES,
+  recallQuery,
 } from '../src/retrieval.js';
 import {
   config,
@@ -237,11 +239,20 @@ it('both banks supply candidates to one assessment, whole selected snippets fit 
     text: `${i} global ` + 'x'.repeat(1000),
     context: 'global context',
   }));
-  await f.send('task');
+  exchange(f.manager, 'earlier context '.repeat(200));
+  // Token-dense text: the default server rejects Recall queries over 500 tokens.
+  const request = '请修复 🧠 https://例子.com/a?b=c '.repeat(150);
+  await f.send(request);
   await f.ready();
   const draft = await f.stage();
   await f.release();
   expect(recalls(f.server)).toHaveLength(2);
+  for (const { body } of recalls(f.server)) {
+    expect(Buffer.byteLength(body.query)).toBeLessThanOrEqual(RECALL_QUERY_BYTES);
+    expect(Buffer.from(body.query).toString()).toBe(body.query); // no split characters
+    expect(body.query.startsWith(request.slice(0, 40))).toBe(true);
+  }
+  expect(f.assessment.calls[0].body.state.current_request.length).toBeGreaterThan(1_000);
   expect(recalls(f.server)[0].body).toMatchObject({
     types: ['world'],
     tags: ['project'],
@@ -263,6 +274,13 @@ it('both banks supply candidates to one assessment, whole selected snippets fit 
   expect(f.server.retains).toHaveLength(0);
   await f.ext.tool('hindsight_reflect', { query: 'preferences?', scope: 'global' });
   expect(f.server.calls.at(-1)?.url.pathname.endsWith('/reflect')).toBe(true);
+});
+
+it('Recall query adds recent conversation only within the byte budget', () => {
+  const query = recallQuery('short request', 'older pair '.repeat(100));
+  expect(query).toContain('Recent conversation (excerpt):\nolder pair');
+  expect(Buffer.byteLength(query)).toBeLessThanOrEqual(RECALL_QUERY_BYTES);
+  expect(recallQuery('x'.repeat(450), 'older pair')).not.toContain('Recent conversation');
 });
 
 it('available memory dedupes repeats, but edited candidate content is reassessed', async () => {

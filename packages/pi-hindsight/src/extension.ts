@@ -53,7 +53,7 @@ import {
   loadKey,
   prepareCandidates,
   formatInjection,
-  excerpt,
+  recallQuery,
   type ContextEntry,
   type CandidateProvenance,
 } from './retrieval.js';
@@ -924,10 +924,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
               const recent = inputs.state.recent_conversation
                 .map((t) => `${t.user}\n${t.assistant}`)
                 .join('\n');
-              const recallQuery = recent
-                ? `${query}\n\nRecent conversation (excerpt):\n${excerpt(recent, 2_000)}`
-                : query;
-              const memories = await client.recall(recallQuery, target.cfg.recallOptions);
+              const memories = await client.recall(
+                recallQuery(query, recent),
+                target.cfg.recallOptions,
+              );
               p.fresh();
               return {
                 scope: index === 0 ? ('project' as const) : ('global' as const),

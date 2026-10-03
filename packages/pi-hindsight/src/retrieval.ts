@@ -19,6 +19,11 @@ export const INJECT_CHARS = 4_000;
 export const MAX_CANDIDATES = 6;
 export const MAX_SELECTED = 4;
 export const CANDIDATE_CHARS = 800;
+/**
+ * Default Hindsight servers reject Recall queries over 500 tokens
+ * (HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS). Byte-level BPE never yields more tokens than UTF-8 bytes.
+ */
+export const RECALL_QUERY_BYTES = 480;
 export const COOLDOWN_MS = 2 * 60_000;
 export const FAILURE_LIMIT = 3;
 const MESSAGE_CHARS = 1_500;
@@ -98,6 +103,28 @@ export function excerpt(text: string, max: number): string {
   return head + marker;
 }
 export const automaticQuery = (prompt: string) => excerpt(stripMemory(prompt).trim(), 4_000);
+
+const bytes = (text: string) => Buffer.byteLength(text, 'utf8');
+function byteExcerpt(text: string, max: number): string {
+  if (bytes(text) <= max) return text;
+  const marker = '\n[truncated]';
+  let head = '',
+    used = bytes(marker);
+  for (const char of text) {
+    // Code points, so a cut never splits a character.
+    used += bytes(char);
+    if (used > max) break;
+    head += char;
+  }
+  return head + marker;
+}
+const HISTORY_LABEL = '\n\nRecent conversation (excerpt):\n';
+/** Recall-only query; the current request wins and history only fills the remaining bytes. */
+export function recallQuery(request: string, recent: string): string {
+  const head = byteExcerpt(request, RECALL_QUERY_BYTES);
+  const room = RECALL_QUERY_BYTES - bytes(head) - bytes(HISTORY_LABEL);
+  return recent && room >= 64 ? head + HISTORY_LABEL + byteExcerpt(recent, room) : head;
+}
 
 /** Effective, compaction/edit-aware history; tools and hidden thinking are never pairs. */
 export function assessmentContext(
