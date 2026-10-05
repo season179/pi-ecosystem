@@ -1090,7 +1090,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           const batches = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
           const failed = results.some((r) => r.status === 'rejected');
           if (!batches.length) throw new Error('Hindsight Recall unavailable');
-          const candidates = prepareCandidates(batches, inputs.live, p.trace);
+          const candidates = prepareCandidates(batches, inputs.live, p.session, p.trace);
           p.trace({
             event: 'candidates',
             candidates: candidates.map(({ text, context, ...provenance }) => ({

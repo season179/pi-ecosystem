@@ -20,6 +20,15 @@ import { createHindsightExtension, type ExtensionOptions } from '../src/extensio
 
 export const BANK = 'coding-agent::test:project';
 export const GLOBAL_BANK = 'coding-agent::test:global';
+type RecallFact = {
+  id: string;
+  text: string;
+  context?: string;
+  type?: string;
+  document_id?: string | null;
+  metadata?: Record<string, string>;
+  source_fact_ids?: string[];
+};
 export class Server {
   calls: Array<{ method: string; url: URL; body: any }> = [];
   documents = new Map<string, string>();
@@ -31,8 +40,17 @@ export class Server {
   version = '0.10.1';
   reflectText = 'Previously retrieved memory says the old timeout was thirty seconds.';
   globalText = 'Global memory: the user prefers concise answers.';
-  recallMemories?: Array<{ id: string; text: string; context?: string }>;
-  globalMemories?: Array<{ id: string; text: string; context?: string }>;
+  recallMemories?: RecallFact[];
+  globalMemories?: RecallFact[];
+  sourceFacts: Record<string, RecallFact> = {
+    'prior-fact': {
+      id: 'prior-fact',
+      text: 'Prior evidence',
+      type: 'world',
+      document_id: 'conversation:prior',
+    },
+  };
+  sourceFactsTruncated = false;
   before?: (call: Server['calls'][number]) => void | Promise<void>;
   fetch: typeof fetch = async (url, init) => {
     const call = {
@@ -79,8 +97,12 @@ export class Server {
             id: global ? 'global-fact' : 'project-fact',
             text: global ? this.globalText : this.reflectText,
             context: 'Prior session',
+            type: 'observation',
+            source_fact_ids: ['prior-fact'],
           },
         ],
+        source_facts: this.sourceFacts,
+        source_facts_truncated: this.sourceFactsTruncated,
       });
     }
     if (path.endsWith('/reflect'))

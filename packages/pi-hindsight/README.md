@@ -4,7 +4,7 @@ Give Pi continuity across sessions: remember useful decisions and preferences in
 
 ## What it does
 
-- Recalls relevant memories in the background and adds them as context, not instructions.
+- Recalls relevant memories in the background and adds them as context, not instructions. Automatic injection excludes current-session sources (including explicit retains and mixed-source observations); unverifiable provenance is skipped.
 - Saves conversations and provides tools to search, reflect on, retain, and correct memories.
 
 ## Setup

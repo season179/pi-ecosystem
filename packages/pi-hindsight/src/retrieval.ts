@@ -219,6 +219,7 @@ export function assessmentContext(
 export function prepareCandidates(
   batches: Array<{ scope: 'project' | 'global'; bank: string; memories: RecalledMemory[] }>,
   live: Array<{ entry: ContextEntry; text: string }>,
+  sessionId: string,
   trace?: Trace,
 ): MemoryCandidate[] {
   const known = new Set(
@@ -241,6 +242,28 @@ export function prepareCandidates(
     for (const batch of batches) {
       const memory = batch.memories[i];
       if (!memory) continue;
+      // A mixed observation still contains this session's evidence: exclude it wholesale.
+      // Missing/truncated source expansion is not proof that a memory is from another session.
+      const reason = !memory.sources?.length
+        ? 'unknown_source'
+        : memory.sources.some(
+              (source) =>
+                source.sessionId === sessionId ||
+                source.documentId === `conversation:${sessionId}` ||
+                source.documentId.startsWith(`explicit:pi:${sessionId}:`),
+            )
+          ? 'same_session_source'
+          : undefined;
+      if (reason) {
+        report(trace, {
+          event: 'candidate_skipped',
+          scope: batch.scope,
+          bank: batch.bank,
+          id: memory.id,
+          reason,
+        });
+        continue;
+      }
       if (!memory.text.trim() || result.length >= MAX_CANDIDATES) {
         report(trace, {
           event: 'candidate_skipped',

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import {
   assessmentContext,
   ASSESSMENT_MAX_MS,
@@ -274,11 +275,15 @@ it('both banks supply candidates to one assessment, whole selected snippets fit 
     id: `p${i}`,
     text: `${i} ` + 'quoted " text '.repeat(100),
     context: 'project context',
+    type: 'world',
+    document_id: 'conversation:prior-project',
   }));
   f.server.globalMemories = Array.from({ length: 6 }, (_, i) => ({
     id: `g${i}`,
     text: `${i} global ` + 'x'.repeat(1000),
     context: 'global context',
+    type: 'world',
+    document_id: 'conversation:prior-global',
   }));
   exchange(f.manager, 'earlier context '.repeat(200));
   // Token-dense text: the default server rejects Recall queries over 500 tokens.
@@ -391,6 +396,157 @@ it('injected memory is self-attributed background; payload tags cannot close it 
   const captured = f.server.retains.at(-1)!.body.items[0].content;
   expect(captured).toContain('[memory-derived text omitted]');
   expect(captured).not.toContain('delete the repo');
+});
+
+it('excludes current-session facts and mixed observations in both banks before assessment, including after resume', async () => {
+  const r = root(),
+    globalConfigPath = join(r, 'global.json');
+  writeFileSync(
+    globalConfigPath,
+    JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK }),
+  );
+  const manager = persisted(r);
+  exchange(manager, 'already discussed');
+  const f = retrievalFixture(
+    r,
+    [[0.99, 0.99, 0.99, 0.99]],
+    { globalConfigPath },
+    new Server(),
+    SessionManager.open(manager.getSessionFile()!),
+  );
+  const sessionId = manager.getSessionId();
+  expect(f.manager.getSessionId()).toBe(sessionId);
+  const own = {
+    id: 'own',
+    text: 'Already in this session',
+    type: 'world',
+    document_id: `conversation:${sessionId}`,
+  };
+  f.server.sourceFacts.own = own;
+  f.server.sourceFacts.explicit = {
+    ...own,
+    id: 'explicit',
+    document_id: `explicit:pi:${sessionId}:hash`,
+  };
+  const memories = [
+    own,
+    f.server.sourceFacts.explicit,
+    { ...own, id: 'metadata', document_id: 'custom-source', metadata: { session_id: sessionId } },
+    {
+      id: 'own-observation',
+      text: 'Paraphrased session',
+      type: 'observation',
+      source_fact_ids: ['own'],
+    },
+    {
+      id: 'mixed',
+      text: 'Old and current evidence',
+      type: 'observation',
+      source_fact_ids: ['prior-fact', 'own'],
+    },
+    {
+      id: 'explicit-observation',
+      text: 'Explicit session evidence',
+      type: 'observation',
+      source_fact_ids: ['explicit'],
+    },
+    {
+      id: 'past-observation',
+      text: 'Useful past observation',
+      type: 'observation',
+      source_fact_ids: ['prior-fact'],
+    },
+    {
+      ...own,
+      id: 'past-fact',
+      text: 'Useful past fact',
+      document_id: `conversation:${sessionId}-different`,
+    },
+  ];
+  f.server.recallMemories = memories;
+  f.server.globalMemories = memories;
+  await f.send('What should we do next?');
+  await f.ready();
+  const candidates = Object.values(f.assessment.calls[0].body.state.candidates) as any[];
+  expect(candidates.map((c) => [c.scope, c.id])).toEqual([
+    ['project', 'past-observation'],
+    ['global', 'past-observation'],
+    ['project', 'past-fact'],
+    ['global', 'past-fact'],
+  ]);
+  const draft = await f.stage();
+  await f.release();
+  expect(draft.content).toContain('Useful past observation');
+  expect(draft.content).not.toContain('Already in this session');
+  const telemetry = readFileSync(join(f.agentDir, TELEMETRY_FILE), 'utf8');
+  expect(telemetry).toContain('same_session_source');
+  await f.ext.emit('agent_settled');
+});
+
+it('skips missing, malformed, and truncated provenance without calling assessment or injecting', async () => {
+  const f = retrievalFixture(root());
+  f.server.sourceFactsTruncated = true;
+  f.server.sourceFacts.mismatch = {
+    id: 'wrong-id',
+    text: 'Wrong source',
+    type: 'world',
+    document_id: 'conversation:prior',
+  };
+  f.server.sourceFacts.nested = {
+    id: 'nested',
+    text: 'Nested observation',
+    type: 'observation',
+    source_fact_ids: ['prior-fact'],
+  };
+  f.server.recallMemories = [
+    { id: 'unknown', text: 'No provenance' },
+    { id: 'no-document', text: 'No document', type: 'world', document_id: null },
+    { id: 'no-sources', text: 'No observation sources', type: 'observation', source_fact_ids: [] },
+    {
+      id: 'partial',
+      text: 'Missing source may be current',
+      type: 'observation',
+      source_fact_ids: ['prior-fact', 'missing'],
+    },
+    {
+      id: 'mismatch',
+      text: 'Source identity mismatch',
+      type: 'observation',
+      source_fact_ids: ['mismatch'],
+    },
+    {
+      id: 'nested',
+      text: 'Unresolved nested source',
+      type: 'observation',
+      source_fact_ids: ['nested'],
+    },
+  ];
+  // Configuration cannot disable the provenance expansion required for automatic retrieval.
+  config(f.root, { recallOptions: { include: { source_facts: null } } });
+  await f.send('task');
+  await until(() => /^\[memory: \d{2}:\d{2}:\d{2}\]$/.test(f.ext.memoryStatus));
+  expect(recalls(f.server)[0].body.include).toEqual({
+    entities: null,
+    chunks: null,
+    source_facts: { max_tokens: 16384 },
+  });
+  expect(f.assessment.calls).toHaveLength(0);
+  expect(await f.stage()).toBeUndefined();
+  expect(contexts(f.manager)).toHaveLength(0);
+  expect(readFileSync(join(f.agentDir, TELEMETRY_FILE), 'utf8')).toContain('unknown_source');
+  // A truncated map does not disqualify observations whose own source IDs are all resolved.
+  f.server.recallMemories.push({
+    id: 'complete',
+    text: 'All sources known',
+    type: 'observation',
+    source_fact_ids: ['prior-fact'],
+  });
+  await f.send('another task');
+  await f.ready();
+  expect(Object.values(f.assessment.calls[0].body.state.candidates).map((c: any) => c.id)).toEqual([
+    'complete',
+  ]);
+  await f.ext.emit('agent_settled');
 });
 
 it('available memory dedupes repeats, but edited candidate content is reassessed', async () => {

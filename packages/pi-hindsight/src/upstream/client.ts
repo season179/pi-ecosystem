@@ -13,6 +13,35 @@ export interface RecalledMemory {
   id: string;
   text: string;
   context?: string;
+  /** Undefined means provenance is missing, malformed, or incompletely expanded. */
+  sources?: Array<{ documentId: string; sessionId?: string }>;
+}
+
+/** Resolve ALL contributing facts, never infer provenance from text or timestamps. */
+function recallSources(memory: any, sourceFacts: any): RecalledMemory['sources'] {
+  const source = (fact: any) => {
+    if (!fact || !['world', 'experience'].includes(fact.type) ||
+        typeof fact.document_id !== 'string' || !fact.document_id.trim() ||
+        (fact.source_fact_ids != null && (!Array.isArray(fact.source_fact_ids) || fact.source_fact_ids.length))) return undefined;
+    const metadata = fact.metadata;
+    if (metadata != null && (typeof metadata !== 'object' || Array.isArray(metadata) ||
+        (metadata.session_id != null && typeof metadata.session_id !== 'string'))) return undefined;
+    return { documentId: fact.document_id, ...(metadata?.session_id ? { sessionId: metadata.session_id } : {}) };
+  };
+  if (memory.type !== 'observation') {
+    const fact = source(memory);
+    return fact ? [fact] : undefined;
+  }
+  const ids = memory.source_fact_ids;
+  if (!Array.isArray(ids) || !ids.length || !sourceFacts || typeof sourceFacts !== 'object' || Array.isArray(sourceFacts)) return undefined;
+  const sources: NonNullable<RecalledMemory['sources']> = [];
+  for (const id of ids) {
+    if (typeof id !== 'string' || !Object.hasOwn(sourceFacts, id) || sourceFacts[id]?.id !== id) return undefined;
+    const fact = source(sourceFacts[id]);
+    if (!fact) return undefined;
+    sources.push(fact);
+  }
+  return sources;
 }
 export interface ClientOptions {
   apiUrl: string; apiToken?: string; bank: string;
@@ -96,16 +125,19 @@ export class HindsightClient {
     if (value.operation_id !== id) throw new Error('Hindsight operation identity mismatch');
     return value.status === 'not_found' ? undefined : value;
   }
-  /** Discrete candidates, not synthesized Reflect text. No entity/chunk expansion. */
+  /** Discrete candidates with source provenance, not synthesized Reflect text. No entity/chunk expansion. */
   async recall(query: string, options: Record<string, unknown>): Promise<RecalledMemory[]> {
     const value = await this.request('POST', this.bankUrl('/memories/recall'), {
-      ...RECALL_DEFAULTS, ...options, query, include: { entities: null, chunks: null }, trace: false,
+      ...RECALL_DEFAULTS, ...options, query,
+      include: { entities: null, chunks: null, source_facts: { max_tokens: 16384 } }, trace: false,
     });
     if (!Array.isArray(value?.results) || value.results.some((x: any) =>
       typeof x?.id !== 'string' || typeof x?.text !== 'string' ||
       (x.context != null && typeof x.context !== 'string')))
       throw new Error('Hindsight invalid Recall response');
-    return value.results.slice(0, 6).map((x: any) => ({ id: x.id, text: x.text, ...(x.context ? { context: x.context } : {}) }));
+    // Apply the candidate cap AFTER provenance exclusion so self-memories cannot crowd out history.
+    return value.results.map((x: any) => ({ id: x.id, text: x.text, ...(x.context ? { context: x.context } : {}),
+      sources: recallSources(x, value.source_facts) }));
   }
   async reflect(query: string, budget: string): Promise<string> {
     const value = await this.request('POST', this.bankUrl('/reflect'), { query, budget });
