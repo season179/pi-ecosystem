@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import {
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,35 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { describe, it } from 'vitest';
 
 const pkgRoot = fileURLToPath(new URL('..', import.meta.url));
-const indexSource = readFileSync(join(pkgRoot, 'index.js'), 'utf8');
 const bundlePath = join(pkgRoot, 'dist', 'herdr.bundle.js');
-
-/**
- * The package entry must stay a stable shim that re-resolves the bundle by
- * content hash on every factory call. A static re-export of dist (the pre-fix
- * shape) makes /reload silently keep old code, because Pi's jiti delegates
- * "type":"module" .js entries to Node's process-wide ESM cache.
- */
-describe('loader entry shim', () => {
-  it('exports a default async factory, not a static dist re-export', () => {
-    assert.ok(
-      !/export\s*\{[^}]*\}\s*from\s*["']\.\/dist/.test(indexSource),
-      'index.js must not statically re-export dist',
-    );
-    const match = /export\s+default\s+(async\s+)?function[\s\S]*?import\(/.exec(indexSource);
-    assert.ok(match, 'index.js must default-export a factory that dynamically imports the bundle');
-    assert.match(
-      indexSource,
-      /createHash|sha256/,
-      'factory must fingerprint the bundle by content',
-    );
-    assert.match(indexSource, /\?v=/, 'factory must import the bundle under a query-busted URL');
-  });
-
-  it('references the bundle the build produces', () => {
-    assert.match(indexSource, /\.\/dist\/herdr\.bundle\.js/);
-  });
-});
 
 /** Appended to fixture bundle copies only: counts module evaluations. */
 const EVAL_COUNTER =
@@ -97,7 +68,13 @@ verdict.evalsAfterSecondUnchangedReload = globalThis.__herdrBundleEvals;
 console.log(JSON.stringify(verdict));
 `;
 
-describe.skipIf(!existsSync(bundlePath))('entry reload mechanism (built bundle required)', () => {
+/**
+ * The package entry must stay a stable shim that re-resolves the bundle by
+ * content hash on every factory call. A static re-export of dist (the pre-fix
+ * shape) makes /reload silently keep old code, because Pi's jiti delegates
+ * "type":"module" .js entries to Node's process-wide ESM cache.
+ */
+describe('entry reload mechanism', () => {
   it('picks up a rebuilt bundle on factory re-invocation and stays pinned otherwise', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-herdr-entry-'));
     try {
