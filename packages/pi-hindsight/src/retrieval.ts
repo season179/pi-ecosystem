@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { noul, TypeSafeClient, type Fetch } from '@typesafe-ai/sdk';
+import { Tiktoken } from 'tiktoken/lite';
+import o200kBase from 'tiktoken/encoders/o200k_base.json' with { type: 'json' };
 import type {
   CustomMessageEntry,
   SessionEntry,
@@ -30,11 +32,9 @@ export const INJECT_CHARS = 4_000;
 export const MAX_CANDIDATES = 6;
 export const MAX_SELECTED = 4;
 export const CANDIDATE_CHARS = 800;
-/**
- * Default Hindsight servers reject Recall queries over 500 tokens
- * (HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS). Byte-level BPE never yields more tokens than UTF-8 bytes.
- */
-export const RECALL_QUERY_BYTES = 480;
+/** Match Hindsight's default encoding, with headroom below its 500-token Recall limit. */
+export const RECALL_QUERY_TOKENS = 480;
+export const RECALL_QUERY_ENCODING = 'o200k_base';
 export const COOLDOWN_MS = 2 * 60_000;
 export const FAILURE_LIMIT = 3;
 const MESSAGE_CHARS = 1_500;
@@ -115,26 +115,33 @@ export function excerpt(text: string, max: number): string {
 }
 export const automaticQuery = (prompt: string) => excerpt(stripMemory(prompt).trim(), 4_000);
 
-const bytes = (text: string) => Buffer.byteLength(text, 'utf8');
-function byteExcerpt(text: string, max: number): string {
-  if (bytes(text) <= max) return text;
+let tokenizer: Tiktoken | undefined;
+const recallTokenizer = () =>
+  (tokenizer ??= new Tiktoken(o200kBase.bpe_ranks, o200kBase.special_tokens, o200kBase.pat_str));
+// Hindsight counts special-token literals as ordinary text, not control tokens.
+export const recallTokenCount = (text: string) => recallTokenizer().encode(text, [], []).length;
+function tokenExcerpt(text: string, max: number): string {
+  const encoding = recallTokenizer();
+  const tokens = encoding.encode(text, [], []);
+  if (tokens.length <= max) return text;
   const marker = '\n[truncated]';
-  let head = '',
-    used = bytes(marker);
-  for (const char of text) {
-    // Code points, so a cut never splits a character.
-    used += bytes(char);
-    if (used > max) break;
-    head += char;
+  for (let end = Math.max(0, max - recallTokenCount(marker)); end >= 0; end--) {
+    const head = Buffer.from(encoding.decode(tokens.slice(0, end))).toString('utf8');
+    const result = head + marker;
+    // Token cuts can split a UTF-8 character; retain only an exact original prefix.
+    // Recount the complete output because BPE merges across the marker boundary.
+    if (text.startsWith(head) && recallTokenCount(result) <= max) return result;
   }
-  return head + marker;
+  return '';
 }
 const HISTORY_LABEL = '\n\nRecent conversation (excerpt):\n';
-/** Recall-only query; the current request wins and history only fills the remaining bytes. */
+/** Recall-only query; request first, then history within a shared token budget. */
 export function recallQuery(request: string, recent: string): string {
-  const head = byteExcerpt(request, RECALL_QUERY_BYTES);
-  const room = RECALL_QUERY_BYTES - bytes(head) - bytes(HISTORY_LABEL);
-  return recent && room >= 64 ? head + HISTORY_LABEL + byteExcerpt(recent, room) : head;
+  const head = tokenExcerpt(request, RECALL_QUERY_TOKENS);
+  if (head !== request || !recent) return head;
+  const prefix = head + HISTORY_LABEL;
+  const room = RECALL_QUERY_TOKENS - recallTokenCount(prefix);
+  return room >= 16 ? tokenExcerpt(prefix + recent, RECALL_QUERY_TOKENS) : head;
 }
 
 /** Effective, compaction/edit-aware history; tools and hidden thinking are never pairs. */
@@ -295,10 +302,17 @@ export function formatInjection(candidates: MemoryCandidate[]): string {
   );
 }
 
+type AssessmentProvider =
+  { provider: 'typesafe'; accountId?: never } | { provider: 'cloudflare'; accountId: string };
 export type AssessmentConfig =
   | { kind: 'disabled' | 'invalid' }
-  | { kind: 'enabled'; model: string; timeoutMs: number; apiKeyFile?: string };
-/** Shared config, current model only; no inference is made during preflight. */
+  | (AssessmentProvider & {
+      kind: 'enabled';
+      model: string;
+      timeoutMs: number;
+      apiKeyFile?: string;
+    });
+/** Hindsight overrides never change other consumers of the shared TypeSafe config. */
 export async function loadAssessmentConfig(agentDir: string): Promise<AssessmentConfig> {
   let raw: string;
   try {
@@ -316,30 +330,48 @@ export async function loadAssessmentConfig(agentDir: string): Promise<Assessment
     )
       throw new Error();
     if (value.hindsight.enabled !== true) return { kind: 'disabled' };
-    const model = value.model ?? 'jev-1.13.0',
-      timeoutMs = value.timeoutMs ?? 3000;
+    const provider = value.hindsight.provider ?? 'typesafe';
+    if (provider !== 'typesafe' && provider !== 'cloudflare') throw new Error();
+    const selected = provider === 'cloudflare' ? value.hindsight : value;
+    const model = selected.model ?? (provider === 'cloudflare' ? 'clef' : 'jev-1.13.0'),
+      timeoutMs = value.hindsight.timeoutMs ?? value.timeoutMs ?? 3000,
+      apiKeyFile = selected.apiKeyFile;
+    if (
+      provider === 'cloudflare' &&
+      (!['clef', 'clef-flash'].includes(model) ||
+        typeof selected.accountId !== 'string' ||
+        !/^[a-fA-F0-9]{32}$/.test(selected.accountId))
+    )
+      throw new Error();
     if (
       typeof model !== 'string' ||
       !/^[a-zA-Z0-9._-]{1,80}$/.test(model) ||
       !Number.isInteger(timeoutMs) ||
       timeoutMs < 1 ||
       timeoutMs > 30_000 ||
-      (value.apiKeyFile !== undefined &&
-        (typeof value.apiKeyFile !== 'string' || !value.apiKeyFile.trim()))
+      (apiKeyFile !== undefined && (typeof apiKeyFile !== 'string' || !apiKeyFile.trim()))
     )
       throw new Error();
     return {
       kind: 'enabled',
+      ...(provider === 'cloudflare' ? { provider, accountId: selected.accountId } : { provider }),
       model,
       timeoutMs: Math.min(timeoutMs, ASSESSMENT_MAX_MS),
-      apiKeyFile: value.apiKeyFile?.trim(),
+      apiKeyFile: apiKeyFile?.trim(),
     };
   } catch {
     return { kind: 'invalid' };
   }
 }
-export async function loadKey(agentDir: string, apiKeyFile?: string): Promise<string | undefined> {
-  const env = process.env.TYPESAFE_API_KEY?.trim();
+export async function loadKey(
+  agentDir: string,
+  apiKeyFile?: string,
+  provider: AssessmentProvider['provider'] = 'typesafe',
+): Promise<string | undefined> {
+  const env =
+    provider === 'cloudflare'
+      ? process.env.CLOUDFLARE_API_TOKEN?.trim() || process.env.PERSONAL_CF_API_TOKEN?.trim()
+      : process.env.TYPESAFE_API_KEY?.trim();
   if (env) return env;
   if (!apiKeyFile) return undefined;
   try {
@@ -389,7 +421,7 @@ export async function bounded<T>(
 export async function assessMemoryCandidates(
   state: object,
   candidates: MemoryCandidate[],
-  options: {
+  options: AssessmentProvider & {
     model: string;
     timeoutMs: number;
     apiKey: string;
@@ -399,6 +431,17 @@ export async function assessMemoryCandidates(
   },
 ): Promise<AssessmentOutcome> {
   if (options.signal.aborted) return { kind: 'aborted' };
+  const endpoint =
+    options.provider === 'cloudflare'
+      ? `https://api.cloudflare.com/client/v4/accounts/${options.accountId}/ai/run/@cf/cloudflare/${options.model}`
+      : ASSESSMENT_URL;
+  const trace = (row: Row) =>
+    report(options.trace, {
+      provider: options.provider,
+      model: options.model,
+      endpointHost: new URL(endpoint).hostname,
+      ...row,
+    });
   const controller = new AbortController();
   const stop = () => controller.abort();
   const timer = setTimeout(stop, options.timeoutMs);
@@ -408,7 +451,7 @@ export async function assessMemoryCandidates(
       if (typeof init?.body === 'string' && Buffer.byteLength(init.body) > 256 * 1024)
         throw new Error('assessment state limit');
       const response = await (options.fetch ?? fetch)(url, init);
-      report(options.trace, { event: 'assessment_http', httpStatus: response.status });
+      trace({ event: 'assessment_http', httpStatus: response.status });
       if (Number(response.headers.get('content-length')) > 32 * 1024) {
         void response.body?.cancel().catch(() => {});
         throw new Error('assessment response limit');
@@ -440,15 +483,6 @@ export async function assessMemoryCandidates(
         headers,
       });
     };
-    const client = new TypeSafeClient({
-      apiKey: options.apiKey,
-      baseURL: ASSESSMENT_URL,
-      defaultModel: options.model,
-      logLevel: 'off',
-      retry: { maxRetries: 0 },
-      timeout: options.timeoutMs,
-      fetch: transport,
-    });
     const questions = Object.fromEntries(
       candidates.map((c) => [
         c.key,
@@ -464,7 +498,7 @@ export async function assessMemoryCandidates(
         ]),
       ),
     };
-    report(options.trace, {
+    trace({
       event: 'assessment_request',
       model: options.model,
       timeoutMs: options.timeoutMs,
@@ -477,21 +511,71 @@ export async function assessMemoryCandidates(
         candidates.map((c) => [c.key, `${INSTRUCTIONS} Evaluate state.candidates.${c.key}.`]),
       ),
     });
-    const request = Promise.resolve(
-      client.systemOne(
-        {
-          state: assessmentState as never,
-          questions,
-          model: options.model,
+    const payload = { state: assessmentState as never, questions, model: options.model };
+    const request = (async () => {
+      if (options.provider === 'typesafe') {
+        const client = new TypeSafeClient({
+          apiKey: options.apiKey,
+          baseURL: endpoint,
+          defaultModel: options.model,
+          logLevel: 'off',
+          retry: { maxRetries: 0 },
+          timeout: options.timeoutMs,
+          fetch: transport,
+        });
+        return client.systemOne(payload, {
+          signal: controller.signal,
+          timeout: options.timeoutMs,
+          retry: { maxRetries: 0 },
+        });
+      }
+      const response = await transport(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          'Content-Type': 'application/json',
         },
-        { signal: controller.signal, timeout: options.timeoutMs, retry: { maxRetries: 0 } },
-      ),
-    );
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      if (!response.ok) throw new Error(`Hindsight HTTP ${response.status}; assessment failed`);
+      const envelope: unknown = await response.json();
+      if (!record(envelope) || envelope.success !== true || !record(envelope.result)) {
+        trace({
+          event: 'assessment_response',
+          success: false,
+          errorCodes:
+            record(envelope) && Array.isArray(envelope.errors)
+              ? envelope.errors
+                  .slice(0, 10)
+                  .map((error: unknown) => (record(error) ? error.code : undefined))
+                  .filter((code: unknown) => Number.isSafeInteger(code))
+              : [],
+        });
+        throw new Error('Hindsight invalid assessment envelope');
+      }
+      return envelope.result;
+    })();
     const result = await bounded(request, controller.signal, options.timeoutMs);
     if (options.signal.aborted) return { kind: 'aborted' };
+    // Only expected model labels may be echoed; arbitrary provider strings are not diagnostics.
+    const responseModel =
+      result.model === options.model ||
+      (options.provider === 'cloudflare' && ['clef', 'clef-flash'].includes(result.model))
+        ? result.model
+        : typeof result.model === 'string'
+          ? 'unexpected'
+          : 'unreported';
+    trace({
+      event: 'assessment_response',
+      success: true,
+      responseModel,
+      modelMatches: typeof result.model === 'string' ? result.model === options.model : null,
+    });
     const answers = result.answers as Record<string, { type?: unknown; noul?: unknown }>;
     if (!record(answers) || Object.keys(answers).length !== candidates.length) {
-      report(options.trace, {
+      trace({
         event: 'assessment_result',
         reason: 'invalid_answer_count',
         expected: candidates.length,
@@ -509,7 +593,7 @@ export async function assessMemoryCandidates(
         answer.noul < 0 ||
         answer.noul > 1
       ) {
-        report(options.trace, {
+        trace({
           event: 'assessment_result',
           reason: 'invalid_answer',
           candidate: candidate.key,
@@ -537,7 +621,7 @@ export async function assessMemoryCandidates(
       reasons.set(candidate.key, reason);
       if (reason === 'selected') selected.push(candidate);
     }
-    report(options.trace, {
+    trace({
       event: 'assessment_result',
       outcome: 'decision',
       decisions: candidates.map((c) => {
@@ -554,7 +638,7 @@ export async function assessMemoryCandidates(
     });
     return { kind: 'decision', selected };
   } catch (error) {
-    report(options.trace, {
+    trace({
       event: 'assessment_result',
       ...diagnosticError(error),
       reason: options.signal.aborted

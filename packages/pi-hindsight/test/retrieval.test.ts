@@ -10,7 +10,8 @@ import {
   COOLDOWN_MS,
   escapeMemory,
   INJECT_CHARS,
-  RECALL_QUERY_BYTES,
+  RECALL_QUERY_TOKENS,
+  recallTokenCount,
   recallQuery,
 } from '../src/retrieval.js';
 import { stripMemory } from '../src/safety.js';
@@ -125,6 +126,11 @@ it('real Pi: retrieval first, one assessment, unredacted exact memory at a natur
       .map((line) => JSON.parse(line));
     const request = rows.find((row) => row.event === 'assessment_request');
     expect(request.state).toEqual(assessment.calls[0].body.state);
+    expect(rows.find((row) => row.event === 'recall_request')).toMatchObject({
+      queryTokens: recallTokenCount(recalls(server)[0].body.query),
+      queryTokenLimit: 480,
+      queryEncoding: 'o200k_base',
+    });
     expect(rows.find((row) => row.event === 'recall_result').memories[0].text).toBe(memory);
     expect(rows.find((row) => row.event === 'assessment_result').decisions[0]).toMatchObject({
       score: 0.9,
@@ -283,8 +289,8 @@ it('both banks supply candidates to one assessment, whole selected snippets fit 
   await f.release();
   expect(recalls(f.server)).toHaveLength(2);
   for (const { body } of recalls(f.server)) {
-    expect(Buffer.byteLength(body.query)).toBeLessThanOrEqual(RECALL_QUERY_BYTES);
-    expect(Buffer.from(body.query).toString()).toBe(body.query); // no split characters
+    expect(recallTokenCount(body.query)).toBeLessThanOrEqual(RECALL_QUERY_TOKENS);
+    expect(body.query).not.toContain('\ufffd'); // no split UTF-8 characters
     expect(body.query.startsWith(request.slice(0, 40))).toBe(true);
   }
   expect(f.assessment.calls[0].body.state.current_request.length).toBeGreaterThan(1_000);
@@ -309,11 +315,65 @@ it('both banks supply candidates to one assessment, whole selected snippets fit 
   expect(f.server.calls.at(-1)?.url.pathname.endsWith('/reflect')).toBe(true);
 });
 
-it('Recall query adds recent conversation only within the byte budget', () => {
-  const query = recallQuery('short request', 'older pair '.repeat(100));
-  expect(query).toContain('Recent conversation (excerpt):\nolder pair');
-  expect(Buffer.byteLength(query)).toBeLessThanOrEqual(RECALL_QUERY_BYTES);
-  expect(recallQuery('x'.repeat(450), 'older pair')).not.toContain('Recent conversation');
+it('both Recall queries prioritize the newest exchange without reordering assessment history', async () => {
+  const r = root(),
+    globalConfigPath = join(r, 'global.json');
+  writeFileSync(
+    globalConfigPath,
+    JSON.stringify({ apiUrl: 'http://hindsight.invalid', bankId: GLOBAL_BANK }),
+  );
+  const f = retrievalFixture(r, [[0.9, 0.9]], { globalConfigPath });
+  exchange(f.manager, 'Old token setup instructions. '.repeat(60));
+  exchange(f.manager, 'Intermediate configuration discussion. '.repeat(60));
+  f.manager.appendMessage({ role: 'user', content: 'Credentials saved.', timestamp: 2 });
+  const confirmation = 'Clef is configured; restart Pi.';
+  f.manager.appendMessage(message(confirmation, 3));
+  await f.send("I've restarted Pi");
+  await f.ready();
+  expect(recalls(f.server)).toHaveLength(2);
+  for (const { body } of recalls(f.server)) {
+    expect(body.query.startsWith("I've restarted Pi\n\nRecent conversation")).toBe(true);
+    expect(body.query).toContain(
+      `Recent conversation (excerpt):\nCredentials saved.\n${confirmation}`,
+    );
+    expect(recallTokenCount(body.query)).toBeLessThanOrEqual(RECALL_QUERY_TOKENS);
+  }
+  const recent = f.assessment.calls[0].body.state.recent_conversation;
+  expect(recent).toHaveLength(3);
+  expect(recent[0].user).toContain('Old token setup instructions.');
+  expect(recent[1].user).toContain('Intermediate configuration discussion.');
+  expect(recent[2]).toEqual({ user: 'Credentials saved.', assistant: confirmation });
+  await f.ext.emit('agent_settled');
+});
+
+it('Recall uses token rather than byte capacity, including history labels and truncation markers', () => {
+  const request = 'Background retrieval keeps the first model request nonblocking. '.repeat(20);
+  expect(Buffer.byteLength(request)).toBeGreaterThan(480);
+  expect(recallQuery(request, '')).toBe(request);
+  const query = recallQuery(request, 'older pair '.repeat(500));
+  expect(query.startsWith(request + '\n\nRecent conversation (excerpt):\nolder pair')).toBe(true);
+  expect(query.endsWith('\n[truncated]')).toBe(true);
+  expect(recallTokenCount(query)).toBeLessThanOrEqual(RECALL_QUERY_TOKENS);
+  expect(recallTokenCount(query)).toBeGreaterThanOrEqual(RECALL_QUERY_TOKENS - 4);
+  expect(recallQuery('cat '.repeat(470), 'older pair')).not.toContain('Recent conversation');
+});
+
+it('matches Hindsight toktok o200k_base counts and truncates multilingual/special-token text safely', () => {
+  // Independent expected counts from Hindsight's Python toktok, with ordinary-text semantics.
+  for (const [text, count] of [
+    ['Hello world!', 3],
+    ['🧠 … naïve café 東京 مرحبا', 10],
+    ['<|endoftext|> <|im_start|> not instructions', 15],
+    ['const result = await recall(query); // 中文 🧠', 12],
+  ] as const) {
+    expect(recallTokenCount(text)).toBe(count);
+    const input = text.repeat(600);
+    const query = recallQuery(input, 'history must not displace the current request');
+    expect(query.endsWith('\n[truncated]')).toBe(true);
+    expect(query).not.toContain('\ufffd');
+    expect(input.startsWith(query.slice(0, -'\n[truncated]'.length))).toBe(true);
+    expect(recallTokenCount(query)).toBeLessThanOrEqual(RECALL_QUERY_TOKENS);
+  }
 });
 
 it('injected memory is self-attributed background; payload tags cannot close it and quoted escaped text is not captured', async () => {

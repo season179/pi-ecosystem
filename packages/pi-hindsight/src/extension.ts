@@ -55,6 +55,9 @@ import {
   formatInjection,
   escapeMemory,
   recallQuery,
+  recallTokenCount,
+  RECALL_QUERY_TOKENS,
+  RECALL_QUERY_ENCODING,
   type ContextEntry,
   type CandidateProvenance,
 } from './retrieval.js';
@@ -964,7 +967,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             return;
           }
           const apiKey = await bounded(
-            loadKey(agentDir, assessment.apiKeyFile),
+            loadKey(agentDir, assessment.apiKeyFile, assessment.provider),
             p.controller.signal,
             ASSESSMENT_MAX_MS,
           );
@@ -992,8 +995,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
                 guard: p.fresh,
                 fetch: options.fetch,
               });
-              // Query context is explicitly labelled and bounded, not a reasoning or Reflect call.
+              // Spend the bounded Recall query on newest pairs first; keep assessment history chronological.
               const recent = inputs.state.recent_conversation
+                .slice()
+                .reverse()
                 .map((t) => `${t.user}\n${t.assistant}`)
                 .join('\n');
               const recallInput = recallQuery(query, recent);
@@ -1014,6 +1019,9 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
                 ...bankInfo,
                 query: recallInput,
                 queryBytes: Buffer.byteLength(recallInput),
+                queryTokens: recallTokenCount(recallInput),
+                queryTokenLimit: RECALL_QUERY_TOKENS,
+                queryEncoding: RECALL_QUERY_ENCODING,
                 // Allowlist retrieval controls, never dump the credential-bearing target config.
                 options: Object.fromEntries(
                   loggedOptions
@@ -1099,8 +1107,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           p.phase = 'assessment';
           const assessmentStarted = Date.now();
           const decision = await assessMemoryCandidates(inputs.state, candidates, {
-            model: assessment.model,
-            timeoutMs: assessment.timeoutMs,
+            ...assessment,
             apiKey,
             signal: p.controller.signal,
             fetch: options.assessmentFetch,
