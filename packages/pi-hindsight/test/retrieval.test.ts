@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Type } from '@earendil-works/pi-ai';
@@ -14,6 +14,7 @@ import {
   recallQuery,
 } from '../src/retrieval.js';
 import { stripMemory } from '../src/safety.js';
+import { TELEMETRY_FILE } from '../src/telemetry.js';
 import {
   config,
   exchange,
@@ -128,11 +129,14 @@ it('a hung preflight cannot block a single-call answer or dispatch after settlem
     mode: 'read-only',
   });
   try {
-    const started = Date.now();
+    // Resolving while the preflight is still held is the nonblocking proof.
     await subject.session.prompt('self-contained request');
-    expect(Date.now() - started).toBeLessThan(800);
     held.release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const telemetry = join(r, 'agent', TELEMETRY_FILE);
+    await until(
+      () => existsSync(telemetry) && readFileSync(telemetry, 'utf8').includes('"retrieval"'),
+    );
+    expect(readFileSync(telemetry, 'utf8')).toContain('"outcome":"cancelled"');
     expect(server.calls).toHaveLength(0);
     expect(subject.requests).toHaveLength(1);
   } finally {
