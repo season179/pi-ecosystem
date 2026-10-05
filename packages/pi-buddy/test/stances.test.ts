@@ -27,69 +27,67 @@ describe('automatic intervention prompt contracts', () => {
     }
   });
 
+  // Both builders carry the same policy (checked above), so assert its content once.
+  describe('shared policy', () => {
+    const text = policy(automaticPrompts.review);
+
+    it('requires current-request relevance or ongoing/imminent material risk', () => {
+      assert.match(
+        text,
+        /only for an evidence-backed defect actionable within the current request/,
+      );
+      assert.match(
+        text,
+        /or an evidence-backed ongoing\/imminent material correctness or security risk/,
+      );
+      assert.match(text, /Suppress old unrelated task chores, even if they remain unfinished/);
+    });
+
+    it('suppresses the same credibly assigned issue without immunizing active work', () => {
+      assert.match(text, /Suppress the same concrete issue when it is already acknowledged/);
+      assert.match(
+        text,
+        /credible assigned or in-progress fix, unless new relevant contrary evidence/,
+      );
+      assert.match(text, /contradicted completion, a new harmful action/);
+      assert.match(
+        text,
+        /evidence-backed material harm not covered by the fix or occurring before it can take effect/,
+      );
+      assert.match(
+        text,
+        /specific assignment \(including agent delegation\) or visible work on that defect/,
+      );
+      assert.match(text, /not a bare acknowledgment/);
+      assert.match(text, /credible assigned or in-progress fix does not require a completed fix/);
+      assert.match(text, /mere incompleteness is not contrary evidence or a harm exception/);
+      assert.doesNotMatch(text, /ongoing\/imminent material harm makes intervention necessary/);
+      assert.match(text, /Activity on a file or task is not blanket immunity/);
+      assert.match(text, /Retain novel defects, newly exposed failures/);
+      assert.match(text, /missed requirements, contradicted completion claims/);
+      assert.match(text, /evidence-backed imminent material harm, even in active work/);
+    });
+
+    it('distinguishes normal sequencing from actionable handoff and harm', () => {
+      assert.match(text, /Missing tests, reports, or commits alone is normal sequencing/);
+      assert.match(text, /during implementation or investigation, not a concern/);
+      assert.match(text, /misleading completion, a real missing requirement at handoff/);
+      assert.match(text, /a concrete dangerous next action — not unfinished chores/);
+    });
+
+    it('requires fresh evidence for repeated concerns and forbids bundled chores', () => {
+      assert.match(text, /Repeating an open or settled concern requires new relevant evidence/);
+      assert.match(text, /Agent feedback is context, not proof that an issue is fixed or rebutted/);
+      assert.match(text, /not permission to ignore contradictory evidence/);
+      assert.match(
+        text,
+        /Evaluate each claim independently\. Never bundle unrelated process reminders with a legitimate correctness finding/,
+      );
+    });
+  });
+
   for (const [phase, prompt] of Object.entries(automaticPrompts)) {
     describe(phase, () => {
-      it('requires current-request relevance or ongoing/imminent material risk', () => {
-        const text = policy(prompt);
-        assert.match(
-          text,
-          /only for an evidence-backed defect actionable within the current request/,
-        );
-        assert.match(
-          text,
-          /or an evidence-backed ongoing\/imminent material correctness or security risk/,
-        );
-        assert.match(text, /Suppress old unrelated task chores, even if they remain unfinished/);
-      });
-
-      it('suppresses the same credibly assigned issue without immunizing active work', () => {
-        const text = policy(prompt);
-        assert.match(text, /Suppress the same concrete issue when it is already acknowledged/);
-        assert.match(
-          text,
-          /credible assigned or in-progress fix, unless new relevant contrary evidence/,
-        );
-        assert.match(text, /contradicted completion, a new harmful action/);
-        assert.match(
-          text,
-          /evidence-backed material harm not covered by the fix or occurring before it can take effect/,
-        );
-        assert.match(
-          text,
-          /specific assignment \(including agent delegation\) or visible work on that defect/,
-        );
-        assert.match(text, /not a bare acknowledgment/);
-        assert.match(text, /credible assigned or in-progress fix does not require a completed fix/);
-        assert.match(text, /mere incompleteness is not contrary evidence or a harm exception/);
-        assert.doesNotMatch(text, /ongoing\/imminent material harm makes intervention necessary/);
-        assert.match(text, /Activity on a file or task is not blanket immunity/);
-        assert.match(text, /Retain novel defects, newly exposed failures/);
-        assert.match(text, /missed requirements, contradicted completion claims/);
-        assert.match(text, /evidence-backed imminent material harm, even in active work/);
-      });
-
-      it('distinguishes normal sequencing from actionable handoff and harm', () => {
-        const text = policy(prompt);
-        assert.match(text, /Missing tests, reports, or commits alone is normal sequencing/);
-        assert.match(text, /during implementation or investigation, not a concern/);
-        assert.match(text, /misleading completion, a real missing requirement at handoff/);
-        assert.match(text, /a concrete dangerous next action — not unfinished chores/);
-      });
-
-      it('requires fresh evidence for repeated concerns and forbids bundled chores', () => {
-        const text = policy(prompt);
-        assert.match(text, /Repeating an open or settled concern requires new relevant evidence/);
-        assert.match(
-          text,
-          /Agent feedback is context, not proof that an issue is fixed or rebutted/,
-        );
-        assert.match(text, /not permission to ignore contradictory evidence/);
-        assert.match(
-          text,
-          /Evaluate each claim independently\. Never bundle unrelated process reminders with a legitimate correctness finding/,
-        );
-      });
-
       it('keeps the terminal structured protocol and excludes learning', () => {
         assert.ok(
           prompt.includes(
