@@ -103,7 +103,12 @@ export function createRetrievalUI(pi: ExtensionAPI, pendingId: () => string | un
     },
     note(ctx: ExtensionContext, text: string) {
       context = ctx;
-      status = text;
+      if (text === 'none useful') {
+        const checkedAt = new Date();
+        status = [checkedAt.getHours(), checkedAt.getMinutes(), checkedAt.getSeconds()]
+          .map((part) => String(part).padStart(2, '0'))
+          .join(':');
+      } else status = text;
       if (ctx.mode === 'tui')
         ctx.ui.setWidget(
           'pi-hindsight-memory',

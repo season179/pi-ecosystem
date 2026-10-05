@@ -148,7 +148,7 @@ it('checks every message, even identical requests, without the old lifetime cuto
   for (let i = 0; i < 35; i++) {
     const user = await f.send('same request');
     await f.ext.emit('message_end', { type: 'message_end', message: user } as any);
-    await until(() => f.ext.memoryStatus.includes('none useful'));
+    await until(() => /^\[memory: \d{2}:\d{2}:\d{2}\]$/.test(f.ext.memoryStatus));
     f.manager.appendMessage(message('complete answer', user.timestamp + 1));
   }
   expect(recalls(f.server)).toHaveLength(35);
@@ -311,7 +311,7 @@ it('available memory dedupes repeats, but edited candidate content is reassessed
   f.manager.appendMessage(message('first answer'));
   await f.ext.emit('agent_settled');
   await f.send('follow-up');
-  await until(() => f.ext.memoryStatus.includes('none useful'));
+  await until(() => /^\[memory: \d{2}:\d{2}:\d{2}\]$/.test(f.ext.memoryStatus));
   expect(f.assessment.calls).toHaveLength(1);
   // Same identity AND displayed excerpt, but full content version changed.
   f.server.reflectText = 'Identical bounded prefix. '.repeat(50) + 'edited tail';
@@ -342,7 +342,7 @@ it('three actual assessment failures pause, recover after two minutes; none usef
   expect(recalls(f.server)).toHaveLength(3);
   vi.spyOn(Date, 'now').mockReturnValue(Date.now() + COOLDOWN_MS + 1);
   await f.send('recovered');
-  await until(() => f.ext.memoryStatus.includes('none useful'));
+  await until(() => /^\[memory: \d{2}:\d{2}:\d{2}\]$/.test(f.ext.memoryStatus));
   await f.send('another');
   await f.ready();
   expect(f.assessment.calls).toHaveLength(5);

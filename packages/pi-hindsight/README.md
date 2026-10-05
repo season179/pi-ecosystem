@@ -54,7 +54,7 @@ All automatic retrieval, **including the first message**, requires `<agentDir>/t
 
 ### Visibility and inspection
 
-A compact right-aligned indicator **above the editor**, not in the footer, shows checking → selected/awaiting model request → injected, none useful, not delivered, unavailable or paused. Its outcome stays until the next user message. The existing `[fast mode]` widget is untouched; Hindsight uses its own neighboring row, not another plugin's private shared registry.
+A compact right-aligned indicator **above the editor**, not in the footer, shows checking → selected/awaiting model request → injected, not delivered, unavailable or paused. When no useful memory is found, it shows `[memory: HH:MM:SS]`, the completed check's local 24-hour time. Its outcome stays until the next user message. The existing `[fast mode]` widget is untouched; Hindsight uses its own neighboring row, not another plugin's private shared registry.
 
 Delivered memory appears as a compact conversation receipt:
 

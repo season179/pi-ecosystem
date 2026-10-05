@@ -1,17 +1,43 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONTEXT_TYPE, DELIVERY_TYPE } from '../src/retrieval.js';
 import { retrievalFixture } from './retrieval-support.js';
+import { createRetrievalUI } from '../src/retrieval-ui.js';
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env.TYPESAFE_API_KEY;
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 const theme = { fg: (_name: string, text: string) => text };
+
+it('shows a fixed local check time for none useful, updating only on the next check', () => {
+  const r = mkdtempSync(join(tmpdir(), 'hindsight-ui-'));
+  roots.push(r);
+  const f = retrievalFixture(r);
+  const ui = createRetrievalUI(
+    { registerMessageRenderer() {} } as unknown as ExtensionAPI,
+    () => undefined,
+  );
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(2026, 9, 3, 4, 5, 6));
+  ui.note(f.ext.ctx, 'none useful');
+  const widget = f.ext.widgets.get('pi-hindsight-memory')({ requestRender() {} }, theme);
+  expect(widget.render(30)).toEqual(['            [memory: 04:05:06]']);
+  vi.setSystemTime(new Date(2026, 9, 3, 17, 8, 9));
+  ui.refresh(f.ext.ctx);
+  expect(widget.render(30)).toEqual(['            [memory: 04:05:06]']);
+  expect(visibleWidth(widget.render(12)[0])).toBeLessThanOrEqual(12);
+  ui.note(f.ext.ctx, 'none useful');
+  expect(f.ext.memoryStatus).toBe('[memory: 17:08:09]');
+  ui.note(f.ext.ctx, 'none useful; partial Recall unavailable');
+  expect(f.ext.memoryStatus).toBe('[memory: none useful; partial Recall unavailable]');
+});
 
 it('one above-editor indicator; header click toggles only its receipt, exact text and honest release/invalidation survive resume', async () => {
   const r = mkdtempSync(join(tmpdir(), 'hindsight-ui-'));
