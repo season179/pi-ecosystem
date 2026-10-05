@@ -100,7 +100,7 @@ it('real Pi: retrieval first, one assessment, unredacted exact memory at a natur
     expect(recalls(server)).toHaveLength(1);
     expect(recalls(server)[0].body).toMatchObject({
       query: 'What was the decision? api_key=abcdef123456',
-      types: ['observation'],
+      types: ['world', 'experience', 'observation'],
       budget: 'low',
     });
     expect(server.calls.some((c) => c.url.pathname.endsWith('/reflect'))).toBe(false);

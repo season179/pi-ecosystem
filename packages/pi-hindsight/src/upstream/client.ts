@@ -50,7 +50,7 @@ export interface ClientOptions {
   signal: AbortSignal;
   fetch?: typeof fetch;
 }
-export const RECALL_DEFAULTS = { types: ['observation'], budget: 'low', max_tokens: 2000 };
+export const RECALL_DEFAULTS = { types: ['world', 'experience', 'observation'], budget: 'low', max_tokens: 2000 };
 const CURATION_PAGE = 200; // keeps each list response well under the 1 MiB body limit
 const CURATION_MAX_FACTS = 5000;
 export class HindsightClient {
