@@ -12,7 +12,6 @@ Season's Pi package workspace. Packages are versioned independently and publishe
 - [`@season179/pi-model-fallback`](./packages/pi-model-fallback) — Published. Automatic model failover driven by a standalone `fallback-models.json` config.
 - [`@season179/pi-worktree`](./packages/pi-worktree) — Published. Adds a Claude Code-like `--worktree` flag to Pi.
 - [`@season179/pi-skills-status`](./packages/pi-skills-status) — Published. Shows the skills used in the current Pi session.
-- [`@season179/pi-readbeam`](./packages/pi-readbeam) — Pre-release proof of concept for calmer assistant-message scanning.
 - [`@season179/pi-hindsight`](./packages/pi-hindsight) — Unpublished. Thin official-derived Hindsight integration: automatic capture, Reflect-based retrieval, and scoped fact curation, sharing one bank per repository with the official Claude Code integration.
 
 Retired: `packages/pi-delegate` (failed experiment, never published). Its source
