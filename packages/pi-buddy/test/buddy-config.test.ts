@@ -15,7 +15,7 @@ describe('buddy config watchdog.initialCadence', () => {
     }
   });
 
-  it("leaves omitted cadence unset for the session's default of three", async () => {
+  it("leaves omitted cadence unset for the session's default", async () => {
     for (const config of [{}, { watchdog: {} }]) {
       const result = parseBuddyConfig(config, path);
       assert.equal(result.initialCadence, undefined);
