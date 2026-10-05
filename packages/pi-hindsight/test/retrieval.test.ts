@@ -384,7 +384,7 @@ it('injected memory is self-attributed background; payload tags cannot close it 
   await f.ready();
   const draft = await f.stage();
   await f.release();
-  expect(draft.content).toMatch(/^<hindsight_memory [^>]*>\n.*not a new user message/);
+  expect(draft.content).toMatch(/^<hindsight_memory [^>]*>\n.*not a new user request/);
   expect(stripMemory(draft.content)).toBe('[memory context omitted]');
   f.manager.appendMessage(message(`Noted: ${escapeMemory(f.server.reflectText)}`));
   await f.ext.emit('agent_settled');
