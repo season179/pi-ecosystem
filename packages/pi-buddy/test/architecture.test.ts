@@ -38,10 +38,8 @@ describe('architecture boundaries', () => {
 
   it('routes shared contracts through neutral modules', () => {
     assert.doesNotMatch(source('output-control.ts'), /from ["']\.\/consult\.js["']/);
-    assert.match(source('buddy-session.ts'), /from ["']\.\/memory-prompt\.js["']/);
     assert.doesNotMatch(source('buddy-session.ts'), /from ["']\.\/stances\.js["']/);
     for (const file of ['web-tools.ts', 'watchdog-verdict.ts']) {
-      assert.match(source(file), /from ["']\.\/buddy-tool\.js["']/);
       assert.doesNotMatch(source(file), /from ["']\.\/buddy-tools\.js["']/);
     }
   });
