@@ -1,23 +1,23 @@
-import assert from "node:assert/strict";
+import assert from 'node:assert/strict';
 import {
-	cpSync,
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
-import { describe, it } from "vitest";
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { describe, it } from 'vitest';
 
-const pkgRoot = fileURLToPath(new URL("..", import.meta.url));
-const indexSource = readFileSync(join(pkgRoot, "index.js"), "utf8");
-const bundlePath = join(pkgRoot, "dist", "herdr.bundle.js");
+const pkgRoot = fileURLToPath(new URL('..', import.meta.url));
+const indexSource = readFileSync(join(pkgRoot, 'index.js'), 'utf8');
+const bundlePath = join(pkgRoot, 'dist', 'herdr.bundle.js');
 
 /**
  * The package entry must stay a stable shim that re-resolves the bundle by
@@ -25,22 +25,30 @@ const bundlePath = join(pkgRoot, "dist", "herdr.bundle.js");
  * shape) makes /reload silently keep old code, because Pi's jiti delegates
  * "type":"module" .js entries to Node's process-wide ESM cache.
  */
-describe("loader entry shim", () => {
-	it("exports a default async factory, not a static dist re-export", () => {
-		assert.ok(!/export\s*\{[^}]*\}\s*from\s*["']\.\/dist/.test(indexSource), "index.js must not statically re-export dist");
-		const match = /export\s+default\s+(async\s+)?function[\s\S]*?import\(/.exec(indexSource);
-		assert.ok(match, "index.js must default-export a factory that dynamically imports the bundle");
-		assert.match(indexSource, /createHash|sha256/, "factory must fingerprint the bundle by content");
-		assert.match(indexSource, /\?v=/, "factory must import the bundle under a query-busted URL");
-	});
+describe('loader entry shim', () => {
+  it('exports a default async factory, not a static dist re-export', () => {
+    assert.ok(
+      !/export\s*\{[^}]*\}\s*from\s*["']\.\/dist/.test(indexSource),
+      'index.js must not statically re-export dist',
+    );
+    const match = /export\s+default\s+(async\s+)?function[\s\S]*?import\(/.exec(indexSource);
+    assert.ok(match, 'index.js must default-export a factory that dynamically imports the bundle');
+    assert.match(
+      indexSource,
+      /createHash|sha256/,
+      'factory must fingerprint the bundle by content',
+    );
+    assert.match(indexSource, /\?v=/, 'factory must import the bundle under a query-busted URL');
+  });
 
-	it("references the bundle the build produces", () => {
-		assert.match(indexSource, /\.\/dist\/herdr\.bundle\.js/);
-	});
+  it('references the bundle the build produces', () => {
+    assert.match(indexSource, /\.\/dist\/herdr\.bundle\.js/);
+  });
 });
 
 /** Appended to fixture bundle copies only: counts module evaluations. */
-const EVAL_COUNTER = "\nglobalThis.__herdrBundleEvals = (globalThis.__herdrBundleEvals ?? 0) + 1;\n";
+const EVAL_COUNTER =
+  '\nglobalThis.__herdrBundleEvals = (globalThis.__herdrBundleEvals ?? 0) + 1;\n';
 
 /** Runs in a child process with a real Node ESM cache and a real on-disk fixture. */
 const CHILD_SCRIPT = String.raw`
@@ -89,45 +97,60 @@ verdict.evalsAfterSecondUnchangedReload = globalThis.__herdrBundleEvals;
 console.log(JSON.stringify(verdict));
 `;
 
-describe.skipIf(!existsSync(bundlePath))("entry reload mechanism (built bundle required)", () => {
-	it("picks up a rebuilt bundle on factory re-invocation and stays pinned otherwise", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-herdr-entry-"));
-		try {
-			writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", type: "module", private: true }));
-			cpSync(join(pkgRoot, "index.js"), join(dir, "index.js"));
-			mkdirSync(join(dir, "dist"));
-			writeFileSync(join(dir, "dist", "herdr.bundle.js"), readFileSync(bundlePath, "utf8") + EVAL_COUNTER);
-			// Externals (@earendil-works/*, typebox) resolve through the workspace root.
-			symlinkSync(join(pkgRoot, "../../node_modules"), join(dir, "node_modules"));
-			const agentDir = join(dir, "agent");
-			mkdirSync(agentDir);
-			const script = CHILD_SCRIPT
-				.replaceAll("__BUNDLE__", join(dir, "dist", "herdr.bundle.js"))
-				.replaceAll("__ENTRY__", join(dir, "index.js"));
-			const scriptPath = join(dir, "run.mjs");
-			writeFileSync(scriptPath, script);
-			const stdout = execFileSync(process.execPath, [scriptPath], {
-				env: {
-					...process.env,
-					HERDR_ENV: "1",
-					HERDR_PANE_ID: "entry-test",
-					PI_HERDR_ORCHESTRATOR: "0",
-					PI_CODING_AGENT_DIR: agentDir,
-				},
-				encoding: "utf8",
-			});
-			const verdict = JSON.parse(stdout.trim().split("\n").pop());
-			assert.equal(verdict.evalsAfterLoad, 1);
-			assert.ok(verdict.toolsAfterLoad.includes("herdr_orchestrate"));
-			assert.equal(verdict.rendererReturnsExternalBox, true);
-			assert.equal(verdict.evalsAfterUnchangedReload, 1, "unchanged reload must reuse the cached module graph");
-			assert.deepEqual(verdict.toolsAfterUnchangedReload, verdict.toolsAfterLoad);
-			assert.equal(verdict.evalsAfterRebuildReload, 2, "rebuilt bundle must be re-evaluated");
-			assert.ok(verdict.toolsAfterRebuildReload.includes("herdr_orchestrate_v2"));
-			assert.ok(!verdict.toolsAfterRebuildReload.includes("herdr_orchestrate"));
-			assert.equal(verdict.evalsAfterSecondUnchangedReload, 2, "unchanged reload after rebuild must stay pinned");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
+describe.skipIf(!existsSync(bundlePath))('entry reload mechanism (built bundle required)', () => {
+  it('picks up a rebuilt bundle on factory re-invocation and stays pinned otherwise', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pi-herdr-entry-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'fixture', type: 'module', private: true }),
+      );
+      cpSync(join(pkgRoot, 'index.js'), join(dir, 'index.js'));
+      mkdirSync(join(dir, 'dist'));
+      writeFileSync(
+        join(dir, 'dist', 'herdr.bundle.js'),
+        readFileSync(bundlePath, 'utf8') + EVAL_COUNTER,
+      );
+      // Externals (@earendil-works/*, typebox) resolve through the workspace root.
+      symlinkSync(join(pkgRoot, '../../node_modules'), join(dir, 'node_modules'));
+      const agentDir = join(dir, 'agent');
+      mkdirSync(agentDir);
+      const script = CHILD_SCRIPT.replaceAll(
+        '__BUNDLE__',
+        join(dir, 'dist', 'herdr.bundle.js'),
+      ).replaceAll('__ENTRY__', join(dir, 'index.js'));
+      const scriptPath = join(dir, 'run.mjs');
+      writeFileSync(scriptPath, script);
+      const stdout = execFileSync(process.execPath, [scriptPath], {
+        env: {
+          ...process.env,
+          HERDR_ENV: '1',
+          HERDR_PANE_ID: 'entry-test',
+          PI_HERDR_ORCHESTRATOR: '0',
+          PI_CODING_AGENT_DIR: agentDir,
+        },
+        encoding: 'utf8',
+      });
+      const verdict = JSON.parse(stdout.trim().split('\n').pop());
+      assert.equal(verdict.evalsAfterLoad, 1);
+      assert.ok(verdict.toolsAfterLoad.includes('herdr_orchestrate'));
+      assert.equal(verdict.rendererReturnsExternalBox, true);
+      assert.equal(
+        verdict.evalsAfterUnchangedReload,
+        1,
+        'unchanged reload must reuse the cached module graph',
+      );
+      assert.deepEqual(verdict.toolsAfterUnchangedReload, verdict.toolsAfterLoad);
+      assert.equal(verdict.evalsAfterRebuildReload, 2, 'rebuilt bundle must be re-evaluated');
+      assert.ok(verdict.toolsAfterRebuildReload.includes('herdr_orchestrate_v2'));
+      assert.ok(!verdict.toolsAfterRebuildReload.includes('herdr_orchestrate'));
+      assert.equal(
+        verdict.evalsAfterSecondUnchangedReload,
+        2,
+        'unchanged reload after rebuild must stay pinned',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
