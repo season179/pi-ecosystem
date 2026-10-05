@@ -30,6 +30,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm test --workspaces --if-present
       - run: npm publish --workspace @season179/pi-worktree --access public
         if: ${{ inputs.package == 'all' || inputs.package == 'pi-worktree' }}
       - run: npm publish --workspace @season179/pi-skills-status --access public
