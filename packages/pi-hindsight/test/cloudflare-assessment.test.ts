@@ -47,7 +47,7 @@ it('routes Clef with its own key, unwraps its response, delivers memory and logs
       return response({ success: true, result });
     },
   });
-  configure(f.agentDir);
+  configure(f.agentDir, { timeoutMs: 10_000 });
   writeFileSync(join(f.agentDir, 'cloudflare.key'), 'cloudflare-transport-secret');
   await f.send('What did we decide?');
   await f.ready();
@@ -76,6 +76,7 @@ it('routes Clef with its own key, unwraps its response, delivers memory and logs
     model: 'clef',
     endpointHost: 'api.cloudflare.com',
     threshold: 0.7,
+    timeoutMs: 10_000,
   });
   expect(rows.find((r) => r.event === 'assessment_response')).toMatchObject({
     job: request.job,
@@ -143,7 +144,17 @@ it.each([
     configure(f.agentDir, { timeoutMs: 50 });
     process.env.CLOUDFLARE_API_TOKEN = 'cf-test-key';
     await f.send('Find a memory');
-    await until(() => f.ext.memoryStatus.includes('unavailable'));
+    const timedOut = _name === 'abort-ignoring transport';
+    await until(() => f.ext.memoryStatus.includes(timedOut ? 'timed out' : 'unavailable'));
+    if (timedOut) {
+      expect(f.ext.memoryStatus).toBe('[memory: assessment timed out; no memory injected]');
+      for (let i = 0; i < 2; i++) {
+        await f.send(`Retry ${i}`);
+        await until(() => /timed out|paused/.test(f.ext.memoryStatus));
+      }
+      expect(f.ext.memoryStatus).toContain('paused after 3 service failures');
+      expect(f.ext.memoryStatus).toContain('assessment timed out');
+    }
     expect(await f.stage()).toBeUndefined();
     expect(contexts(f.manager)).toHaveLength(0);
     const log = readFileSync(join(f.agentDir, TELEMETRY_FILE), 'utf8');

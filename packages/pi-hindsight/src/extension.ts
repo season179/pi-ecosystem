@@ -689,13 +689,16 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       retrieval = text;
       retrievalUI.note(ctx, text);
     };
-    const fail = (ctx: ExtensionContext, generation: number) => {
+    const fail = (ctx: ExtensionContext, generation: number, reason?: string) => {
       if (generation !== epoch) return;
       failures++;
       if (failures >= FAILURE_LIMIT) {
         pausedUntil = Date.now() + COOLDOWN_MS;
-        note(ctx, 'paused after 3 service failures; retry in 2 minutes');
-      } else note(ctx, 'unavailable; no memory injected');
+        note(
+          ctx,
+          `paused after 3 service failures; retry in 2 minutes${reason ? `; ${reason}` : ''}`,
+        );
+      } else note(ctx, `${reason ?? 'unavailable'}; no memory injected`);
     };
     type Pending = {
       id: string;
@@ -933,6 +936,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       p.work = (async () => {
         let outcome = 'cancelled',
           serviceStarted = false;
+        let failureReason: string | undefined;
         try {
           p.fresh();
           const targets = resolveTargets();
@@ -1114,7 +1118,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             trace: (row) => p.trace({ ms: Date.now() - assessmentStarted, ...row }),
           });
           p.fresh();
-          if (decision.kind !== 'decision') throw new Error('Hindsight assessment unavailable');
+          if (decision.kind !== 'decision') {
+            if (decision.kind === 'timeout') failureReason = 'assessment timed out';
+            throw new Error('Hindsight assessment unavailable');
+          }
           await checkAssessment();
           failures = 0; // Healthy project retrieval/assessment is not silenced by an optional global failure.
           if (!decision.selected.length) {
@@ -1168,7 +1175,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             outcome = 'unavailable';
             try {
               p.fresh();
-              if (serviceStarted) fail(ctx, generation);
+              if (serviceStarted) fail(ctx, generation, failureReason);
               else note(ctx, 'unavailable; configuration could not be read');
             } catch {
               outcome = 'cancelled';

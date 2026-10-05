@@ -4,13 +4,12 @@ Give Pi continuity across sessions: remember useful decisions and preferences in
 
 ## What it does
 
-- Retrieves memories from Hindsight, checks their relevance, and adds useful ones to a later model request without blocking the first answer. Memory is background evidence, not instructions.
-- Saves completed conversations and provides tools for searching, reflecting on, retaining and correcting memories.
-- Records local troubleshooting logs, capped at **1 GB total**. These contain conversation and memory text; treat them as sensitive.
+- Recalls relevant memories in the background and adds them as context, not instructions.
+- Saves conversations and provides tools to search, reflect on, retain, and correct memories.
 
 ## Setup
 
-Requires Pi 1.0+, a Hindsight server, and Cloudflare Workers AI or TypeSafe credentials for automatic retrieval. Disable legacy `pi-memory` automation before using this package.
+Requires Pi 1.0+, a Hindsight server, and Cloudflare Workers AI or TypeSafe credentials.
 
 1. Build from the repository root:
 
@@ -32,7 +31,7 @@ Requires Pi 1.0+, a Hindsight server, and Cloudflare Workers AI or TypeSafe cred
 
    Use `mapPathToBank` instead of a single `bankId` when routing different repositories to separate banks. An optional global bank uses `~/.hindsight/coding-agent-global.json` (or `HINDSIGHT_GLOBAL_CONFIG`).
 
-   Recall queries use a **480-token** budget with `o200k_base`, prioritizing the current request and then newest conversation exchanges. The server must use the same tokenizer encoding (`HINDSIGHT_API_TOKENIZER_ENCODING=o200k_base`, Hindsight's default). Its default 500-token Recall limit needs no change.
+   Keep the server's default tokenizer (`o200k_base`) and Recall limit (500 tokens).
 
 4. Enable Clef assessment in the `hindsight` section of `~/.pi/agent/typesafe.json`, preserving any other settings:
 
@@ -43,17 +42,19 @@ Requires Pi 1.0+, a Hindsight server, and Cloudflare Workers AI or TypeSafe cred
        "provider": "cloudflare",
        "accountId": "your-32-character-cloudflare-account-id",
        "model": "clef",
-       "timeoutMs": 2000
+       "timeoutMs": 10000
      }
    }
    ```
 
-   Set `CLOUDFLARE_API_TOKEN` (or `PERSONAL_CF_API_TOKEN`) to an account-scoped Workers AI token. Alternatively, set `hindsight.apiKeyFile` to an owner-only (`0600`) token file; relative paths resolve under `~/.pi/agent`. Credential precedence is `CLOUDFLARE_API_TOKEN`, then `PERSONAL_CF_API_TOKEN`, then the file. `clef-flash` is also supported. Assessment sends conversation and candidate memory text to Cloudflare; Hindsight's backend model is unchanged.
+   Set `CLOUDFLARE_API_TOKEN` to an account-scoped Workers AI token. Alternatively, set `hindsight.apiKeyFile` to a token file with permissions `0600`; relative paths resolve under `~/.pi/agent`.
 
-   To keep using TypeSafe, omit `provider` or set it to `typesafe`, keep `hindsight.enabled: true`, and use the existing top-level `model` (default `jev-1.13.0`) and `apiKeyFile` or `TYPESAFE_API_KEY`. Cloudflare never inherits TypeSafe's model or credentials. Without valid assessment configuration and credentials, automatic retrieval is disabled. Assessment timeouts are capped at two seconds.
+   For TypeSafe instead, set `hindsight.provider` to `typesafe`, the top-level `model` to your TypeSafe model, and `TYPESAFE_API_KEY` to your key.
 
 5. Restart Pi after rebuilding or changing environment variables. `/hindsight` shows status; `/hindsight memories` shows delivered memory.
 
-The default mode is **read-write**, including automatic conversation capture. Use `--hindsight-mode read-only` to disable writes, or `off` to disable memory access. Read-only still sends text to retrieval/assessment services. A local Hindsight server may also use remote models. Automatic retrieval/assessment inputs and injected memories are not redacted, including their copies in model context and persisted sessions.
+Defaults to **read-write**. Use `--hindsight-mode read-only` to disable writes, or `--hindsight-mode off` to disable memory access.
+
+**Privacy:** conversation and memory text are sent to configured services, including in read-only mode, and stored unredacted in local retrieval logs and injected session context. A local Hindsight server may use remote models.
 
 [Telemetry reference](docs/telemetry.md) · [Provenance and local patches](NOTICE.md)

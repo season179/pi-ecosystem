@@ -452,7 +452,7 @@ it('Recall and assessment deadlines bound abort-ignoring transports; malformed a
   f.server.before = undefined;
   await f.send('hung assessment');
   await until(() => f.assessment.calls.length === 1);
-  await until(() => f.ext.memoryStatus.includes('unavailable'), ASSESSMENT_MAX_MS + 1000);
+  await until(() => f.ext.memoryStatus.includes('assessment timed out'), ASSESSMENT_MAX_MS + 1000);
   await f.send('malformed');
   await until(() => f.ext.memoryStatus.includes('paused'));
   expect(contexts(f.manager)).toHaveLength(0);

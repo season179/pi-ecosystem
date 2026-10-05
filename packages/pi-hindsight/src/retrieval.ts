@@ -26,7 +26,7 @@ export const CONTEXT_TYPE = 'pi-hindsight-context';
 export const DELIVERY_TYPE = 'pi-hindsight-delivery';
 export const BACKGROUND_MAX_MS = 90_000;
 export const RECALL_MAX_MS = 5_000;
-export const ASSESSMENT_MAX_MS = 2_000;
+export const ASSESSMENT_MAX_MS = 10_000;
 export const ASSESSMENT_THRESHOLD = 0.7;
 export const INJECT_CHARS = 4_000;
 export const MAX_CANDIDATES = 6;
@@ -393,7 +393,8 @@ const CRITERIA = {
   false: 'Redundant, tangential, too generic, or contradicted by newer context',
 };
 export type AssessmentOutcome =
-  { kind: 'decision'; selected: MemoryCandidate[] } | { kind: 'unavailable' | 'aborted' };
+  | { kind: 'decision'; selected: MemoryCandidate[] }
+  | { kind: 'unavailable' | 'aborted' | 'timeout' };
 
 /** Cancellation also bounds transports/body parsers that ignore AbortSignal. */
 export async function bounded<T>(
@@ -646,7 +647,13 @@ export async function assessMemoryCandidates(
           ? 'timeout'
           : diagnosticError(error).reason,
     });
-    return { kind: options.signal.aborted ? 'aborted' : 'unavailable' };
+    return {
+      kind: options.signal.aborted
+        ? 'aborted'
+        : controller.signal.aborted
+          ? 'timeout'
+          : 'unavailable',
+    };
   } finally {
     clearTimeout(timer);
     options.signal.removeEventListener('abort', stop);
