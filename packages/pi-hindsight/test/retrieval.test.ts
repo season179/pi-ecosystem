@@ -73,7 +73,11 @@ it('real Pi: retrieval first, one assessment, unredacted exact memory at a natur
     server,
     manager,
     [toolReply(), message(`Checked: ${memory}`)],
-    { agentDir, assessmentFetch: assessment.fetch },
+    {
+      agentDir,
+      assessmentFetch: assessment.fetch,
+      configPath: config(r, { apiToken: 'hindsight-transport-secret' }),
+    },
     [
       {
         name: 'synthetic_work',
@@ -114,6 +118,31 @@ it('real Pi: retrieval first, one assessment, unredacted exact memory at a natur
     expect(captured).not.toContain('abcdef123456');
     expect(captured).not.toContain(memory);
     expect(captured).toContain('[memory-derived text omitted]');
+    const telemetry = readFileSync(join(agentDir, TELEMETRY_FILE), 'utf8');
+    const rows = telemetry
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const request = rows.find((row) => row.event === 'assessment_request');
+    expect(request.state).toEqual(assessment.calls[0].body.state);
+    expect(rows.find((row) => row.event === 'recall_result').memories[0].text).toBe(memory);
+    expect(rows.find((row) => row.event === 'assessment_result').decisions[0]).toMatchObject({
+      score: 0.9,
+      selected: true,
+      reason: 'selected',
+    });
+    expect(
+      rows.find((row) => row.event === 'delivery' && row.outcome === 'released'),
+    ).toMatchObject({
+      job: request.job,
+      session: manager.getSessionId(),
+    });
+    expect(rows.find((row) => row.event === 'selection').content).toBe(
+      (contexts(manager)[0] as any).content,
+    );
+    expect(telemetry).not.toContain('synthetic-key');
+    expect(telemetry).not.toContain('hindsight-transport-secret');
+    expect(telemetry).not.toContain('http://hindsight.invalid');
   } finally {
     await subject.dispose();
   }

@@ -8,6 +8,17 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import type { RecalledMemory } from './upstream/client.js';
 import { hash, stripMemory, textOf } from './safety.js';
+import { diagnosticError, type Row } from './telemetry.js';
+
+export type Trace = (row: Row) => void;
+/** Diagnostics must never change retrieval decisions. */
+function report(trace: Trace | undefined, row: Row): void {
+  try {
+    trace?.(row);
+  } catch {
+    /* best effort */
+  }
+}
 
 export const CONTEXT_TYPE = 'pi-hindsight-context';
 export const DELIVERY_TYPE = 'pi-hindsight-delivery';
@@ -201,6 +212,7 @@ export function assessmentContext(
 export function prepareCandidates(
   batches: Array<{ scope: 'project' | 'global'; bank: string; memories: RecalledMemory[] }>,
   live: Array<{ entry: ContextEntry; text: string }>,
+  trace?: Trace,
 ): MemoryCandidate[] {
   const known = new Set(
     live.flatMap(
@@ -218,17 +230,36 @@ export function prepareCandidates(
   const result: MemoryCandidate[] = [];
   const seen = new Set<string>();
   const longest = Math.max(0, ...batches.map((x) => x.memories.length));
-  for (let i = 0; i < longest && result.length < MAX_CANDIDATES; i++)
+  for (let i = 0; i < longest; i++)
     for (const batch of batches) {
-      if (result.length >= MAX_CANDIDATES) break;
       const memory = batch.memories[i];
-      if (!memory?.text.trim()) continue;
+      if (!memory) continue;
+      if (!memory.text.trim() || result.length >= MAX_CANDIDATES) {
+        report(trace, {
+          event: 'candidate_skipped',
+          scope: batch.scope,
+          bank: batch.bank,
+          id: memory.id,
+          reason: !memory.text.trim() ? 'empty_memory' : 'candidate_limit',
+        });
+        continue;
+      }
       const text = excerpt(memory.text.trim(), CANDIDATE_CHARS);
       const context = excerpt(memory.context ?? '', 300);
       const fingerprint = hash(
         JSON.stringify([batch.scope, batch.bank, memory.id, memory.text, memory.context]),
       );
-      if (known.has(fingerprint) || seen.has(fingerprint) || texts.has(text)) continue;
+      if (known.has(fingerprint) || seen.has(fingerprint) || texts.has(text)) {
+        report(trace, {
+          event: 'candidate_skipped',
+          scope: batch.scope,
+          bank: batch.bank,
+          id: memory.id,
+          fingerprint,
+          reason: known.has(fingerprint) || texts.has(text) ? 'already_provided' : 'duplicate',
+        });
+        continue;
+      }
       seen.add(fingerprint);
       result.push({
         key: `memory_${result.length}`,
@@ -358,7 +389,14 @@ export async function bounded<T>(
 export async function assessMemoryCandidates(
   state: object,
   candidates: MemoryCandidate[],
-  options: { model: string; timeoutMs: number; apiKey: string; signal: AbortSignal; fetch?: Fetch },
+  options: {
+    model: string;
+    timeoutMs: number;
+    apiKey: string;
+    signal: AbortSignal;
+    fetch?: Fetch;
+    trace?: Trace;
+  },
 ): Promise<AssessmentOutcome> {
   if (options.signal.aborted) return { kind: 'aborted' };
   const controller = new AbortController();
@@ -370,6 +408,7 @@ export async function assessMemoryCandidates(
       if (typeof init?.body === 'string' && Buffer.byteLength(init.body) > 256 * 1024)
         throw new Error('assessment state limit');
       const response = await (options.fetch ?? fetch)(url, init);
+      report(options.trace, { event: 'assessment_http', httpStatus: response.status });
       if (Number(response.headers.get('content-length')) > 32 * 1024) {
         void response.body?.cancel().catch(() => {});
         throw new Error('assessment response limit');
@@ -416,18 +455,32 @@ export async function assessMemoryCandidates(
         noul(`${INSTRUCTIONS} Evaluate state.candidates.${c.key}.`, CRITERIA),
       ]),
     );
+    const assessmentState = {
+      ...state,
+      candidates: Object.fromEntries(
+        candidates.map(({ key, scope, bank, id, text, context, truncated }) => [
+          key,
+          { scope, bank, id, text, context, truncated },
+        ]),
+      ),
+    };
+    report(options.trace, {
+      event: 'assessment_request',
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      threshold: ASSESSMENT_THRESHOLD,
+      maxSelected: MAX_SELECTED,
+      maxChars: INJECT_CHARS,
+      state: assessmentState,
+      criteria: CRITERIA,
+      questions: Object.fromEntries(
+        candidates.map((c) => [c.key, `${INSTRUCTIONS} Evaluate state.candidates.${c.key}.`]),
+      ),
+    });
     const request = Promise.resolve(
       client.systemOne(
         {
-          state: {
-            ...state,
-            candidates: Object.fromEntries(
-              candidates.map(({ key, scope, bank, id, text, context, truncated }) => [
-                key,
-                { scope, bank, id, text, context, truncated },
-              ]),
-            ),
-          } as never,
+          state: assessmentState as never,
           questions,
           model: options.model,
         },
@@ -437,8 +490,15 @@ export async function assessMemoryCandidates(
     const result = await bounded(request, controller.signal, options.timeoutMs);
     if (options.signal.aborted) return { kind: 'aborted' };
     const answers = result.answers as Record<string, { type?: unknown; noul?: unknown }>;
-    if (!record(answers) || Object.keys(answers).length !== candidates.length)
+    if (!record(answers) || Object.keys(answers).length !== candidates.length) {
+      report(options.trace, {
+        event: 'assessment_result',
+        reason: 'invalid_answer_count',
+        expected: candidates.length,
+        actual: record(answers) ? Object.keys(answers).length : null,
+      });
       return { kind: 'unavailable' };
+    }
     const ranked: Array<{ candidate: MemoryCandidate; yes: number }> = [];
     for (const candidate of candidates) {
       const answer = answers[candidate.key];
@@ -448,19 +508,61 @@ export async function assessMemoryCandidates(
         !Number.isFinite(answer.noul) ||
         answer.noul < 0 ||
         answer.noul > 1
-      )
+      ) {
+        report(options.trace, {
+          event: 'assessment_result',
+          reason: 'invalid_answer',
+          candidate: candidate.key,
+          answerType: answer?.type === 'noul' ? 'noul' : 'unexpected',
+          scoreType: typeof answer?.noul,
+          score:
+            typeof answer?.noul === 'number' && Number.isFinite(answer.noul)
+              ? answer.noul
+              : undefined,
+        });
         return { kind: 'unavailable' };
+      }
       if (answer.noul >= ASSESSMENT_THRESHOLD) ranked.push({ candidate, yes: answer.noul });
     }
     ranked.sort((a, b) => b.yes - a.yes);
     const selected: MemoryCandidate[] = [];
+    const reasons = new Map<string, string>();
     for (const { candidate } of ranked) {
-      if (selected.length === MAX_SELECTED) break;
-      if (formatInjection([...selected, candidate]).length <= INJECT_CHARS)
-        selected.push(candidate);
+      const reason =
+        selected.length === MAX_SELECTED
+          ? 'selection_limit'
+          : formatInjection([...selected, candidate]).length > INJECT_CHARS
+            ? 'character_limit'
+            : 'selected';
+      reasons.set(candidate.key, reason);
+      if (reason === 'selected') selected.push(candidate);
     }
+    report(options.trace, {
+      event: 'assessment_result',
+      outcome: 'decision',
+      decisions: candidates.map((c) => {
+        const score = answers[c.key].noul as number;
+        return {
+          key: c.key,
+          id: c.id,
+          fingerprint: c.fingerprint,
+          score,
+          selected: selected.includes(c),
+          reason: reasons.get(c.key) ?? 'below_threshold',
+        };
+      }),
+    });
     return { kind: 'decision', selected };
-  } catch {
+  } catch (error) {
+    report(options.trace, {
+      event: 'assessment_result',
+      ...diagnosticError(error),
+      reason: options.signal.aborted
+        ? 'aborted'
+        : controller.signal.aborted
+          ? 'timeout'
+          : diagnosticError(error).reason,
+    });
     return { kind: options.signal.aborted ? 'aborted' : 'unavailable' };
   } finally {
     clearTimeout(timer);

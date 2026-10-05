@@ -21,6 +21,7 @@ export interface ClientOptions {
   signal: AbortSignal;
   fetch?: typeof fetch;
 }
+export const RECALL_DEFAULTS = { types: ['observation'], budget: 'low', max_tokens: 2000 };
 const CURATION_PAGE = 200; // keeps each list response well under the 1 MiB body limit
 const CURATION_MAX_FACTS = 5000;
 export class HindsightClient {
@@ -98,8 +99,7 @@ export class HindsightClient {
   /** Discrete candidates, not synthesized Reflect text. No entity/chunk expansion. */
   async recall(query: string, options: Record<string, unknown>): Promise<RecalledMemory[]> {
     const value = await this.request('POST', this.bankUrl('/memories/recall'), {
-      types: ['observation'], budget: 'low', max_tokens: 2000,
-      ...options, query, include: { entities: null, chunks: null }, trace: false,
+      ...RECALL_DEFAULTS, ...options, query, include: { entities: null, chunks: null }, trace: false,
     });
     if (!Array.isArray(value?.results) || value.results.some((x: any) =>
       typeof x?.id !== 'string' || typeof x?.text !== 'string' ||

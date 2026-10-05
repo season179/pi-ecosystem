@@ -8,6 +8,7 @@ import {
   writeFileSync,
   existsSync,
   chmodSync,
+  truncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -345,7 +346,7 @@ describe('persisted conversation evidence', () => {
 });
 
 describe('telemetry', () => {
-  it('real Pi: bounded 0600 metadata-only rows for retrieval and capture; nothing in off mode', async () => {
+  it('real Pi: bounded 0600 diagnostics for retrieval and capture; nothing in off mode', async () => {
     const r = root(),
       server = new Server(),
       agentDir = join(r, 'agent'),
@@ -364,28 +365,27 @@ describe('telemetry', () => {
         .split('\n')
         .map((line) => JSON.parse(line));
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(rows.map((row) => row.event)).toEqual(['retrieval', 'capture']);
-    expect(rows[1]).toMatchObject({
+    expect(rows.map((row) => row.event)).toContain('retrieval');
+    expect(rows.find((row) => row.event === 'capture')).toMatchObject({
       retain: 'accepted',
       consolidation: 'not_observed',
       bank: BANK,
     });
-    for (const canary of [
-      'PROMPT_CANARY',
-      'abcdef123456',
-      'ASSISTANT_TEXT_CANARY',
-      server.reflectText,
-    ])
-      expect(text).not.toContain(canary);
-    writeFileSync(file, 'x'.repeat(TELEMETRY_BYTES), { mode: 0o600 });
+    expect(text).toContain('PROMPT_CANARY'); // Approved conversation-derived content.
+    expect(text).not.toContain('ASSISTANT_TEXT_CANARY'); // Capture still logs metadata only.
+    expect(text).not.toContain(server.reflectText); // Assessment disabled in this fixture.
+    truncateSync(file, TELEMETRY_BYTES - 1); // Rotation must account for the next row's bytes.
+    writeFileSync(`${file}.1`, 'older archive');
+    truncateSync(`${file}.1`, TELEMETRY_BYTES); // Sparse: no 500 MB allocation.
     subject = await sdk(r, server, persisted(r), [message('again')], { agentDir });
     try {
       await subject.session.prompt('again');
     } finally {
       await subject.dispose();
     }
-    expect(statSync(`${file}.1`).size).toBe(TELEMETRY_BYTES);
-    expect(statSync(file).size).toBeLessThan(4096);
+    expect(statSync(`${file}.1`).size).toBe(TELEMETRY_BYTES - 1);
+    expect(statSync(file).size + statSync(`${file}.1`).size).toBeLessThanOrEqual(1_000_000_000);
+    expect(rows.every((row) => row.schema === 2)).toBe(true);
     // Pre-existing broader modes (current and rotated) are repaired to owner-only.
     chmodSync(file, 0o644);
     chmodSync(`${file}.1`, 0o644);

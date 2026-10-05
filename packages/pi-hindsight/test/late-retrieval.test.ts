@@ -193,6 +193,27 @@ it('a newer message cancels unowned preflight/Recall; settlement does not count 
   await f.ext.emit('agent_settled');
 });
 
+it('session invalidation still cancels work when Pi revokes the originating context', async () => {
+  const f = retrievalFixture(root()),
+    held = hold();
+  f.server.before = () => held.promise;
+  await f.send('pending request');
+  await until(() => recalls(f.server).length === 1);
+  Object.defineProperty(f.ext.ctx, 'sessionManager', {
+    configurable: true,
+    get() {
+      throw new Error('Extension context is stale');
+    },
+  });
+  try {
+    // The handler awaits the cancelled job; it must not throw or leave cleanup blocked.
+    await expect(f.ext.emit('session_before_switch')).resolves.toBeUndefined();
+  } finally {
+    held.release();
+    Object.defineProperty(f.ext.ctx, 'sessionManager', { value: f.manager, configurable: true });
+  }
+});
+
 it('hard total lifetime cancels ready but undelivered work without injecting later', async () => {
   const f = retrievalFixture(root());
   await f.send('original');

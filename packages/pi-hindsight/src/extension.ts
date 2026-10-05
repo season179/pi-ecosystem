@@ -12,7 +12,7 @@ import { Type, type UserMessage } from '@earendil-works/pi-ai';
 import { loadConfig, applyBankConfig, type Config } from './upstream/config.js';
 import { deriveBankIdOrSkip } from './upstream/bank.js';
 import { buildRetainStamp } from './upstream/retain-stamp.js';
-import { HindsightClient } from './upstream/client.js';
+import { HindsightClient, RECALL_DEFAULTS } from './upstream/client.js';
 import { uuidV5 } from './upstream/uuid.js';
 import { fingerprintTurns } from './upstream/retain-cursor.js';
 import { readHistory } from './history.js';
@@ -59,7 +59,7 @@ import {
   type CandidateProvenance,
 } from './retrieval.js';
 import { createRetrievalUI } from './retrieval-ui.js';
-import { record, type Row } from './telemetry.js';
+import { diagnosticError, record, type Row } from './telemetry.js';
 
 interface Destination {
   cfg: Config;
@@ -107,13 +107,20 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       status = text;
     };
 
-    /** Metadata-only local telemetry; nothing in off mode. */
+    /** Sensitive local diagnostics; nothing in off mode. */
+    const logSession = (session: string | undefined, row: Row) => {
+      try {
+        if (mode() !== 'off') record(options.agentDir ?? getAgentDir(), { session, ...row });
+      } catch {
+        /* Diagnostics must not interrupt cleanup, even after extension reload. */
+      }
+    };
     const log = (ctx: ExtensionContext, row: Row) => {
-      if (mode() !== 'off')
-        record(options.agentDir ?? getAgentDir(), {
-          session: ctx.sessionManager.getSessionId(),
-          ...row,
-        });
+      try {
+        logSession(ctx.sessionManager.getSessionId(), row);
+      } catch {
+        /* Pi can revoke an old context during session changes. */
+      }
     };
 
     async function timed<T>(ctx: ExtensionContext, tool: string, fn: () => Promise<T>): Promise<T> {
@@ -646,7 +653,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     });
 
     const invalidate = () => {
-      const stopped = stopPending();
+      const stopped = stopPending('session_changed');
       epoch++;
       controller.abort();
       controller = new AbortController();
@@ -689,6 +696,12 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     };
     type Pending = {
       id: string;
+      started: number;
+      phase: string;
+      staleReason?: string;
+      turns: number;
+      lastBoundary?: string;
+      trace: (row: Row) => void;
       generation: number;
       session: string;
       anchor: string | null;
@@ -723,23 +736,33 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     let pending: Pending | undefined;
     const seenUsers = new WeakSet<object>();
 
-    function stopPending() {
+    function stopPending(reason = 'cancelled') {
       const p = pending;
       pending = undefined;
       if (p) {
         p.controller.abort();
         for (const clean of p.cleanup.splice(0)) clean();
+        if (!p.released)
+          p.trace({
+            event: 'delivery',
+            outcome: 'not_delivered',
+            reason: p.staleReason ?? reason,
+            selected: Boolean(p.message),
+            staged: Boolean(p.staged),
+            lastBoundary: p.lastBoundary,
+          });
       }
       return p?.work;
     }
-    function discard(ctx: ExtensionContext) {
+    function discard(ctx: ExtensionContext, reason = 'stale') {
       if (pending && !pending.released) note(ctx, 'not delivered');
-      stopPending();
+      stopPending(reason);
       retrievalUI.refresh(ctx);
     }
     function invalidateMemory(ctx: ExtensionContext) {
-      discard(ctx);
+      discard(ctx, 'invalidated');
       const ids = injections(ctx.sessionManager.getEntries()).map(deliveryKey);
+      if (ids.length) log(ctx, { event: 'delivery_invalidated', ids });
       if (ids.length) pi.appendEntry(DELIVERY_TYPE, { action: 'invalidate', ids });
       retrievalUI.refresh(ctx);
     }
@@ -751,7 +774,8 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         if (pending !== p) return;
         if (p.released && p.generation === epoch && p.session === ctx.sessionManager.getSessionId())
           pi.appendEntry(DELIVERY_TYPE, { action: 'invalidate', ids: [p.id] });
-        discard(ctx);
+        p.trace({ event: 'retrieval_abort', released: Boolean(p.released) });
+        discard(ctx, 'aborted');
       };
       const signal = ctx.signal;
       signal.addEventListener('abort', abort, { once: true });
@@ -770,12 +794,23 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     function prepareMemoryInjection(message: UserMessage, ctx: ExtensionContext): void {
       if (seenUsers.has(message)) return;
       seenUsers.add(message);
-      discard(ctx);
+      discard(ctx, 'superseded');
       if (mode() === 'off') return;
       const query = automaticQuery(textOf(message.content));
-      if (!query) return note(ctx, 'no text to assess');
+      const skip = (reason: string, label: string) => {
+        log(ctx, {
+          event: 'retrieval_skip',
+          reason,
+          userTimestamp: message.timestamp,
+          query,
+          failures,
+          pausedUntil,
+        });
+        note(ctx, label);
+      };
+      if (!query) return skip('empty_request', 'no text to assess');
       if (Date.now() < pausedUntil)
-        return note(ctx, 'paused after service failures; retry in 2 minutes');
+        return skip('cooldown', 'paused after service failures; retry in 2 minutes');
       if (pausedUntil) {
         pausedUntil = 0;
         failures = 0;
@@ -792,6 +827,21 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       );
       const p: Pending = {
         id: randomUUID(),
+        started,
+        phase: 'preflight',
+        turns: 0,
+        trace: (row) =>
+          logSession(p.session, {
+            job: p.id,
+            origin: p.origin,
+            userTimestamp: p.userTimestamp,
+            phase: p.phase,
+            elapsedMs: Date.now() - p.started,
+            turns: p.turns,
+            failures,
+            pausedUntil,
+            ...row,
+          }),
         generation,
         session: ctx.sessionManager.getSessionId(),
         anchor: ctx.sessionManager.getLeafId(),
@@ -806,6 +856,14 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         fresh: () => {},
       };
       pending = p;
+      p.trace({
+        event: 'retrieval_start',
+        policy: 'recall-assess-v1',
+        mode: mode(),
+        inputIds: p.inputIds,
+        userHash: p.userHash,
+        state: inputs.state,
+      });
       bindRun(ctx);
       let originalScope: string | undefined;
       const resolveTargets = () => {
@@ -821,15 +879,17 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       };
       const scope = (targets: Destination[]) =>
         JSON.stringify(targets.map((t) => [t.key, t.cfg.autoInject, t.cfg.recallOptions]));
+      const stale = (reason: string): never => {
+        p.staleReason = reason;
+        throw new Error('Hindsight stale retrieval rejected');
+      };
       p.fresh = () => {
         p.controller.signal.throwIfAborted();
-        if (
-          pending !== p ||
-          generation !== epoch ||
-          p.session !== ctx.sessionManager.getSessionId() ||
-          (originalScope !== undefined && scope(resolveTargets()) !== originalScope)
-        )
-          throw new Error('Hindsight stale retrieval rejected');
+        if (pending !== p) stale('superseded');
+        if (generation !== epoch || p.session !== ctx.sessionManager.getSessionId())
+          stale('session_changed');
+        if (originalScope !== undefined && scope(resolveTargets()) !== originalScope)
+          stale('scope_changed');
         const now = ctx.sessionManager.getBranch();
         // message_end fires before persistence: bind to the next matching NEW user entry.
         const user = now.filter((e) => e.type === 'message' && e.message.role === 'user').at(-1);
@@ -845,26 +905,25 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             p.originHash = hash(inputSnapshot(now, [user.id]));
           }
         } else if (user?.id !== p.origin || hash(inputSnapshot(now, [p.origin])) !== p.originHash)
-          throw new Error('Hindsight originating user request changed');
+          stale('origin_changed');
         if (
           (p.anchor && !now.some((e) => e.id === p.anchor)) ||
           hash(inputSnapshot(now, p.inputIds)) !== p.inputHash
         )
-          throw new Error('Hindsight retrieval inputs changed');
+          stale('inputs_changed');
         const effectiveIds = new Set(
           ctx.sessionManager
             .buildSessionProjection()
             .entries.filter((e) => e.messages.length)
             .map((e) => e.sourceEntry.id),
         );
-        if (p.inputIds.some((id) => !effectiveIds.has(id)))
-          throw new Error('Hindsight inputs removed from context');
+        if (p.inputIds.some((id) => !effectiveIds.has(id))) stale('inputs_removed');
       };
       note(ctx, 'checking');
       const timer = setTimeout(() => {
         if (pending !== p || p.released) return;
         fail(ctx, generation);
-        stopPending();
+        stopPending('background_timeout');
       }, BACKGROUND_MAX_MS);
       timer.unref();
       p.cleanup.push(() => clearTimeout(timer));
@@ -877,10 +936,18 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           if (!automaticEnabled(targets[0].cfg)) {
             outcome = 'disabled';
             note(ctx, targets[0].cfg.autoInject === 'none' ? 'disabled' : 'pages unsupported');
-            stopPending();
+            stopPending('automatic_disabled');
             return;
           }
           originalScope = scope(targets);
+          p.trace({
+            event: 'retrieval_config',
+            targets: targets.map((t, index) => ({
+              scope: index === 0 ? 'project' : 'global',
+              bank: t.bank,
+              autoInject: t.cfg.autoInject,
+            })),
+          });
           const agentDir = options.agentDir ?? getAgentDir();
           const assessment = await bounded(
             loadAssessmentConfig(agentDir),
@@ -891,7 +958,9 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           if (assessment.kind !== 'enabled') {
             outcome = 'unavailable';
             note(ctx, 'unavailable; assessment configuration not enabled or invalid');
-            stopPending();
+            stopPending(
+              assessment.kind === 'disabled' ? 'assessment_disabled' : 'assessment_config_invalid',
+            );
             return;
           }
           const apiKey = await bounded(
@@ -903,10 +972,12 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           if (!apiKey) {
             outcome = 'unavailable';
             note(ctx, 'unavailable; no assessment key');
-            stopPending();
+            stopPending('assessment_key_missing');
             return;
           }
           async function retrieveMemoryCandidates(target: Destination, index: number) {
+            const bankStarted = Date.now();
+            const bankInfo = { scope: index === 0 ? 'project' : 'global', bank: target.bank };
             const local = new AbortController();
             const timer = setTimeout(() => local.abort(), RECALL_MAX_MS);
             timer.unref();
@@ -925,16 +996,64 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
               const recent = inputs.state.recent_conversation
                 .map((t) => `${t.user}\n${t.assistant}`)
                 .join('\n');
-              const memories = await client.recall(
-                recallQuery(query, recent),
-                target.cfg.recallOptions,
-              );
+              const recallInput = recallQuery(query, recent);
+              const recallOptions: Record<string, unknown> = {
+                ...RECALL_DEFAULTS,
+                ...target.cfg.recallOptions,
+              };
+              const loggedOptions = [
+                'types',
+                'budget',
+                'max_tokens',
+                'tags',
+                'tags_match',
+                'query_timestamp',
+              ];
+              p.trace({
+                event: 'recall_request',
+                ...bankInfo,
+                query: recallInput,
+                queryBytes: Buffer.byteLength(recallInput),
+                // Allowlist retrieval controls, never dump the credential-bearing target config.
+                options: Object.fromEntries(
+                  loggedOptions
+                    .filter((key) => Object.hasOwn(recallOptions, key))
+                    .map((key) => [key, recallOptions[key]]),
+                ),
+                unloggedOptionKeys: Object.keys(target.cfg.recallOptions).filter(
+                  (key) => !loggedOptions.includes(key),
+                ),
+                timeoutMs: RECALL_MAX_MS,
+              });
+              const memories = await client.recall(recallInput, target.cfg.recallOptions);
+              p.trace({
+                event: 'recall_result',
+                ...bankInfo,
+                outcome: 'ok',
+                ms: Date.now() - bankStarted,
+                count: memories.length,
+                memories,
+              });
               p.fresh();
               return {
                 scope: index === 0 ? ('project' as const) : ('global' as const),
                 bank: target.bank,
                 memories,
               };
+            } catch (error) {
+              p.trace({
+                event: 'recall_result',
+                ...bankInfo,
+                outcome: 'error',
+                ms: Date.now() - bankStarted,
+                ...diagnosticError(error),
+                reason: local.signal.aborted
+                  ? 'timeout'
+                  : p.controller.signal.aborted
+                    ? 'aborted'
+                    : diagnosticError(error).reason,
+              });
+              throw error;
             } finally {
               clearTimeout(timer);
             }
@@ -948,31 +1067,44 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             );
             p.fresh();
             if (JSON.stringify(current) !== assessmentStamp) {
-              discard(ctx);
+              discard(ctx, 'assessment_config_changed');
               throw new Error('Hindsight assessment configuration changed');
             }
           };
           serviceStarted = true;
+          p.phase = 'recall';
           const results = await Promise.allSettled(targets.map(retrieveMemoryCandidates));
           p.fresh();
           const batches = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
           const failed = results.some((r) => r.status === 'rejected');
           if (!batches.length) throw new Error('Hindsight Recall unavailable');
-          const candidates = prepareCandidates(batches, inputs.live);
+          const candidates = prepareCandidates(batches, inputs.live, p.trace);
+          p.trace({
+            event: 'candidates',
+            candidates: candidates.map(({ text, context, ...provenance }) => ({
+              ...provenance,
+              chars: text.length,
+              contextChars: context.length,
+            })),
+            partialRecallFailure: failed,
+          });
           if (!candidates.length) {
             outcome = failed ? 'unavailable' : 'none_useful';
             failures = 0;
             note(ctx, failed ? 'no candidates; partial Recall unavailable' : 'none useful');
-            stopPending();
+            stopPending(failed ? 'no_candidates_partial_failure' : 'no_candidates');
             return;
           }
           await checkAssessment();
+          p.phase = 'assessment';
+          const assessmentStarted = Date.now();
           const decision = await assessMemoryCandidates(inputs.state, candidates, {
             model: assessment.model,
             timeoutMs: assessment.timeoutMs,
             apiKey,
             signal: p.controller.signal,
             fetch: options.assessmentFetch,
+            trace: (row) => p.trace({ ms: Date.now() - assessmentStarted, ...row }),
           });
           p.fresh();
           if (decision.kind !== 'decision') throw new Error('Hindsight assessment unavailable');
@@ -981,7 +1113,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
           if (!decision.selected.length) {
             outcome = 'none_useful';
             note(ctx, failed ? 'none useful; partial Recall unavailable' : 'none useful');
-            stopPending();
+            stopPending('none_useful');
             return;
           }
           p.message = {
@@ -1008,12 +1140,23 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
               },
             },
           };
+          p.phase = 'selected';
+          p.trace({
+            event: 'selection',
+            content: p.message.content,
+            candidates: p.message.details.hindsight.candidates,
+          });
           outcome = 'selected';
           note(
             ctx,
             `${decision.selected.length} selected, awaiting model request${failed ? '; partial Recall unavailable' : ''}`,
           );
-        } catch {
+        } catch (error) {
+          p.trace({
+            event: 'retrieval_error',
+            ...diagnosticError(error),
+            staleReason: p.staleReason,
+          });
           if (pending === p) {
             outcome = 'unavailable';
             try {
@@ -1024,10 +1167,10 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
               outcome = 'cancelled';
               note(ctx, 'not delivered');
             }
-            stopPending();
+            stopPending(p.staleReason ?? `${p.phase}_failed`);
           }
         } finally {
-          log(ctx, { event: 'retrieval', outcome, ms: Date.now() - started });
+          p.trace({ event: 'retrieval', outcome, ms: Date.now() - started });
         }
       })();
     }
@@ -1040,21 +1183,45 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
       if (!p || !p.message || p.staged || p.released) return;
       try {
         p.fresh();
-        if (!p.origin) return;
+        if (!p.origin) {
+          p.trace({ event: 'delivery_boundary', reason: 'origin_unbound' });
+          return;
+        }
         p.staged = true;
+        p.phase = 'staged';
+        p.trace({ event: 'delivery', outcome: 'staged' });
         return { entries: [{ type: 'custom_message' as const, ...p.message }] };
-      } catch {
-        discard(ctx);
+      } catch (error) {
+        p.trace({
+          event: 'delivery_error',
+          ...diagnosticError(error),
+          reason: p.staleReason ?? 'stage_failed',
+        });
+        discard(ctx, 'stage_failed');
       }
     }
     pi.on('turn_end', (event, ctx) => {
       bindRun(ctx);
-      if (
-        event.outcome !== 'completed' ||
-        !event.toolResults.length ||
-        event.context.pendingMessages.some((m) => m.role === 'user')
-      )
-        return;
+      const reason =
+        event.outcome !== 'completed'
+          ? 'turn_not_completed'
+          : !event.toolResults.length
+            ? 'no_tool_results'
+            : event.context.pendingMessages.some((m) => m.role === 'user')
+              ? 'pending_user'
+              : !pending?.message
+                ? 'not_ready'
+                : 'eligible';
+      if (pending && !pending.released) {
+        pending.turns++;
+        pending.lastBoundary = reason;
+        pending.trace({
+          event: 'delivery_boundary',
+          reason,
+          toolResults: event.toolResults.length,
+        });
+      }
+      if (reason !== 'eligible') return;
       return deliverSelectedMemories(ctx);
     });
     pi.on('context', (event, ctx) => {
@@ -1067,14 +1234,19 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
         if (invalidated.has(key)) return false;
         if (!entry.details?.hindsight?.late || state.released.has(key)) return true;
         const p = pending;
+        let reason = 'orphaned_draft';
         try {
-          if (!p || p.id !== key || !p.staged || !p.origin || ctx.signal?.aborted)
-            throw new Error('stale');
+          if (!p || p.id !== key) throw new Error('stale');
+          reason = ctx.signal?.aborted ? 'aborted' : !p.staged ? 'not_staged' : 'origin_unbound';
+          if (!p.staged || !p.origin || ctx.signal?.aborted) throw new Error('stale');
+          reason = 'freshness_check_failed';
           p.fresh();
           const origin = ctx.sessionManager.getBranch().find((e) => e.id === p.origin);
+          reason = 'origin_missing';
           if (origin?.type !== 'message' || origin.message.role !== 'user')
             throw new Error('stale');
           const original = origin.message;
+          reason = 'origin_not_in_context';
           if (
             !event.messages.some(
               (m) =>
@@ -1084,13 +1256,20 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
             )
           )
             throw new Error('stale');
+          reason = 'release_failed';
           pi.appendEntry(DELIVERY_TYPE, { action: 'release', id: p.id });
           p.released = true;
           note(ctx, `${p.message?.details.hindsight.candidates.length ?? 0} injected`);
-          log(ctx, { event: 'retrieval', outcome: 'released', chars: p.message?.content.length });
+          p.phase = 'released';
+          p.trace({ event: 'retrieval', outcome: 'released', chars: p.message?.content.length });
+          p.trace({ event: 'delivery', outcome: 'released' });
           return true;
         } catch {
-          if (p?.id === key) discard(ctx);
+          // Historical orphaned drafts stay in the session: don't log them on every model call.
+          if (p?.id === key) {
+            p.trace({ event: 'context_dropped', reason: p.staleReason ?? reason });
+            discard(ctx, reason);
+          }
           return false;
         }
       });
@@ -1098,7 +1277,7 @@ export function createHindsightExtension(options: ExtensionOptions = {}) {
     });
 
     pi.on('agent_settled', async (_event, ctx) => {
-      discard(ctx); // no background carry into the next prompt; cancel before capture serialization
+      discard(ctx, 'agent_settled'); // no background carry into the next prompt; cancel before capture serialization
       if (mode() !== 'read-write') return;
 
       const generation = epoch,
