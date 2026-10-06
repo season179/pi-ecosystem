@@ -20,7 +20,6 @@ guardrails, not operating-system sandboxes. In particular:
 - `pi-worktree` runs Git commands, rewrites Pi tool paths, and manages local worktrees.
 - `pi-buddy` sends persisted session/context data to configured model providers and can send documentation questions to DeepWiki; its model-facing tools are read-only, not a data-isolation boundary.
 - `pi-herdr` starts bounded watch children and POSIX shell commands with the Pi process's cwd, environment, and permissions. Command summaries and bounded output can be persisted in Pi session cards even though command text/output is omitted from its JSONL telemetry.
-- `pi-guard` reviews whether an action matches authenticated user intent; it is not a general risk classifier or shell sandbox.
 
 ## Expectations
 

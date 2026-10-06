@@ -24,7 +24,7 @@ What deliberately does NOT transfer to a local solo harness:
 
 - **Secret holdout** — the model can read and edit local tests.
 - **True judge isolation** — extension, tools, and files run as the
-  same OS user; pi-guard is intent-checking, not isolation. Our judge
+  same OS user. Our judge
   protection is procedural (input-source gating), and the docs must
   say so honestly.
 - **Paired evals / frozen baselines** — overkill for everyday solo
@@ -43,8 +43,8 @@ primitives, but the stores stay separate.
    hash of the canonical Git common directory, so worktrees share
    evidence; non-Git projects use canonical cwd.
 
-2. **Lifecycle model.** An *attempt* spans `before_agent_start` →
-   idle `agent_settled`. An *episode* is consecutive attempts until
+2. **Lifecycle model.** An _attempt_ spans `before_agent_start` →
+   idle `agent_settled`. An _episode_ is consecutive attempts until
    `/learn` or `/learn skip` closes it. The human scoring action
    defines the task boundary — no automatic inference. (Rationale:
    real tasks span 3–10 prompts plus steers; scoring per-prompt would
@@ -70,7 +70,7 @@ primitives, but the stores stay separate.
    (tools run in parallel).
 
 6. **Git evidence.** Best-effort start/end HEAD with a short timeout.
-   Persist up to 20 sanitized repo-relative *observed changed paths*:
+   Persist up to 20 sanitized repo-relative _observed changed paths_:
    NUL-delimited porcelain parsing; reject absolute paths, `..`,
    control characters, overlong paths; redact high-entropy/
    secret-like path segments; derive conservatively from status
@@ -158,11 +158,10 @@ primitives, but the stores stay separate.
   `turn_end.toolResults`, not event completion order.
 - Nested tool LLM cost is invisible pre-0.84.2 (official usage field
   arrives in 0.84.2) → non-goal for MVP while targeting ≥0.80.10.
-- `getAgentDir()` is exported and already used by this repo's
-  extensions (pi-guard audit, pi-memory store).
+- `getAgentDir()` is exported.
 - `input` event source is `"interactive" | "rpc" | "extension"`.
-- Precedents in-repo: pi-buddy telemetry + LESSON harvest, pi-guard
-  rotating JSONL audit, pi-herdr watch/outcome tracking and delivery,
+- Precedents in-repo: pi-buddy telemetry + LESSON harvest,
+  pi-herdr watch/outcome tracking and delivery,
   pi-memory tmp-file+rename writes. Herdr itself owns agent lifecycle and
   settled-state detection.
 
