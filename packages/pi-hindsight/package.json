@@ -18,6 +18,7 @@
   ],
   "files": [
     "dist",
+    "index.js",
     "README.md",
     "LICENSE",
     "NOTICE.md",
@@ -31,7 +32,7 @@
   },
   "pi": {
     "extensions": [
-      "./dist/extension.js"
+      "./index.js"
     ]
   },
   "scripts": {
