@@ -24,13 +24,14 @@
   "files": [
     "src",
     "dist",
+    "index.ts",
     "README.md",
     "LICENSE",
     "UPSTREAM.md"
   ],
   "pi": {
     "extensions": [
-      "./dist/index.ts"
+      "./index.ts"
     ]
   },
   "scripts": {
