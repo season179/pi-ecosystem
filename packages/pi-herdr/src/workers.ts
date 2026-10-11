@@ -75,8 +75,11 @@ export const FAMILY_LABEL: Record<ModelFamily, string> = {
   zai: 'Z.ai GLM',
 };
 
+/** Suggested launch defaults; explicit user permission requirements take precedence. */
 export function launchArgv(candidate: WorkerCandidate): string[] {
-  return [candidate.harness === 'pi' ? 'pi' : 'claude', '--model', candidate.launchModel];
+  return candidate.harness === 'pi'
+    ? ['pi', '--model', candidate.launchModel]
+    : ['claude', '--model', candidate.launchModel, '--permission-mode', 'auto'];
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 import type { ClaudeQuotaSnapshot } from '../src/claude-quota.js';
 import { createJevOpener, JevError, type JevSession } from '../src/jev.js';
 import {
+  formatSelection,
   runSelection,
   SelectCancelledError,
   type SelectDeps,
@@ -157,40 +158,52 @@ const excludedIds = (result: Awaited<ReturnType<typeof runSelection>>) =>
     .sort();
 
 describe('herdr_select selection', () => {
-  it("feeds the Jev profile into allocation and maps Jev's premium pick for easy work to a launch", async () => {
-    const jev = fakeJev((labels) => choice(labels, 'claude_code_opus_5_5', 0.55));
-    const result = await runSelection(TASK, environment(), deps(jev.openJev));
-    assert.equal(result.outcome, 'selected');
-    assert.equal(result.decidedBy, 'jev');
-    assert.deepEqual(result.selection, {
-      option: 'claude_code_opus_5_5',
-      harness: 'claude-code',
-      model: 'claude-opus-5-5',
-      launch: ['claude', '--model', 'claude-opus-5-5'],
-    });
-    assert.equal(jev.asks.length, 2);
-    const [profile, allocation] = jev.asks;
-    assert.ok(profile!.questions.visual);
-    // Profile probabilities, exact quota arithmetic and every valid pair reach allocation.
-    assert.equal(allocation!.state.profile.difficulty.easy, 0.9);
-    assert.equal(allocation!.state.profile.quickInlineProbability, 0.2);
-    assert.deepEqual(
-      Object.keys(allocation!.questions.allocation.criteria).sort(),
-      ['inline', ...ALL_WORKERS, 'cannot_select', 'needs_context'].sort(),
-    );
-    const primary = allocation!.state.quotaGroups.codex.windows[0];
-    // Jev is weak at arithmetic, so code supplies exact interval facts.
-    assert.deepEqual([primary.remainingPercent, primary.resetsAt], [90, iso(30 * 60_000)]);
-    assert.deepEqual(allocation!.state.options.claude_code_fable_5_1.quota.windows, [
-      '5h',
-      'Weekly',
-      'Weekly (Fable)',
-    ]);
-    assert.deepEqual(allocation!.state.options.claude_code_opus_5_5.quota.windows, [
-      '5h',
-      'Weekly',
-    ]);
-  });
+  it.each([
+    ['claude_code_opus_5_5', 'claude-opus-5-5'],
+    ['claude_code_fable_5_1', 'claude-fable-5-1'],
+  ])(
+    'feeds the profile into allocation and launches %s with auto permission defaults',
+    async (option, model) => {
+      const jev = fakeJev((labels) => choice(labels, option, 0.55));
+      const result = await runSelection(TASK, environment(), deps(jev.openJev));
+      assert.equal(result.outcome, 'selected');
+      assert.equal(result.decidedBy, 'jev');
+      assert.deepEqual(result.selection, {
+        option,
+        harness: 'claude-code',
+        model,
+        launch: ['claude', '--model', model, '--permission-mode', 'auto'],
+      });
+      const guidance = formatSelection(result);
+      assert.ok(guidance.includes(`claude --model ${model} --permission-mode auto`));
+      assert.match(
+        guidance,
+        /replace permission defaults when the user or environment requires another mode/,
+      );
+      assert.equal(jev.asks.length, 2);
+      const [profile, allocation] = jev.asks;
+      assert.ok(profile!.questions.visual);
+      // Profile probabilities, exact quota arithmetic and every valid pair reach allocation.
+      assert.equal(allocation!.state.profile.difficulty.easy, 0.9);
+      assert.equal(allocation!.state.profile.quickInlineProbability, 0.2);
+      assert.deepEqual(
+        Object.keys(allocation!.questions.allocation.criteria).sort(),
+        ['inline', ...ALL_WORKERS, 'cannot_select', 'needs_context'].sort(),
+      );
+      const primary = allocation!.state.quotaGroups.codex.windows[0];
+      // Jev is weak at arithmetic, so code supplies exact interval facts.
+      assert.deepEqual([primary.remainingPercent, primary.resetsAt], [90, iso(30 * 60_000)]);
+      assert.deepEqual(allocation!.state.options.claude_code_fable_5_1.quota.windows, [
+        '5h',
+        'Weekly',
+        'Weekly (Fable)',
+      ]);
+      assert.deepEqual(allocation!.state.options.claude_code_opus_5_5.quota.windows, [
+        '5h',
+        'Weekly',
+      ]);
+    },
+  );
 
   it("offers every candidate when all subscriptions are scarce but not empty, and keeps Jev's inline pick", async () => {
     const jev = fakeJev((labels) => choice(labels, 'inline', 0.4));

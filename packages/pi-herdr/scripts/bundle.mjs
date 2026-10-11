@@ -15,16 +15,16 @@
 // peers resolve at load time from the host, so bundled code shares module
 // identities with the host process instead of vendoring second copies, and the
 // one runtime dependency (@typesafe-ai/sdk) resolves from node_modules.
-import { build } from "esbuild";
+import { build } from 'esbuild';
 
 await build({
-	entryPoints: ["src/extensions/herdr.ts"],
-	outfile: "dist/herdr.bundle.js",
-	bundle: true,
-	format: "esm",
-	platform: "node",
-	target: "node22",
-	packages: "external",
-	sourcemap: "linked",
-	logLevel: "info",
+  entryPoints: ['src/extensions/index.ts'],
+  outfile: 'dist/herdr.bundle.js',
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  packages: 'external',
+  sourcemap: 'linked',
+  logLevel: 'info',
 });

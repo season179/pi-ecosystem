@@ -1,14 +1,14 @@
 # @season179/pi-herdr
 
-A [Pi](https://github.com/earendil-works/pi) extension for conversational orchestration inside [Herdr](https://github.com/season179/herdr). `/orchestrate` supplies the workflow and one-shot non-blocking watches. The agent delegates to visible workers, reads their temporary reports, verifies delivery, and quits finished workers while keeping their panes reusable.
+A [Pi](https://github.com/earendil-works/pi) extension with general background shell watches and conversational orchestration inside [Herdr](https://github.com/season179/herdr). `/orchestrate` supplies the workflow and one-shot non-blocking watches. The agent delegates to visible workers, reads their temporary reports, verifies delivery, and quits finished workers while keeping their panes reusable.
 
 Each watch settles once with a fired, timeout, error, or stopped outcome. Agent and output watches run one detached `herdr agent wait` or `herdr pane wait-output` child; command watches run one detached `/bin/sh -c` child. A wake-enabled watch within budget requests a new turn while Pi is idle and is delivered as steering while Pi is busy. Otherwise its card is delivered without starting an idle turn. Explicitly stopped watches produce no card.
 
 ## Requirements and Installation
 
 - Node.js 22 or newer.
-- Pi and Herdr in the same environment; `herdr` must resolve on `PATH`.
-- Herdr's Pi integration installed (`herdr integration install pi`) for reliable agent lifecycle state.
+- Pi. General shell watches do not require Herdr or orchestration activation.
+- For orchestration: Herdr in the same environment on `PATH`, with its Pi integration installed (`herdr integration install pi`) for reliable agent lifecycle state.
 - macOS or Linux. Command mode uses `/bin/sh -c`, and cancellation uses POSIX process-group signals. Native Windows support is not implemented or verified.
 
 The package is not yet published to npm. From a `pi-ecosystem` checkout:
@@ -21,9 +21,35 @@ pi install /absolute/path/to/pi-ecosystem/packages/pi-herdr
 
 The package manifest loads `./index.js`, a stable shim that imports the compiled bundle from `dist/`. Rebuild after source changes. Compatibility was last checked against Herdr 0.8.2; no Herdr version range is enforced.
 
+## General Shell Watches
+
+These tools are available immediately in any Pi session, including outside Herdr:
+
+- `shell_watch` — launch an authorized foreground `command` with a required `timeoutMs`, optional `note`, and optional `wake` (default `true`). Returns immediately; on completion delivers exit status, duration, and a bounded output tail. Continue other work or end the turn instead of polling.
+- `shell_unwatch` — terminate one command by `id`, or all shell commands with `all: true`. This kills the owned process group, not just notifications; stopped watches produce no card.
+- `shell_watches` — inspect shell watch records and wake budget on demand, not in a polling loop.
+
+Example tool arguments:
+
+```json
+{
+  "command": "node index.mjs export --team 'East Malaysia Team'",
+  "timeoutMs": 1800000,
+  "note": "Check report.json and PostgreSQL storage after completion"
+}
+```
+
+Commands run under `/bin/sh -c` in the calling session's working directory, inheriting Pi's environment, with no stdin. Supply the actual foreground command, without `&` or `nohup`. These tools launch jobs; they **cannot attach to existing PIDs**. Command completion is not proof of application-level success: check the exit code and output artifacts. For complete logs, redirect output to a file; cards include only the last 10 lines, capped at 8,000 characters. Output is untrusted and may appear in session history; never print secrets.
+
+Shell watches use the existing process manager and delivery policy, but have independent IDs, capacity, and wake counters from Herdr watches. `maxWatches` and `wakeBudget` in `herdr.json` configure both families independently (defaults: 8 concurrent jobs, 20 attempted idle wakes). Interactive/RPC input resets the budget. `wake: false` and an exhausted/zero budget still deliver a card without starting an idle turn. Shell watches do not invoke Herdr, select workers, or write Herdr telemetry. `/orchestrate off` and `herdr_unwatch` do not affect shell jobs; use `shell_unwatch` instead.
+
+**Lifetime:** keep the Pi session open. Timeout, explicit stop, reload, session replacement, or shutdown terminate the owned process group with SIGTERM, escalating to SIGKILL after five seconds. These are session-owned bounded jobs, not durable daemons: they are not restored or automatically restarted. Print mode exits after its turn and does not keep watches alive. The report is the command's own exit: when it exits, anything still running in its process group (`cmd &`, whether or not it still holds the command's output) is terminated the same way, and the real exit code is reported, never a timeout. The watch settles once the group is empty and the output has drained, so a command with no lingering children settles immediately. Descendants that deliberately detach into their own session or process group (`setsid`, daemonizers) are out of reach and keep running unsupervised; the watch releases the output pipes they inherited after the five-second grace and settles, so they cannot block completion reports, reload, or shutdown.
+
+**Configuration errors fail closed:** every Pi session validates `~/.pi/agent/herdr.json` on session start, with or without Herdr. An invalid file (bad JSON, unknown keys, wrong types) is reported as a session-start extension error naming the file, and the shell tools then reject every call with `no active session` until the file is fixed and the session is reloaded. Nothing launches with silently substituted defaults.
+
 ## Activation
 
-The extension registers nothing unless both `HERDR_ENV=1` and a non-empty `HERDR_PANE_ID` are present. In a managed Herdr pane it registers commands and handlers, but the model-facing watch tools start inactive because Pi also runs as workers, planners, and reviewers in panes.
+The Herdr-specific extension registers nothing unless both `HERDR_ENV=1` and a non-empty `HERDR_PANE_ID` are present; the shell tools above are independent. In a managed Herdr pane it registers commands and handlers, but the model-facing Herdr watch tools start inactive because Pi also runs as workers, planners, and reviewers in panes.
 
 An agent becomes the orchestrator when you explicitly ask it, for example:
 
@@ -54,7 +80,7 @@ Jev weighs the tradeoffs: task fit, user preferences, capacity, reset timing, an
 - It supplies exact facts.
 - It checks Jev's answers.
 - It enforces hard constraints: explicit `allowedOptions`, a known vision requirement, a missing catalog entry or auth, a missing `claude` executable, confirmed quota exhaustion, and the same model as the work under review/discussion/debate.
-- It maps the chosen option to a launch model.
+- It maps the chosen option to a launch model and harness defaults.
 
 There is no score or pacing formula. `cannot_select` and `needs_context` are valid answers. Only a `failed` outcome allows a manual choice, for example when Jev is unavailable or the tool has a bug.
 
@@ -64,6 +90,8 @@ The workers are:
 - Other options: Claude Code + `claude-fable-5-1` (preferred for hard work), Pi + `openai-codex/gpt-6-astra`.
 
 A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively. When launching a Pi worker, always use a provider-qualified model ID from the current Pi catalog and confirm the first prompt is processed: a bare model pattern can match an unauthenticated provider and leave the worker at a login prompt.
+
+Claude Code launch suggestions default to `--permission-mode auto`. The orchestrator should normally use it, replacing that flag if the user requests another mode or environment policy prohibits auto. Auto retains permission checks; it is not `bypassPermissions`. Verify the effective mode after launch because auto may be unavailable. For a worker it is authorized to control, the orchestrator may choose the visible "Yes, and switch to auto mode" option after checking that the pending action is authorized; this also approves that action. Classifier denials, approval pauses, and policy restrictions must be inspected, not bypassed. No global Claude settings are changed. See [Claude's permission modes](https://code.claude.com/docs/en/permission-modes).
 
 Jev settings follow the shared `~/.pi/agent/typesafe.json` convention (`model`, default `jev-1.13.0`; `timeoutMs`, default 3000 and at most 30000; `apiKeyFile`). `TYPESAFE_API_KEY` takes precedence. Requests go only to `https://api.typesafe.ai/v1/systemone` with bounded bodies and at most one retry. The whole call has a 30-second deadline and supports cancellation; a `timeoutMs` near 30000 leaves no time for the retry inside it. Error messages are fixed and never include keys or provider bodies.
 
@@ -128,7 +156,7 @@ When a positive wake budget is exhausted, cards continue to arrive without start
 
 ## Status and Compatibility
 
-Automated checks cover activation, session recovery, watch delivery and bundle reloads. Live trials have covered selected Herdr/Pi paths only; see the limits below.
+Automated checks cover activation, session recovery, watch delivery and bundle reloads. An offline check against a real Pi SDK (the workspace devDependency by default, currently 1.0.1; `PI_SDK_ROOT` selects another install, and it has also passed against the managed Pi 1.1.0 install) verifies that the built bundle exposes shell tools outside Herdr, returns before command completion, and delivers exit status/output once while waking an idle session (synthetic model, no network calls). Live trials have covered selected Herdr/Pi paths only; see the limits below.
 
 ### Code activation: rebuild + `/reload`
 
@@ -140,7 +168,7 @@ The extension entry (`index.js`) is a stable shim that fingerprints the single-f
 
 Note: `tsc` still emits the per-file tree under `dist/` (types, `.d.ts`, and legacy layout), but only `dist/herdr.bundle.js` is loaded at runtime. Debug the bundle/source, not `dist/extensions/herdr.js`.
 
-Existing sessions must `/reload` to load this build; then use `/orchestrate`. New sessions load it normally. No push, publication, or release is implied. Historical watch evidence also covers agent-tail retrieval, wake-card delivery requests, and telemetry.
+Existing sessions must `/reload` to load this build. Shell tools are then available immediately; use `/orchestrate` only for worker orchestration. New sessions load it normally. No push, publication, or release is implied. Historical watch evidence also covers agent-tail retrieval, wake-card delivery requests, and telemetry.
 
 Not yet verified live: `/watches` interaction, state-triggered notifications, output-mode watches, current wake-budget exhaustion UX, and SIGTERM→SIGKILL escalation. Output-card parsing covers Herdr 0.8.2's documented `result.matched_line` field in unit tests, but output mode remains unverified against a live 0.8.2 process.
 
@@ -151,6 +179,11 @@ From the repository root:
 ```bash
 npm run build --workspace @season179/pi-herdr
 npm test --workspace @season179/pi-herdr
+# Offline real-SDK check: built bundle + idle wake, no external model calls.
+# Default SDK: the workspace devDependency under node_modules (prints the version it used).
+PI_OFFLINE=1 node packages/pi-herdr/scripts/check-shell-sdk.mjs
+# Another installed Pi, such as the managed install the `pi` binary runs:
+PI_SDK_ROOT=~/.pi/agent/install/releases/1.1.0/node_modules PI_OFFLINE=1 node packages/pi-herdr/scripts/check-shell-sdk.mjs
 npm pack --workspace @season179/pi-herdr --dry-run
 ```
 
