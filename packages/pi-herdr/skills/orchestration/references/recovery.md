@@ -1,6 +1,6 @@
 # Recovery and handoff
 
-Read before reconciling after reload/resume/fork, handling missing evidence, pausing for a deadline, or switching off with outstanding work.
+Read before reconciling after reload/resume/fork, handling missing evidence or unknown/leftover worktrees, pausing for a deadline, or switching off with outstanding work.
 
 ## Reconcile before acting
 
@@ -10,6 +10,17 @@ Read before reconciling after reload/resume/fork, handling missing evidence, pau
 4. For confirmed owned work that is still authorized to continue, deliberately rearm the appropriate watch. Otherwise preserve and hand off, or gracefully quit only when authorized. Never claim supervision until the watch is armed, and never restart work after a user pause/stop.
 5. Resume the authorized delivery step: verify artifacts, integrate serially where permitted, and communicate the usable result. Do not stop merely because a worker report exists.
 
+## Reconcile worktrees
+
+Start from `herdr_worktrees list`. Only `created` records with checkout `present`, workspace `mapped`, and changes `clean` are candidates for the normal merge-and-remove path.
+
+- `pending` or `unknown`: creation may or may not have happened. Inspect by branch name with the commands the list prints (`git worktree list`, `git branch --list <branch>`, `herdr worktree list`). Never adopt, retry, or delete it automatically; report what you found.
+- `failed`: nothing was created; nothing to clean up.
+- Checkout `missing`, workspace `absent`/`mismatch`, or any `unknown` observation: `remove` will refuse. Preserve and report; do not remove by path, force, or close workspace groups.
+- `dirty` or `unmerged`: the worker's work is not integrated. Get it committed and merged, or leave it and report the branch.
+- Kept branches after removal hold their commits; report them. Delete only with `git branch -d` once merged.
+- `removed` with **branch outcome unresolved**: the checkout is gone but the branch decision was never recorded (interrupted or session replaced). Deletion is never resumed automatically; inspect the branch and report it.
+
 ## Leave a small recoverable handoff
 
 Before a pause/reload or deadline, stop starting work early enough to verify and preserve it. Keep worker reports temporary; save the handoff in a private stable location and surface its path. A handoff is evidence, not a new task database or automatic restart instruction.
@@ -18,6 +29,7 @@ Before a pause/reload or deadline, stop starting work early enough to verify and
 Task and current authorization:
 Checkout/branch and edit ownership:
 Owned workers: from herdr_workers list (number, pane/terminal/session, observation, task, report)
+Worktrees: from herdr_worktrees list (number, state, branch, path, clean/merged, kept branches)
 Reports and artifacts: paths; missing/unverified items
 State: implemented / checked / applied / blocked / awaiting decision
 Unresolved decision:

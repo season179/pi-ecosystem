@@ -38,6 +38,15 @@ import {
   type ReleaseEntry,
 } from '../owned-workers.js';
 import {
+  createWorktree,
+  listWorktrees,
+  outstandingWorktrees,
+  readWorktreeRecords,
+  removeWorktree,
+  WORKTREE_ENTRY_TYPE,
+  type WorktreeContext,
+} from '../owned-worktrees.js';
+import {
   formatQuotaLine,
   formatStatusChip,
   formatWatchCard,
@@ -66,6 +75,7 @@ const ORCHESTRATOR_TOOL_NAMES = [
   'herdr_unwatch',
   'herdr_watches',
   'herdr_workers',
+  'herdr_worktrees',
 ] as const;
 const ORCHESTRATOR_TOOL_NAME_SET: ReadonlySet<string> = new Set(ORCHESTRATOR_TOOL_NAMES);
 
@@ -131,6 +141,25 @@ const WorkersParams = Type.Object({
 
 const WORKERS_DESCRIPTION =
   'Record which Herdr workers this orchestrator owns. claim right after a successful `herdr agent start` (before the substantive prompt), or to adopt an existing worker you are authorized to control; list to reconcile recorded workers against live Herdr state; release after a verified quit or handoff. Launches nothing and quits nothing; release is not quit, and herdr_unwatch is not release. Records survive reload/resume of this conversation only; a crash between launch and claim leaves the worker unrecorded.';
+
+const WorktreesParams = Type.Object({
+  action: StringEnum(['create', 'list', 'remove'] as const),
+  task: Type.Optional(
+    Type.String({ description: 'create: short task summary (names the branch)' }),
+  ),
+  target: Type.Optional(
+    Type.String({
+      description:
+        'create: local branch the work will be merged into; defaults to the current branch of the session checkout',
+    }),
+  ),
+  worktree: Type.Optional(
+    Type.Number({ description: 'remove only: worktree number shown by create or list' }),
+  ),
+});
+
+const WORKTREES_DESCRIPTION =
+  "Create, list, and remove isolated Git worktrees for concurrent writer workers, through `herdr worktree`. create pins this checkout's last commit as base on a new unique branch and opens one new Herdr workspace (no focus change); start the worker in its root pane with `herdr agent start --pane`. Uncommitted source changes are NOT copied. remove takes a record number only and refuses unless the checkout is this conversation's, Git and Herdr agree on it, no agent or extra pane is in its workspace, and it is clean; it never forces. The branch is deleted with `git branch -d` only when merged into its target, otherwise kept. Never prompts; on doubt it preserves and reports.";
 
 const SELECT_DESCRIPTION =
   "Ask Jev who should do a piece of work: you inline, or a new worker (harness + model). Call it BEFORE deciding to do a task inline or delegate it, and before EVERY new worker launch. Supply facts only: the task brief, relevant context, purpose, and for review/discussion/debate the models that authored the work or position (provenance). Follow the result. Override only when outcome is 'failed' (Jev unavailable, tool error); cannot_select and needs_context are valid answers, not failures. Starts no worker and polls nothing. Never include secrets.";
@@ -435,7 +464,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
   };
 
   const OFF_DISCLOSURE =
-    'workers were NOT stopped and conversation history is unchanged; recorded worker claims are kept; resolve any outstanding supervision deliberately.';
+    'workers were NOT stopped and conversation history is unchanged; recorded worker claims and worktree records are kept; resolve any outstanding supervision deliberately.';
 
   const buildGuidance = (): string => {
     const skill = loadOrchestrationSkill();
@@ -651,7 +680,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     name: 'herdr_orchestrate',
     label: 'Herdr Orchestrate',
     description:
-      "Activate herdr orchestration for this session: enables herdr_select/herdr_watch/herdr_unwatch/herdr_watches/herdr_workers and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
+      "Activate herdr orchestration for this session: enables herdr_select/herdr_watch/herdr_unwatch/herdr_watches/herdr_workers/herdr_worktrees and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
     parameters: Type.Object({}),
     executionMode: 'sequential',
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -976,6 +1005,41 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerTool({
+    name: 'herdr_worktrees',
+    label: 'Herdr Worktrees',
+    description: WORKTREES_DESCRIPTION,
+    promptSnippet: 'Create, list, or remove guarded per-worker Git worktrees through Herdr',
+    parameters: WorktreesParams,
+    executionMode: 'sequential',
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (manager === undefined) throw new Error('no active session');
+      const generation = sessionGeneration;
+      const ensureCurrent = (what: string): void => {
+        // Never append into, or report for, a session that replaced this one.
+        if (generation !== sessionGeneration) throw new Error(`session changed; ${what}`);
+      };
+      const worktreeCtx: WorktreeContext = {
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: ctx.cwd,
+        entries: () => ctx.sessionManager.getEntries(),
+        append: (entry) => {
+          ensureCurrent('nothing recorded');
+          pi.appendEntry(WORKTREE_ENTRY_TYPE, entry);
+        },
+        ensureCurrent,
+        ...(signal ? { signal } : {}),
+      };
+      const result =
+        params.action === 'create'
+          ? await createWorktree(worktreeCtx, params)
+          : params.action === 'remove'
+            ? await removeWorktree(worktreeCtx, params)
+            : await listWorktrees(worktreeCtx);
+      return { content: [{ type: 'text', text: result.text }], details: result.details };
+    },
+  });
+
   const openJev = createJevOpener({ agentDir });
 
   pi.registerTool({
@@ -1208,7 +1272,18 @@ export default function herdrExtension(pi: ExtensionAPI): void {
         const recorded = readWorkerRecords(ctx.sessionManager.getEntries(), sessionId).filter(
           (record) => !record.released,
         ).length;
-        const workers = `${recorded} recorded worker${recorded === 1 ? '' : 's'}; supervision not restored; run herdr_workers list`;
+        const outstanding = outstandingWorktrees(
+          readWorktreeRecords(ctx.sessionManager.getEntries(), sessionId),
+        );
+        const worktrees =
+          outstanding.open === 0 && outstanding.unresolved === 0
+            ? ''
+            : `; ${outstanding.open} worktree${outstanding.open === 1 ? '' : 's'} not removed (${outstanding.unknown} unknown)${
+                outstanding.unresolved === 0
+                  ? ''
+                  : `, ${outstanding.unresolved} removed with branch outcome unresolved`
+              }; run herdr_worktrees list`;
+        const workers = `${recorded} recorded worker${recorded === 1 ? '' : 's'}; supervision not restored; run herdr_workers list${worktrees}`;
         recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone. ${workers} and verify identity and reports before re-arming.`;
         if (firstNotice) {
           notify(

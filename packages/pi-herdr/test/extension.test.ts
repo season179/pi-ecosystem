@@ -1,11 +1,32 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, it } from 'vitest';
+import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import herdrExtension from '../src/extensions/herdr.js';
+
+/** Values `randomInt` returns before falling back to real randomness (forces branch nonces). */
+const forcedRandom = vi.hoisted(() => [] as number[]);
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  const randomInt = (...args: unknown[]): number =>
+    forcedRandom.length > 0
+      ? forcedRandom.shift()!
+      : (actual.randomInt as (...a: unknown[]) => number)(...args);
+  return { ...actual, default: { ...actual, randomInt }, randomInt };
+});
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-herdr.mjs', import.meta.url));
 const ENV_KEYS = [
@@ -22,6 +43,9 @@ const ENV_KEYS = [
   'FAKE_HERDR_NOTIFICATION_DELAY_MS',
   'FAKE_HERDR_NOTIFICATION_EXIT_CODE',
   'FAKE_HERDR_AGENTS_FILE',
+  'FAKE_HERDR_WORKTREE_FILE',
+  'HERDR_WORKSPACE_ID',
+  'PATH',
   'TYPESAFE_API_KEY',
 ] as const;
 
@@ -215,6 +239,7 @@ const ORCHESTRATOR_TOOLS = [
   'herdr_unwatch',
   'herdr_watches',
   'herdr_workers',
+  'herdr_worktrees',
 ];
 
 function activeOrchestratorTools(current: Harness): string[] {
@@ -967,6 +992,335 @@ describe.sequential('herdr worker ledger', () => {
     await waitFor(() => toasts().length > 0, 'verified toast');
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(toasts().length, 1);
+  });
+});
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+}
+
+interface WorktreeFixture {
+  repo: string;
+  file: string;
+}
+
+/** A real git repo plus fake Herdr worktree state; the session cwd is the repo. */
+function setupWorktrees(current: Harness): WorktreeFixture {
+  const base = realpathSync(current.dir);
+  const repo = join(base, 'repo');
+  const root = join(base, 'worktrees');
+  mkdirSync(repo);
+  mkdirSync(root);
+  git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'config', 'user.email', 'test@example.com');
+  git(repo, 'config', 'user.name', 'Test');
+  git(repo, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(join(repo, 'a.txt'), 'a\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-qm', 'init');
+  const file = join(current.dir, 'worktrees.json');
+  writeFileSync(
+    file,
+    JSON.stringify({
+      repo,
+      root,
+      workspaces: [{ workspace_id: 'w1', checkout_path: repo }],
+      panes: [{ pane_id: 'w1:p1', terminal_id: 'term-w1', workspace_id: 'w1', agent: 'pi' }],
+    }),
+  );
+  process.env.FAKE_HERDR_WORKTREE_FILE = file;
+  process.env.HERDR_WORKSPACE_ID = 'w1';
+  (current.pi.ctx as any).cwd = repo;
+  return { repo, file };
+}
+
+function worktreeState(fx: WorktreeFixture): any {
+  return JSON.parse(readFileSync(fx.file, 'utf8'));
+}
+
+function updateWorktreeState(fx: WorktreeFixture, change: (state: any) => void): void {
+  const state = worktreeState(fx);
+  change(state);
+  writeFileSync(fx.file, JSON.stringify(state));
+}
+
+function worktreeEvents(current: Harness): string[] {
+  return current.pi.entries
+    .filter((entry) => entry.customType === 'pi-herdr-worktree')
+    .map((entry) => (entry.data as { event: string }).event);
+}
+
+async function createWorktree(current: Harness, task: string, signal?: AbortSignal): Promise<any> {
+  return current.pi.execute('herdr_worktrees', { action: 'create', task }, signal);
+}
+
+async function removeWorktree(current: Harness, worktree: number): Promise<any> {
+  return current.pi.execute('herdr_worktrees', { action: 'remove', worktree });
+}
+
+/** Put a `git` on PATH that runs `onMergeBase` (CommonJS; `git(...)` is real git) after merge-base. */
+function wrapGit(current: Harness, onMergeBase: string): void {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const bin = join(current.dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/usr/bin/env node
+const { execFileSync, spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' });
+const git = (...a) => execFileSync(${JSON.stringify(realGit)}, a);
+if (args.includes('merge-base')) { ${onMergeBase} }
+process.exit(result.status ?? 1);
+`,
+  );
+  chmodSync(join(bin, 'git'), 0o755);
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+}
+
+function commitIn(path: string, name: string): string {
+  writeFileSync(join(path, name), 'work\n');
+  git(path, 'add', '.');
+  git(path, 'commit', '-qm', name);
+  return git(path, 'rev-parse', 'HEAD');
+}
+
+describe.sequential('herdr worktree ledger', () => {
+  it('replays worktree records across resume with a restore notice, but not into a fork', async () => {
+    const current = await createHarness(0);
+    setupWorktrees(current);
+    await createWorktree(current, 'Fix X');
+    await current.pi.emit('session_start', { reason: 'resume' });
+    const listed = await current.pi.execute('herdr_worktrees', { action: 'list' });
+    assert.match(listed.content[0].text, /#1 created: herdr\/session\/fix-x-[a-z0-9]{4}\n/u);
+    assert.match(
+      listed.content[0].text,
+      /live: checkout present; workspace mapped; changes clean; branch [0-9a-f]{12} merged into main; agents none/u,
+    );
+    assert.match(
+      (await injectedPrompt(current))!,
+      /1 worktree not removed \(0 unknown\); run herdr_worktrees list/u,
+    );
+
+    current.pi.sessionId = 'session-fork';
+    current.pi.parentSession = '/saved/session-a.jsonl';
+    await current.pi.emit('session_start', { reason: 'fork' });
+    await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+    const forked = await current.pi.execute('herdr_worktrees', { action: 'list' });
+    assert.equal(forked.content[0].text, 'no recorded worktrees in this conversation');
+  });
+
+  it('records intent before Herdr, then created, failed or unknown; refuses a detached HEAD', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    git(fx.repo, 'checkout', '-q', '--detach');
+    await assert.rejects(
+      createWorktree(current, 'Fix X'),
+      /detached HEAD; pass target.*nothing recorded/u,
+    );
+    git(fx.repo, 'checkout', '-q', 'main');
+    // An explicit target is a literal local branch name, never a revision expression.
+    await assert.rejects(
+      current.pi.execute('herdr_worktrees', {
+        action: 'create',
+        task: 'T',
+        target: 'main^{commit}',
+      }),
+      /target main\^\{commit\} is not an existing local branch name; nothing recorded/u,
+    );
+    assert.deepEqual(worktreeEvents(current), []);
+    assert.equal(worktreeState(fx).calls, undefined);
+
+    // Intent is durable while Herdr runs; an interrupted create is unknown and never retried.
+    updateWorktreeState(fx, (state) => (state.create = 'stall'));
+    forcedRandom.push(0, 0, 0, 0);
+    const controller = new AbortController();
+    const stalled = createWorktree(current, 'Slow', controller.signal);
+    await waitFor(() => worktreeState(fx).calls?.length === 1, 'create call');
+    assert.deepEqual(worktreeEvents(current), ['intent']);
+    controller.abort();
+    assert.match(
+      (await stalled).content[0].text,
+      /^worktree #1 creation outcome unknown .*Not retried/u,
+    );
+    assert.equal(worktreeState(fx).calls.length, 1);
+
+    updateWorktreeState(fx, (state) => (state.create = 'error'));
+    assert.match(
+      (await createWorktree(current, 'Clash')).content[0].text,
+      /^worktree #2 creation failed \(worktree_create_failed: branch already exists\)/u,
+    );
+
+    updateWorktreeState(fx, (state) => delete state.create);
+    const created = await createWorktree(current, 'Fix X');
+    assert.match(
+      created.content[0].text,
+      /root pane: (w\d+:p1) — start the worker with `herdr agent start --pane \1/u,
+    );
+    assert.deepEqual(worktreeEvents(current), [
+      'intent',
+      'unknown',
+      'intent',
+      'failed',
+      'intent',
+      'created',
+    ]);
+    const head = git(fx.repo, 'rev-parse', 'HEAD');
+    const call = worktreeState(fx).calls.at(-1);
+    assert.equal(call[call.indexOf('--base') + 1], head);
+    assert.ok(call.includes('--no-focus') && !call.includes('--force'));
+    assert.ok(existsSync(created.details.worktree.path));
+
+    // A name held by an unknown record or by git is regenerated before Herdr runs.
+    git(fx.repo, 'branch', 'herdr/session/slow-1111');
+    forcedRandom.push(0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2);
+    const distinct = (await createWorktree(current, 'Slow')).details.worktree;
+    assert.deepEqual(
+      [distinct.id, distinct.state, distinct.branch],
+      [4, 'created', 'herdr/session/slow-2222'],
+    );
+    assert.equal(
+      worktreeState(fx).calls.at(-1)[worktreeState(fx).calls.at(-1).indexOf('--branch') + 1],
+      'herdr/session/slow-2222',
+    );
+  });
+
+  it('refuses removal unless owned, mapped, quiescent, clean and observable', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    const { path, workspaceId, rootPaneId } = (await createWorktree(current, 'Fix X')).details
+      .worktree;
+    await assert.rejects(removeWorktree(current, 99), /no recorded worktree #99/u);
+
+    writeFileSync(join(path, 'scratch.txt'), 'unsaved\n');
+    await assert.rejects(removeWorktree(current, 1), /has uncommitted or untracked changes/u);
+    rmSync(join(path, 'scratch.txt'));
+
+    const refusals: Array<[(state: any) => void, (state: any) => void, RegExp]> = [
+      [
+        (state) => (state.panes.find((p: any) => p.pane_id === rootPaneId).agent = 'claude'),
+        (state) => delete state.panes.find((p: any) => p.pane_id === rootPaneId).agent,
+        /agent claude in w\d+:p1 is still running/u,
+      ],
+      [
+        (state) =>
+          (state.workspaces.find((w: any) => w.workspace_id === workspaceId).checkout_path =
+            fx.repo),
+        (state) =>
+          (state.workspaces.find((w: any) => w.workspace_id === workspaceId).checkout_path = path),
+        /Herdr maps workspace w\d+ to .*repo, not/u,
+      ],
+      [
+        (state) => (state.lookup = 'fail'),
+        (state) => delete state.lookup,
+        /Herdr workspace lookup failed/u,
+      ],
+    ];
+    for (const [apply, revert, reason] of refusals) {
+      updateWorktreeState(fx, apply);
+      await assert.rejects(removeWorktree(current, 1), reason);
+      updateWorktreeState(fx, revert);
+    }
+
+    current.pi.sessionId = 'session-b';
+    await current.pi.emit('session_start', { reason: 'new' });
+    await assert.rejects(
+      removeWorktree(current, 1),
+      /no recorded worktree #1 in this conversation/u,
+    );
+    assert.ok(existsSync(path));
+    assert.deepEqual(worktreeEvents(current), ['intent', 'created']);
+  });
+
+  it('removes clean checkouts and deletes only a merged branch', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    const merged = (await createWorktree(current, 'Merged')).details.worktree;
+    const unmerged = (await createWorktree(current, 'Unmerged')).details.worktree;
+    for (const worktree of [merged, unmerged]) {
+      writeFileSync(join(worktree.path, `${worktree.id}.txt`), 'work\n');
+      git(worktree.path, 'add', '.');
+      git(worktree.path, 'commit', '-qm', 'work');
+    }
+    git(fx.repo, 'merge', '-q', '--no-ff', '-m', 'merge', merged.branch);
+
+    assert.match(
+      (await removeWorktree(current, 1)).content[0].text,
+      /^removed worktree #1 .* deleted \(merged into main\)\.$/u,
+    );
+    assert.match(
+      (await removeWorktree(current, 2)).content[0].text,
+      /^removed worktree #2 .* kept: not merged into main\.$/u,
+    );
+    assert.ok(!existsSync(merged.path) && !existsSync(unmerged.path));
+    assert.equal(git(fx.repo, 'branch', '--list', merged.branch), '');
+    assert.notEqual(git(fx.repo, 'branch', '--list', unmerged.branch), '');
+    assert.equal(
+      (await current.pi.execute('herdr_worktrees', { action: 'list' })).content[0].text,
+      `no recorded worktrees in this conversation (2 removed, not shown; kept branches: ${unmerged.branch})`,
+    );
+  });
+
+  it('deletes no branch after session replacement and keeps the unresolved outcome visible', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    const worktree = (await createWorktree(current, 'Fix X')).details.worktree;
+    commitIn(worktree.path, 'w.txt');
+    git(fx.repo, 'merge', '-q', worktree.branch);
+    const marker = join(current.dir, 'merge-base-started');
+    wrapGit(
+      current,
+      `fs.writeFileSync(${JSON.stringify(marker)}, ''); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);`,
+    );
+    const removing = removeWorktree(current, 1);
+    await waitFor(() => existsSync(marker), 'ancestry check');
+    current.pi.sessionId = 'session-b';
+    await current.pi.emit('session_start', { reason: 'new' });
+    await assert.rejects(removing, /branch was NOT deleted and its outcome is unresolved/u);
+    assert.notEqual(git(fx.repo, 'branch', '--list', worktree.branch), '');
+
+    current.pi.sessionId = 'session-a';
+    await current.pi.emit('session_start', { reason: 'resume' });
+    const listed = (await current.pi.execute('herdr_worktrees', { action: 'list' })).content[0]
+      .text;
+    assert.match(
+      listed,
+      new RegExp(`#1 removed: ${worktree.branch}\n[^]*branch outcome unresolved`, 'u'),
+    );
+    assert.match((await injectedPrompt(current))!, /1 removed with branch outcome unresolved/u);
+  });
+
+  it('keeps a branch whose tip moved after the ancestry check', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    const worktree = (await createWorktree(current, 'Fix X')).details.worktree;
+    commitIn(worktree.path, 'w.txt');
+    git(fx.repo, 'merge', '-q', worktree.branch);
+    // The source checkout moves to another branch holding a newer commit that main lacks.
+    git(fx.repo, 'checkout', '-q', '-b', 'other');
+    const newer = commitIn(fx.repo, 'other.txt');
+    wrapGit(
+      current,
+      `git('-C', ${JSON.stringify(fx.repo)}, 'update-ref', 'refs/heads/${worktree.branch}', '${newer}');`,
+    );
+    assert.match(
+      (await removeWorktree(current, 1)).content[0].text,
+      /^removed worktree #1 .* kept: branch or main moved before deletion\.$/u,
+    );
+    assert.equal(git(fx.repo, 'rev-parse', worktree.branch), newer);
+  });
+
+  it('never records a creation outcome into a session that replaced its own', async () => {
+    const current = await createHarness(0);
+    const fx = setupWorktrees(current);
+    updateWorktreeState(fx, (state) => (state.createDelayMs = 300));
+    const creating = createWorktree(current, 'Fix X');
+    await waitFor(() => worktreeState(fx).calls?.length === 1, 'create call');
+    current.pi.sessionId = 'session-b';
+    await current.pi.emit('session_start', { reason: 'new' });
+    await assert.rejects(creating, /session changed; the creation outcome was not recorded/u);
+    assert.deepEqual(worktreeEvents(current), ['intent']);
   });
 });
 

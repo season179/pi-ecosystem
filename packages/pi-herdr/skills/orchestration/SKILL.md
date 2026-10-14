@@ -20,6 +20,17 @@ Stay available to the user. `herdr_select` decides whether each task is done inl
 5. **Verify and deliver.** Read the report, spot-check evidence of the requested behavior, and drive the next authorized action to a usable result. A report file alone is not delivery. In review, distinguish defects and unmet requirements to fix, necessary design corrections justified by concrete evidence, and optional improvements that do not block delivery. Reviewer preference alone does not justify reopening the agreed approach. Keep meaningful tests and verification intact. Serialize shared-checkout integration; preserve unexpected changes. Distinguish implemented, checked, applied, blocked, and awaiting a real decision. Do not expand into unsolicited audits or releases.
 6. **Quit, retain.** Gracefully quit owned workers once no longer needed, preserving reports and unfinished changes. Verify they exited and their shells are available; retain the panes. Pane closure is not agent exit. After a verified quit or handoff, `release` the worker; release does not quit it, and `herdr_unwatch` does not release it.
 
+## Worktrees
+
+The user's standing instruction authorizes you to create, integrate, and clean up worktrees without asking; this satisfies Herdr's explicit-topology rule. Never prompt about them. On doubt, preserve, record, and report at the end.
+
+- **When to isolate:** give a worker its own worktree only when it writes concurrently with another writer, including alongside your own edits in the source checkout. Sequential writers share a checkout; read-only reviewers share. Builds and installs count as writes.
+- **Lifecycle:** `herdr_worktrees` `create` (task; target defaults to the current branch) → `herdr agent start --pane <root pane>` → `herdr_workers` `claim` → watch. The worker commits on its branch and reports hashes. Quit it and verify. Then merge serially into the target in the **source** checkout with an ordinary `git merge <branch>`, only when that checkout is on the target and clean; otherwise postpone and report. Run the checks, then `herdr_worktrees` `remove` with the record number.
+- **Keep reports and artifacts outside the checkout.** Brief workers in a worktree to write their report and any artifact worth keeping to a path outside it. `remove` destroys everything in the checkout that is not committed, including ignored files (`node_modules`, `dist`, logs, reports).
+- **Base is the last commit.** Uncommitted source edits are not in the worktree; work that depends on them waits until they are committed. Never stash or commit the user's edits.
+- **Never** push, `--force`, `git branch -D`, `herdr workspace close --group`, or remove a worktree by path.
+- **End-of-task report:** list leftovers from `herdr_workers list` and `herdr_worktrees list` (unknown, dirty, unmerged, kept branches, branch outcome unresolved).
+
 ## Claude permission prompts
 
 For a worker you are authorized to control, you may select its visible **"Yes, and switch to auto mode"** option without asking the user again, provided the pending action is within the authorized scope and no user or environment restriction forbids auto. That option also approves the pending action: inspect it first. Read the current prompt and select by its label, not a remembered option number; verify auto is active and rearm the watch. Do not change global settings or unrelated workers. If auto is unavailable, a classifier denial occurs, or auto pauses for approval, inspect the blocker; do not evade it by changing modes or blindly approving. Ask the user when the action needs new authority or a restriction requires their approval.
@@ -33,11 +44,11 @@ For brainstorming and planning, normally discuss and debate with another agent. 
 ## Gotchas that apply immediately
 
 - Idle/done is a signal to inspect, not proof of delivery. Immediate idle can precede work: check evidence and rearm, without blindly resubmitting.
-- Restored role restores recorded worker claims, **not watches, supervision, or verified identity**. Reconcile from `herdr_workers list` before rearming; never claim unwatched work is supervised.
+- Restored role restores recorded worker claims and worktree records, **not watches, supervision, or verified identity**. Reconcile from `herdr_workers list` and `herdr_worktrees list` before rearming; never claim unwatched work is supervised.
 - `/orchestrate off` stops watches, including command-watch children, **not workers**; it does not erase history. Honor pause/stop and leave time for deadline handoffs; never restart paused work automatically.
 
 ## Load detail only when needed
 
 Do not load all references by default. Resolve these paths relative to this skill's directory, not the project cwd.
 
-- **Pause/deadline handoff, reload/resume/fork, missing evidence, or switching off with outstanding work:** read [Recovery and handoff](references/recovery.md) before reconciling or changing supervision.
+- **Pause/deadline handoff, reload/resume/fork, missing evidence, unknown or leftover worktrees, or switching off with outstanding work:** read [Recovery and handoff](references/recovery.md) before reconciling or changing supervision.
