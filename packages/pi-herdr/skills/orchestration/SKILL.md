@@ -22,22 +22,13 @@ Stay available to the user. `herdr_select` decides whether each task is done inl
 
 ## Worktrees
 
-The user's standing instruction authorizes you to create, integrate, and clean up worktrees without asking; this satisfies Herdr's explicit-topology rule. Never prompt about them. On doubt, preserve, record, and report at the end.
-
-- **When to isolate:** give a worker its own worktree only when it writes concurrently with another writer, including alongside your own edits in the source checkout. Sequential writers share a checkout; read-only reviewers share. Builds and installs count as writes.
-- **Lifecycle:** `herdr_worktrees` `create` (task; target defaults to the current branch) → `herdr agent start --pane <root pane>` → `herdr_workers` `claim` → watch. The worker commits on its branch and reports hashes. Quit it and verify. Then merge serially into the target in the **source** checkout with an ordinary `git merge <branch>`, only when that checkout is on the target and clean; otherwise postpone and report. Run the checks, then `herdr_worktrees` `remove` with the record number.
-- **Keep reports and artifacts outside the checkout.** Brief workers in a worktree to write their report and any artifact worth keeping to a path outside it. `remove` destroys everything in the checkout that is not committed, including ignored files (`node_modules`, `dist`, logs, reports).
-- **Base is the last commit.** Uncommitted source edits are not in the worktree; work that depends on them waits until they are committed. Never stash or commit the user's edits.
-- **Never** push, `--force`, `git branch -D`, `herdr workspace close --group`, or remove a worktree by path.
-- **End-of-task report:** list leftovers from `herdr_workers list` and `herdr_worktrees list` (unknown, dirty, unmerged, kept branches, branch outcome unresolved).
-
-## Claude permission prompts
-
-For a worker you are authorized to control, you may select its visible **"Yes, and switch to auto mode"** option without asking the user again, provided the pending action is within the authorized scope and no user or environment restriction forbids auto. That option also approves the pending action: inspect it first. Read the current prompt and select by its label, not a remembered option number; verify auto is active and rearm the watch. Do not change global settings or unrelated workers. If auto is unavailable, a classifier denial occurs, or auto pauses for approval, inspect the blocker; do not evade it by changing modes or blindly approving. Ask the user when the action needs new authority or a restriction requires their approval.
+The user's standing instruction authorizes you to create, integrate, and clean up worktrees without asking; this satisfies Herdr's explicit-topology rule. Never prompt about them. Give a worker its own worktree only when it writes concurrently with another writer, including alongside your own edits in the source checkout. Sequential writers share a checkout; read-only reviewers share. Builds and installs count as writes. **Never** push, `--force`, `git branch -D`, `herdr workspace close --group`, or remove a worktree by path.
 
 ## Engineering judgment
 
 Apply this standard yourself and include it in worker briefs: prefer the simplest design that fully meets the requirements, including correctness, safety, and maintainability. Inspect existing patterns before introducing new ones. Justify added abstractions, configuration, dependencies, or compatibility layers with concrete needs, not hypothetical future flexibility. Simplicity means fewer concepts to understand, not merely fewer lines.
+
+Tests: write only tests that protect critical behavior or a concrete regression. Prove every new or changed test: break the behavior it protects (revert the fix or stub the code under test), show the test fails, restore it, and show it passes. Put the command and both results in the report. A test that stays green when the code it covers returns nothing protects nothing; delete or rewrite it. Reviewers check this proof and repeat it when in doubt.
 
 For brainstorming and planning, normally discuss and debate with another agent. Challenge both underengineering and overengineering: what requirements or important failure cases are missing, what can be removed without compromising the outcome, and is there a simpler alternative of equal or better quality? Resolve disagreements through evidence and reasoning toward a shared, justified approach—not by combining every suggestion into a larger design or forcing agreement despite unresolved evidence.
 
@@ -53,3 +44,5 @@ For brainstorming and planning, normally discuss and debate with another agent. 
 Do not load all references by default. Resolve these paths relative to this skill's directory, not the project cwd.
 
 - **Pause/deadline handoff, reload/resume/fork, missing evidence, unknown or leftover worktrees, or switching off with outstanding work:** read [Recovery and handoff](references/recovery.md) before reconciling or changing supervision.
+- **Creating, merging, or removing a worker worktree, or reporting worktree leftovers at the end of a task:** read [Worker worktree lifecycle](references/worktrees.md) first.
+- **A Claude worker shows a permission prompt, or auto mode is unavailable, denied, or paused:** read [Claude permission prompts](references/claude-permissions.md) before answering it.

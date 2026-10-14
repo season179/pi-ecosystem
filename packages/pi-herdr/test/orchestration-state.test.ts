@@ -1,70 +1,90 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { describe, it } from "vitest";
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, it } from 'vitest';
 import {
-	loadOrchestrationSkill,
-	parseOrchestrateArgs,
-	readOrchestrationState,
-	stripFrontmatter,
-} from "../src/orchestration-state.js";
+  loadOrchestrationSkill,
+  parseOrchestrateArgs,
+  readOrchestrationState,
+  stripFrontmatter,
+} from '../src/orchestration-state.js';
 
 const entry = (active: boolean, sessionId: string) => ({
-	type: "custom",
-	customType: "pi-herdr-orchestration",
-	data: { active, sessionId, source: "command", at: "t" },
+  type: 'custom',
+  customType: 'pi-herdr-orchestration',
+  data: { active, sessionId, source: 'command', at: 't' },
 });
 
-describe("orchestration state helpers", () => {
-	it("latest own entry wins; foreign entries only mark inheritance", () => {
-		assert.deepEqual(readOrchestrationState([], "s1"), { active: false, inherited: false });
-		const own = readOrchestrationState([entry(true, "s1"), entry(false, "s1")], "s1");
-		assert.equal(own.active, false);
-		assert.equal(own.inherited, false);
-		const forked = readOrchestrationState([entry(true, "parent")], "child");
-		assert.deepEqual(forked, { active: false, inherited: true });
-		const mixed = readOrchestrationState(
-			[entry(true, "parent"), { type: "custom", customType: "pi-herdr-orchestration", data: { junk: 1 } }, entry(true, "child")],
-			"child",
-		);
-		assert.equal(mixed.active, true);
-		assert.equal(mixed.inherited, true);
-	});
+describe('orchestration state helpers', () => {
+  it('latest own entry wins; foreign entries only mark inheritance', () => {
+    assert.deepEqual(readOrchestrationState([], 's1'), { active: false, inherited: false });
+    const own = readOrchestrationState([entry(true, 's1'), entry(false, 's1')], 's1');
+    assert.equal(own.active, false);
+    assert.equal(own.inherited, false);
+    const forked = readOrchestrationState([entry(true, 'parent')], 'child');
+    assert.deepEqual(forked, { active: false, inherited: true });
+    const mixed = readOrchestrationState(
+      [
+        entry(true, 'parent'),
+        { type: 'custom', customType: 'pi-herdr-orchestration', data: { junk: 1 } },
+        entry(true, 'child'),
+      ],
+      'child',
+    );
+    assert.equal(mixed.active, true);
+    assert.equal(mixed.inherited, true);
+  });
 
-	it("parses only bare activation or off", () => {
-		assert.deepEqual(parseOrchestrateArgs(""), { kind: "on" });
-		assert.deepEqual(parseOrchestrateArgs(" OFF "), { kind: "off" });
-		assert.deepEqual(parseOrchestrateArgs("off now"), { kind: "unknown", argument: "off now" });
-	});
+  it('parses only bare activation or off', () => {
+    assert.deepEqual(parseOrchestrateArgs(''), { kind: 'on' });
+    assert.deepEqual(parseOrchestrateArgs(' OFF '), { kind: 'off' });
+    assert.deepEqual(parseOrchestrateArgs('off now'), { kind: 'unknown', argument: 'off now' });
+  });
 
-	it("loads the bundled skill body without frontmatter", () => {
-		assert.equal(stripFrontmatter("---\nname: x\n---\nbody\n"), "body");
-		assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
-		const skill = loadOrchestrationSkill();
-		assert.ok("body" in skill, JSON.stringify(skill));
-		assert.ok(skill.body.startsWith("# Herdr orchestration"));
-		assert.equal(readFileSync(resolve(skill.directory, "SKILL.md"), "utf8").includes(skill.body), true);
-		const missing = loadOrchestrationSkill(new URL("file:///nonexistent/SKILL.md"));
-		assert.ok("error" in missing);
-	});
+  it('loads the bundled skill body without frontmatter', () => {
+    assert.equal(stripFrontmatter('---\nname: x\n---\nbody\n'), 'body');
+    assert.equal(stripFrontmatter('no frontmatter'), 'no frontmatter');
+    const skill = loadOrchestrationSkill();
+    assert.ok('body' in skill, JSON.stringify(skill));
+    assert.ok(skill.body.startsWith('# Herdr orchestration'));
+    assert.equal(
+      readFileSync(resolve(skill.directory, 'SKILL.md'), 'utf8').includes(skill.body),
+      true,
+    );
+    const missing = loadOrchestrationSkill(new URL('file:///nonexistent/SKILL.md'));
+    assert.ok('error' in missing);
+  });
 
-	it("keeps conditional references linked, readable, and out of the loaded core", () => {
-		const skill = loadOrchestrationSkill();
-		assert.ok("body" in skill);
-		assert.match(skill.body, /Do not load all references by default/);
-		assert.match(skill.body, /before every new worker launch, call `herdr_select`/);
-		assert.match(skill.body, /Only a `failed` outcome .* permits a manual choice/);
-		assert.match(skill.body, /Launch the selected harness and model with the user's permission requirements/);
-		assert.doesNotMatch(skill.body, /herdr_route|budgetChoice|quota|references\/routing\.md/);
-		assert.match(skill.body, /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/);
-		assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);
-		const links = [...skill.body.matchAll(/\]\((references\/[^)]+)\)/g)].map((m) => m[1]!);
-		assert.deepEqual(links, ["references/recovery.md"]);
-		for (const link of links) {
-			const reference = readFileSync(resolve(skill.directory, link), "utf8");
-			assert.ok(reference.startsWith("# "), `${link} readable from the supplied directory`);
-			assert.ok(!skill.body.includes(reference.split("\n")[0]!), "reference content is not eagerly injected");
-			assert.doesNotMatch(reference, /\]\([^)]*\.md\)/, "no nested reference chain");
-		}
-	});
+  it('keeps conditional references linked, readable, and out of the loaded core', () => {
+    const skill = loadOrchestrationSkill();
+    assert.ok('body' in skill);
+    assert.match(skill.body, /Do not load all references by default/);
+    assert.match(skill.body, /before every new worker launch, call `herdr_select`/);
+    assert.match(skill.body, /Only a `failed` outcome .* permits a manual choice/);
+    assert.match(
+      skill.body,
+      /Launch the selected harness and model with the user's permission requirements/,
+    );
+    assert.doesNotMatch(skill.body, /herdr_route|budgetChoice|quota|references\/routing\.md/);
+    assert.match(
+      skill.body,
+      /Reuse available shell panes in the current Herdr workspace, including panes not created by this session/,
+    );
+    assert.match(skill.body, /Pause\/deadline handoff.*read \[Recovery and handoff\]/);
+    const links = [...skill.body.matchAll(/\]\((references\/[^)]+)\)/g)].map((m) => m[1]!);
+    assert.deepEqual(links, [
+      'references/recovery.md',
+      'references/worktrees.md',
+      'references/claude-permissions.md',
+    ]);
+    for (const link of links) {
+      const reference = readFileSync(resolve(skill.directory, link), 'utf8');
+      assert.ok(reference.startsWith('# '), `${link} readable from the supplied directory`);
+      assert.ok(
+        !skill.body.includes(reference.split('\n')[0]!),
+        'reference content is not eagerly injected',
+      );
+      assert.doesNotMatch(reference, /\]\([^)]*\.md\)/, 'no nested reference chain');
+    }
+  });
 });
