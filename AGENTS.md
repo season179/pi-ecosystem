@@ -4,4 +4,6 @@
 
 - Use the root Prettier setup for code formatting. From the repository root, run `npm run format -- <changed-files>` and verify with `npm run format:check -- <changed-files>`. Keep formatting scoped to files you change; respect `.prettierignore` and do not reformat unrelated packages or vendored code.
 
+- Keep each README concise: why the package exists, what it does, and how to set it up. Do not add history, changelogs, decision logs, or design narratives; git history and session logs hold those.
+
 - Write only necessary tests protecting critical behavior or concrete regressions. Reuse existing coverage; avoid redundant tests, implementation-detail assertions, and brittle snapshots. Every new test must catch a meaningful failure existing tests miss.
