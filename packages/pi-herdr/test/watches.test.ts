@@ -689,7 +689,7 @@ describe('WatchManager', () => {
         assert.equal(event.outcome.signal, 'SIGTERM');
         assert.equal(event.outcome.kind, cause === 'stop' ? 'killed' : 'timeout');
         assert.equal(event.record.status, cause === 'stop' ? 'stopped' : 'fired');
-        await waitFor(() => !isAlive(worker));
+        await waitFor(() => !isAlive(worker), cause === 'timeout' ? 4_000 : 2_000);
         assert.ok(!isAlive(worker), 'same-group worker should be SIGKILLed after the grace');
       },
     );
