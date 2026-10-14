@@ -31,12 +31,7 @@ const CATALOG: Record<string, readonly string[]> = {
   'zai/glm-5.3': ['text'],
   'zai/glm-5.3-flash': IMAGE,
 };
-const ALL_WORKERS = [
-  'pi_gpt_6_1_sol',
-  'claude_code_opus_5_5',
-  'claude_code_fable_5_1',
-  'pi_gpt_6_astra',
-];
+const ALL_WORKERS = ['pi_gpt_6_1_sol', 'claude_code_opus_5_5'];
 
 function environment(overrides: Partial<SelectEnvironment> = {}): SelectEnvironment {
   return {
@@ -69,6 +64,7 @@ function claude(windows?: ClaudeQuotaSnapshot['windows']): ClaudeQuotaSnapshot {
     windows: windows ?? [
       { label: '5h', usedPercent: 20, resetsAt: iso(2 * HOUR) },
       { label: 'Weekly', usedPercent: 40, resetsAt: iso(72 * HOUR) },
+      { label: 'Weekly (Opus)', usedPercent: 50, resetsAt: iso(72 * HOUR) },
       { label: 'Weekly (Fable)', usedPercent: 50, resetsAt: iso(72 * HOUR) },
     ],
   };
@@ -158,10 +154,7 @@ const excludedIds = (result: Awaited<ReturnType<typeof runSelection>>) =>
     .sort();
 
 describe('herdr_select selection', () => {
-  it.each([
-    ['claude_code_opus_5_5', 'claude-opus-5-5'],
-    ['claude_code_fable_5_1', 'claude-fable-5-1'],
-  ])(
+  it.each([['claude_code_opus_5_5', 'claude-opus-5-5']])(
     'feeds the profile into allocation and launches %s with auto permission defaults',
     async (option, model) => {
       const jev = fakeJev((labels) => choice(labels, option, 0.55));
@@ -193,14 +186,10 @@ describe('herdr_select selection', () => {
       const primary = allocation!.state.quotaGroups.codex.windows[0];
       // Jev is weak at arithmetic, so code supplies exact interval facts.
       assert.deepEqual([primary.remainingPercent, primary.resetsAt], [90, iso(30 * 60_000)]);
-      assert.deepEqual(allocation!.state.options.claude_code_fable_5_1.quota.windows, [
-        '5h',
-        'Weekly',
-        'Weekly (Fable)',
-      ]);
       assert.deepEqual(allocation!.state.options.claude_code_opus_5_5.quota.windows, [
         '5h',
         'Weekly',
+        'Weekly (Opus)',
       ]);
     },
   );
@@ -246,11 +235,7 @@ describe('herdr_select selection', () => {
         },
       }),
     );
-    assert.deepEqual(excludedIds(result), [
-      'claude_code_fable_5_1',
-      'pi_gpt_6_1_sol',
-      'pi_gpt_6_astra',
-    ]);
+    assert.deepEqual(excludedIds(result), ['pi_gpt_6_1_sol']);
     assert.deepEqual(Object.keys(jev.asks[1]!.state.options).sort(), [
       'claude_code_opus_5_5',
       'inline',
@@ -282,18 +267,16 @@ describe('herdr_select selection', () => {
     );
     assert.deepEqual(excludedIds(result), ['claude_code_opus_5_5', 'inline']);
 
-    const bare = fakeJev((labels) => choice(labels, 'pi_gpt_6_astra'));
+    const bare = fakeJev(() => assert.fail('no allocation expected'));
     const ambiguous = await runSelection(
       { ...TASK, purpose: 'debate', provenance: ['claude-latest', 'sol'] },
       environment(),
       deps(bare.openJev),
     );
-    assert.deepEqual(excludedIds(ambiguous), [
-      'claude_code_fable_5_1',
-      'claude_code_opus_5_5',
-      'inline',
-      'pi_gpt_6_1_sol',
-    ]);
+    assert.deepEqual(excludedIds(ambiguous), ['claude_code_opus_5_5', 'inline', 'pi_gpt_6_1_sol']);
+    assert.equal(ambiguous.outcome, 'cannot_select');
+    assert.equal(ambiguous.decidedBy, 'code');
+    assert.equal(bare.asks.length, 0);
   });
 
   it('does not exclude a known distinct model, and passes unknown provenance to Jev as unknown', async () => {
@@ -329,7 +312,13 @@ describe('herdr_select selection', () => {
     assert.equal(jev.asks[0]!.questions.visual, undefined);
     assert.deepEqual(Object.keys(jev.asks[1]!.state.options), ['pi_gpt_6_1_sol']);
     assert.equal(result.selection?.model, 'openai-codex/gpt-6.1-sol');
-    for (const option of ['gpt-7', 'pi_glm_5_3', 'pi_glm_5_3_flash']) {
+    for (const option of [
+      'gpt-7',
+      'pi_glm_5_3',
+      'pi_glm_5_3_flash',
+      'claude_code_fable_5_1',
+      'pi_gpt_6_astra',
+    ]) {
       await assert.rejects(
         runSelection({ ...TASK, allowedOptions: [option] }, environment(), deps(jev.openJev)),
         new RegExp(`unknown allowedOptions ${option}`),

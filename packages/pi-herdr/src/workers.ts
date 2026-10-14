@@ -3,7 +3,7 @@
  *
  * The candidate list is the user's approved set: Pi + gpt-6.1-sol and
  * Claude Code + Opus 5.5 are the preferred defaults for most work, including easy
- * work; the others are additional options. Launch IDs were checked against the
+ * work. Launch IDs were checked against the
  * installed Pi catalog (`pi --list-models`) and Claude Code 2.1.280. Preferences
  * are supplied to Jev as user preferences, not benchmarks.
  */
@@ -22,7 +22,7 @@ export interface WorkerCandidate {
   catalog: { provider: string; id: string };
   family: ModelFamily;
   quotaGroup: QuotaGroupId;
-  /** Token naming a Claude model-scoped weekly window, e.g. "Weekly (Fable)". */
+  /** Token naming a Claude model-scoped weekly window, e.g. "Weekly (Opus)". */
   scopedWindowToken?: string;
   preference: string;
 }
@@ -46,25 +46,6 @@ export const WORKER_CANDIDATES: readonly WorkerCandidate[] = [
     quotaGroup: 'claude',
     scopedWindowToken: 'opus',
     preference: 'User-preferred default for most work, including easy work.',
-  },
-  {
-    id: 'claude_code_fable_5_1',
-    harness: 'claude-code',
-    launchModel: 'claude-fable-5-1',
-    catalog: { provider: 'anthropic', id: 'claude-fable-5-1' },
-    family: 'anthropic',
-    quotaGroup: 'claude',
-    scopedWindowToken: 'fable',
-    preference: 'User-approved additional option; the user prefers it for hard work.',
-  },
-  {
-    id: 'pi_gpt_6_astra',
-    harness: 'pi',
-    launchModel: 'openai-codex/gpt-6-astra',
-    catalog: { provider: 'openai-codex', id: 'gpt-6-astra' },
-    family: 'openai',
-    quotaGroup: 'codex',
-    preference: 'User-approved additional option.',
   },
 ];
 

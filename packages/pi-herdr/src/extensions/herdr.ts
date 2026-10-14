@@ -133,7 +133,7 @@ const SelectParams = Type.Object({
   allowedOptions: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        'Only when the user explicitly restricted choices: allowed option ids (inline, pi_gpt_6_1_sol, claude_code_opus_5_5, claude_code_fable_5_1, pi_gpt_6_astra).',
+        'Only when the user explicitly restricted choices: allowed option ids (inline, pi_gpt_6_1_sol, claude_code_opus_5_5).',
     }),
   ),
   activeWorkers: Type.Optional(

@@ -86,8 +86,10 @@ There is no score or pacing formula. `cannot_select` and `needs_context` are val
 
 The workers are:
 
-- Defaults: Pi + `openai-codex/gpt-6.1-sol` and Claude Code + `claude-opus-5-5`.
-- Other options: Claude Code + `claude-fable-5-1` (preferred for hard work), Pi + `openai-codex/gpt-6-astra`.
+- Pi + `openai-codex/gpt-6.1-sol`.
+- Claude Code + `claude-opus-5-5`.
+
+Both are preferred defaults for most work, including easy work.
 
 A premium model may take easy work. Each selection runs a fresh check of the Codex, Claude and Z.ai quota tools. A failed check counts as unknown capacity, not zero. Model identity ignores harness and provider prefixes. An ambiguous alias of the reviewed model is excluded conservatively. When launching a Pi worker, always use a provider-qualified model ID from the current Pi catalog and confirm the first prompt is processed: a bare model pattern can match an unauthenticated provider and leave the worker at a login prompt.
 
