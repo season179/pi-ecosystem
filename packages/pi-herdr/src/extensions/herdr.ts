@@ -12,6 +12,7 @@ import { fetchClaudeQuota, formatClaudeQuota } from '../claude-quota.js';
 import { registerWatchesCommand } from '../commands.js';
 import { loadHerdrConfig } from '../config.js';
 import { runHerdr } from '../herdr-cli.js';
+import { SidebarReconciler } from '../sidebar.js';
 import {
   type ActivationSource,
   loadOrchestrationSkill,
@@ -374,6 +375,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
   let exhaustionNotified = false;
   let uiCtx: ExtensionContext | undefined;
   let sessionGeneration = 0;
+  let sidebar: SidebarReconciler | undefined;
 
   const updateFooter = (): void => {
     try {
@@ -448,14 +450,17 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     setOrchestratorToolsActive(true);
     updateFooter();
     if (changed && options.persist) persistActivation(ctx, true, source);
+    void sidebar?.refresh();
     return changed;
   };
 
   /** Deactivate guidance and tools; stops only this extension's armed watches. */
   const deactivate = async (ctx: ExtensionContext): Promise<number> => {
-    const stopped = manager ? (await manager.stop('all')).length : 0;
     const changed = promoted;
     promoted = false;
+    const clearing = sidebar?.stop();
+    const stopped = manager ? (await manager.stop('all')).length : 0;
+    await clearing;
     recoveryNote = undefined;
     setOrchestratorToolsActive(false);
     updateFooter();
@@ -889,6 +894,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
           ...(model ? { model } : {}),
         };
         pi.appendEntry(WORKER_ENTRY_TYPE, entry);
+        void sidebar?.refresh();
         const updated = readRecords();
         const record = findRecord(updated, identity)!;
         const others = updated.filter(
@@ -943,6 +949,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
           ...(record.identity.session ? { session: record.identity.session } : {}),
         };
         pi.appendEntry(WORKER_ENTRY_TYPE, entry);
+        await sidebar?.release(id);
         return {
           content: [
             {
@@ -1331,10 +1338,14 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     wakesUsed = 0;
     exhaustionNotified = false;
     const generation = ++sessionGeneration;
+    const oldSidebar = sidebar;
+    sidebar = undefined;
+    const clearing = oldSidebar?.stop();
     const oldManager = manager;
     manager = undefined;
     updateFooter();
     await oldManager?.shutdown();
+    await clearing;
     if (generation !== sessionGeneration) return;
     manager = new WatchManager({
       maxWatches: config.maxWatches,
@@ -1343,6 +1354,13 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       },
     });
     restoreActivation(ctx, event.reason);
+    const sessionId = ctx.sessionManager.getSessionId();
+    sidebar = new SidebarReconciler(
+      sessionId,
+      () => generation === sessionGeneration && promoted,
+      () => readWorkerRecords(ctx.sessionManager.getEntries(), sessionId),
+    );
+    void sidebar.refresh();
     updateFooter();
   });
 
@@ -1360,9 +1378,13 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     uiCtx = ctx;
     agentBusy = false;
     sessionGeneration += 1;
+    const oldSidebar = sidebar;
+    sidebar = undefined;
+    const clearing = oldSidebar?.stop();
     const oldManager = manager;
     manager = undefined;
     await oldManager?.shutdown();
+    await clearing;
     updateFooter();
   });
 }

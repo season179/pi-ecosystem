@@ -62,7 +62,7 @@ Natural-language requests use the always-active `herdr_orchestrate` tool through
 - `PI_HERDR_ORCHESTRATOR=1 pi` remains an explicit opt-in for scripted orchestrator starts, including genuinely new sessions in that process. A saved `off` wins for its conversation; forks/parent-linked sessions ignore this default. Never propagate it into worker launches.
 - `/orchestrate off` removes active guidance/tools and stops armed watches, including running command-watch children. It **does not quit workers**, erase recorded worker claims, or erase prior conversation history. Resolve outstanding supervision deliberately.
 - Reload/resume of the same conversation restores activation. A new conversation starts inactive unless explicitly configured; forks do not inherit activation or worker ownership. This replaces the old process-wide promotion behavior.
-- **Restored role is not restored supervision.** Watches are not persisted. Recorded worker claims restore, but their live identity is not re-verified until `herdr_workers list`. Reconcile actual worker identity and report evidence before rearming; do not assume all visible panes are owned.
+- **Restored role is not restored supervision.** Watches are not persisted. Recorded worker claims restore; sidebar refresh verifies identity for presentation only, not supervision. Use `herdr_workers list` to reconcile actual worker identity and report evidence before rearming; do not assume all visible panes are owned.
 
 Activation grants no operational permission beyond the user's request. No automatic worker launch, Git merge, task restart, push, or deployment is implemented; worktrees are created and removed only by explicit `herdr_worktrees` calls.
 
@@ -145,6 +145,12 @@ some-command; printf '\n__TAG_%s__\n' "$?"
 Herdr lookups (claim, list, arm, and the select fact) are hard-bounded: three seconds, then the CLI is killed and the result is settled within a short grace even if a descendant still holds its output pipes; a timed-out lookup counts as failed, never as absent. Claims and lists never write into or report for a session that replaced the one they started in.
 
 Records are custom session entries of this conversation: reload/resume restores them; `/tree` navigation and `/orchestrate off` keep them; forks, clones, and new conversations see none. Identity is weak: Herdr exposes no launch-time token, and a worker without a reported session can never verify as a full match. A crash between `herdr agent start` and `claim` leaves the worker unrecorded. The declared model is what the orchestrator said, not a verified runtime model.
+
+### Owned-worker sidebar labels
+
+While orchestration is active with unreleased claims, matched workers show `pi · #2 review auth` (or their canonical harness) in Herdr's sidebar. Only the task is truncated, with `…`, to keep the whole label within 40 characters. Native state icons remain unchanged. One non-overlapping refresh runs about every 30 seconds, with immediate reconciliation on activation/restore and claim/release; it starts no model turn and reads no quotas, Git, or worktree information.
+
+Only terminal-and-session `match` records with a reported canonical agent are labelled, on their live pane. Workers without session/agent reports get no label. Release, `/orchestrate off` (claims survive), session replacement, and shutdown clear this conversation's labels; crashes expire them via a 90-second TTL. Two conversations claiming one pane are non-exclusive: last writer wins. Lookup→publish is not atomic; TTL bounds residual staleness, not the race itself.
 
 ## Worktrees
 

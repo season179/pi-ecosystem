@@ -43,6 +43,8 @@ const ENV_KEYS = [
   'FAKE_HERDR_NOTIFICATION_DELAY_MS',
   'FAKE_HERDR_NOTIFICATION_EXIT_CODE',
   'FAKE_HERDR_AGENTS_FILE',
+  'FAKE_HERDR_METADATA_LOG',
+  'FAKE_HERDR_METADATA_DELAY_MS',
   'FAKE_HERDR_WORKTREE_FILE',
   'HERDR_WORKSPACE_ID',
   'PATH',
@@ -213,6 +215,8 @@ async function createHarness(
   delete process.env.FAKE_HERDR_NOTIFICATION_EXIT_CODE;
   process.env.FAKE_HERDR_AGENTS_FILE = join(dir, 'agents.json');
   writeFileSync(process.env.FAKE_HERDR_AGENTS_FILE, JSON.stringify({ agents: [] }));
+  process.env.FAKE_HERDR_METADATA_LOG = join(dir, 'metadata.jsonl');
+  delete process.env.FAKE_HERDR_METADATA_DELAY_MS;
 
   const pi = new FakePi();
   if (options.entries) pi.entries = [...options.entries];
@@ -283,6 +287,7 @@ afterEach(async () => {
     rmSync(harness.dir, { recursive: true, force: true });
     harness = undefined;
   }
+  vi.restoreAllMocks();
   for (const key of ENV_KEYS) {
     const value = originals.get(key);
     if (value === undefined) delete process.env[key];
@@ -780,6 +785,200 @@ async function listWorkers(current: Harness): Promise<any> {
 
 const observations = (result: any): Record<number, string> =>
   Object.fromEntries(result.details.workers.map((worker: any) => [worker.id, worker.observation]));
+
+function metadataEvents(): Array<{ phase: string; args: string[] }> {
+  const path = process.env.FAKE_HERDR_METADATA_LOG!;
+  return existsSync(path)
+    ? readFileSync(path, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+    : [];
+}
+
+function metadataCalls(): string[][] {
+  return metadataEvents()
+    .filter((event) => event.phase === 'applied')
+    .map((event) => event.args);
+}
+
+function fastSidebarTimer(): void {
+  const original = globalThis.setTimeout;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback, delay, ...args) =>
+    original(callback, delay === 30_000 ? 50 : delay, ...args)) as typeof setTimeout);
+}
+
+const flagValue = (args: string[], flag: string): string => args[args.indexOf(flag) + 1]!;
+
+describe.sequential('herdr worker sidebar', () => {
+  it('labels only matches on the live pane with the canonical agent and guard', async () => {
+    const current = await createHarness(0, { promoted: false });
+    const agents = [
+      liveAgent('launch-alias', 'w1:p2', 'term-1', '/s/1'),
+      { ...liveAgent('other-alias', 'w1:p3', 'term-2', '/s/2'), agent: 'claude' },
+      liveAgent('unverified', 'w1:p4', 'term-3'),
+      liveAgent('replaced', 'w1:p5', 'term-4', '/s/4'),
+      liveAgent('absent', 'w1:p6', 'term-5', '/s/5'),
+      liveAgent('unknown', 'w1:p7', 'term-6', '/s/6'),
+      { ...liveAgent('missing-agent', 'w1:p8', 'term-7', '/s/7'), agent: undefined },
+    ];
+    setAgents({ agents });
+    for (const agent of agents) {
+      await current.pi.execute('herdr_workers', {
+        action: 'claim',
+        target: agent.name,
+        task: agent.name === 'launch-alias' ? '😀'.repeat(50) : 'review auth',
+        model: 'not-the-harness',
+      });
+    }
+    assert.deepEqual(metadataCalls(), [], 'inactive claims do not label');
+    setAgents({
+      agents: [
+        { ...agents[0], pane_id: 'w9:p9' },
+        agents[1]!,
+        agents[2]!,
+        { ...agents[3], agent_session: { value: '/s/replacement' } },
+        { ...agents[5], agent_session: undefined },
+        agents[6]!,
+      ],
+      lookupDelayMs: 300,
+    });
+    current.pi.appendEntry('pi-herdr-orchestration', {
+      active: true,
+      sessionId: current.pi.sessionId,
+      source: 'command',
+      at: new Date().toISOString(),
+    });
+    await current.pi.emit('session_start', { reason: 'resume' });
+    assert.deepEqual(metadataCalls(), [], 'startup does not wait for sidebar refresh');
+    await waitFor(() => metadataCalls().length >= 2, 'restored match labels');
+    const calls = metadataCalls();
+    assert.equal(calls.length, 2, 'only two matches have canonical agents');
+    assert.deepEqual(
+      calls.map((args) => args.slice(0, 3)),
+      [
+        ['pane', 'report-metadata', 'w9:p9'],
+        ['pane', 'report-metadata', 'w1:p3'],
+      ],
+    );
+    assert.deepEqual(
+      calls.map((args) => flagValue(args, '--agent')),
+      ['pi', 'claude'],
+    );
+    assert.equal(flagValue(calls[0]!, '--display-agent'), `pi · #1 ${'😀'.repeat(31)}…`);
+    assert.equal([...flagValue(calls[0]!, '--display-agent')].length, 40);
+    assert.equal(flagValue(calls[1]!, '--display-agent'), 'claude · #2 review auth');
+    for (const args of calls) {
+      assert.equal(flagValue(args, '--ttl-ms'), '90000');
+      assert.equal(flagValue(args, '--source'), 'pi-herdr:session-a');
+    }
+    setAgents({ agents: [], lookup: 'fail' });
+    await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+    await current.pi.commands.get('orchestrate')!.handler('off', current.pi.ctx);
+    assert.equal(metadataCalls().filter((args) => args.includes('--display-agent')).length, 2);
+  });
+
+  it('/orchestrate off clears labels and stops refresh with claims retained', async () => {
+    fastSidebarTimer();
+    const current = await createHarness(0);
+    const agent = liveAgent('worker', 'w1:p2', 'term-a', '/s/a');
+    setAgents({ agents: [agent] });
+    await current.pi.execute('herdr_workers', { action: 'claim', target: 'worker', task: 'Fix X' });
+    await waitFor(() => metadataCalls().length >= 2, 'periodic refresh');
+    const entries = vi.spyOn(current.pi.ctx.sessionManager, 'getEntries');
+    let staleRead = false;
+    entries.mockImplementationOnce(() => {
+      staleRead = true;
+      throw new Error('ctx is stale');
+    });
+    await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+    await waitFor(() => staleRead, 'stale context refresh');
+    await current.pi.commands.get('orchestrate')!.handler('off', current.pi.ctx);
+    assert.deepEqual(activeOrchestratorTools(current), []);
+    assert.equal(current.pi.orchestrationEntries().at(-1)!.active, false);
+    entries.mockRestore();
+    const calls = metadataCalls();
+    assert.ok(calls.at(-1)!.includes('--clear-display-agent'));
+    assert.equal(flagValue(calls.at(-1)!, '--source'), 'pi-herdr:session-a');
+    const eventsAfterOff = metadataEvents().length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(
+      metadataEvents().length,
+      eventsAfterOff,
+      'no background lookups or writes after off',
+    );
+    assert.equal((await listWorkers(current)).details.workers.length, 1);
+    await current.pi.emit('session_start', { reason: 'resume' });
+    const eventsAfterResume = metadataEvents().length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(
+      metadataEvents().length,
+      eventsAfterResume,
+      'restored off claims remain unlabelled',
+    );
+    await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+    await waitFor(() => metadataCalls().length > calls.length, 'reactivation label');
+  });
+
+  it('in-flight refresh cannot resurrect after release or session change; clears use the old source', async () => {
+    const current = await createHarness(0);
+    const agent = liveAgent('worker', 'w1:p2', 'term-a', '/s/a');
+    // Exercise both pre-publication lookup cancellation and already-started write draining.
+    for (const phase of ['lookup', 'start']) {
+      for (const cleanup of ['release', 'session']) {
+        await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+        setAgents({ agents: [agent] });
+        await current.pi.execute('herdr_workers', {
+          action: 'claim',
+          target: 'worker',
+          task: 'Fix X',
+        });
+        await waitFor(
+          () => metadataCalls().at(-1)?.includes('--display-agent') === true,
+          'initial label',
+        );
+        const oldSource = `pi-herdr:${current.pi.sessionId}`;
+        const before = metadataEvents().length;
+        if (phase === 'lookup') setAgents({ agents: [agent], lookupDelayMs: 300 });
+        else process.env.FAKE_HERDR_METADATA_DELAY_MS = '300';
+        await current.pi.commands.get('orchestrate')!.handler('', current.pi.ctx);
+        await waitFor(
+          () =>
+            metadataEvents()
+              .slice(before)
+              .some((event) => event.phase === phase),
+          'refresh in flight',
+        );
+        if (cleanup === 'release') {
+          await current.pi.execute('herdr_workers', { action: 'release', worker: 1 });
+        } else {
+          await current.pi.emit('session_shutdown');
+          const shutdownCalls = metadataCalls();
+          assert.ok(
+            shutdownCalls.at(-1)!.includes('--clear-display-agent'),
+            `${phase}/shutdown: final operation is clear`,
+          );
+          assert.equal(flagValue(shutdownCalls.at(-1)!, '--source'), oldSource);
+          const afterShutdown = metadataEvents().length;
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          assert.equal(metadataEvents().length, afterShutdown, `${phase}/shutdown: no late write`);
+          current.pi.sessionId += '-next';
+          await current.pi.emit('session_start', { reason: 'new' });
+        }
+        const calls = metadataCalls();
+        assert.ok(
+          calls.at(-1)!.includes('--clear-display-agent'),
+          `${phase}/${cleanup}: final operation is clear`,
+        );
+        assert.equal(flagValue(calls.at(-1)!, '--source'), oldSource);
+        const count = metadataEvents().length;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assert.equal(metadataEvents().length, count, `${phase}/${cleanup}: no late refresh`);
+        delete process.env.FAKE_HERDR_METADATA_DELAY_MS;
+      }
+    }
+  }, 10_000);
+});
 
 describe.sequential('herdr worker ledger', () => {
   const SOL = liveAgent('sol', 'w1:p2', 'term-a', '/s/a.jsonl');

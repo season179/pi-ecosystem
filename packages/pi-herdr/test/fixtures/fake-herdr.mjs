@@ -7,6 +7,19 @@ import { join } from 'node:path';
 const behavior = process.env.FAKE_HERDR_BEHAVIOR ?? 'ok';
 const delayMs = Number(process.env.FAKE_HERDR_DELAY_MS ?? '0');
 const args = process.argv.slice(2);
+const metadataLog = process.env.FAKE_HERDR_METADATA_LOG;
+const logMetadata = (phase) => {
+  if (metadataLog) appendFileSync(metadataLog, `${JSON.stringify({ phase, args })}\n`);
+};
+if (args[0] === 'pane' && args[1] === 'report-metadata') {
+  logMetadata('start');
+  const delay = args.includes('--display-agent')
+    ? Number(process.env.FAKE_HERDR_METADATA_DELAY_MS ?? '0')
+    : 0;
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  logMetadata('applied');
+  process.exit(); // report-metadata succeeds with an empty body, not JSON.
+}
 
 if (args[0] === 'notification') {
   const logPath = process.env.FAKE_HERDR_NOTIFICATION_LOG;
@@ -121,6 +134,7 @@ if (agentsFile && agentCommand) {
     (agentCommand === 'wait' && state.wait !== undefined) ||
     (agentCommand === 'read' && state.read !== undefined);
   if (handled) {
+    if (agentCommand === 'list') logMetadata('lookup');
     if (state.lookupDelayMs > 0 && (agentCommand === 'get' || agentCommand === 'list')) {
       await new Promise((resolve) => setTimeout(resolve, state.lookupDelayMs));
     }

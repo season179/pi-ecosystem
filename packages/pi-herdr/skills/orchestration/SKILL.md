@@ -45,7 +45,8 @@ For brainstorming and planning, normally discuss and debate with another agent. 
 
 - Idle/done is a signal to inspect, not proof of delivery. Immediate idle can precede work: check evidence and rearm, without blindly resubmitting.
 - Restored role restores recorded worker claims and worktree records, **not watches, supervision, or verified identity**. Reconcile from `herdr_workers list` and `herdr_worktrees list` before rearming; never claim unwatched work is supervised.
-- `/orchestrate off` stops watches, including command-watch children, **not workers**; it does not erase history. Honor pause/stop and leave time for deadline handoffs; never restart paused work automatically.
+- Active orchestration with unreleased claims labels matched live worker panes as `<canonical agent> · #<n> <task>` (40 characters, task-only truncation). Refresh is about 30 seconds; release/off/session change/shutdown clear labels, crashes expire them after 90 seconds. Session/agent reports are required; no nonmatch labels. Claims are non-exclusive (two conversations: last writer wins); lookup→publish is not atomic, and TTL only bounds staleness.
+- `/orchestrate off` clears sidebar labels and stops watches, including command-watch children, **not workers**; claims survive and it does not erase history. Honor pause/stop and leave time for deadline handoffs; never restart paused work automatically.
 
 ## Load detail only when needed
 

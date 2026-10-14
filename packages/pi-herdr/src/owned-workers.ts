@@ -34,6 +34,8 @@ export type Observation = 'match' | 'session unverified' | 'replaced' | 'absent'
 export interface LiveAgent {
   identity: AgentIdentity;
   name?: string;
+  /** Canonical harness, not the launch alias (`name`). */
+  agent?: string;
   status?: string;
 }
 
@@ -80,10 +82,12 @@ export function liveAgentFrom(value: unknown): LiveAgent | undefined {
   if (paneId === undefined || terminalId === undefined) return undefined;
   const session = normalizeSession(value.agent_session);
   const name = nonEmpty(value.name);
+  const agent = nonEmpty(value.agent);
   const status = nonEmpty(value.agent_status);
   return {
     identity: { paneId, terminalId, ...(session ? { session } : {}) },
     ...(name ? { name } : {}),
+    ...(agent ? { agent } : {}),
     ...(status ? { status } : {}),
   };
 }
