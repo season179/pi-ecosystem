@@ -54,6 +54,7 @@ function copySpec(spec: WatchSpec): WatchSpec {
     return {
       ...spec,
       ...(spec.until === undefined ? {} : { until: [...spec.until] }),
+      ...(spec.identity === undefined ? {} : { identity: { ...spec.identity } }),
     };
   }
   return { ...spec };
@@ -191,6 +192,15 @@ export function validateWatchSpec(spec: unknown): asserts spec is WatchSpec {
       ) {
         throw new Error('agent watch until must be an array of strings');
       }
+      if (
+        value.identity !== undefined &&
+        (typeof value.identity !== 'object' ||
+          value.identity === null ||
+          typeof (value.identity as Record<string, unknown>).paneId !== 'string' ||
+          typeof (value.identity as Record<string, unknown>).terminalId !== 'string')
+      ) {
+        throw new Error('agent watch identity requires paneId and terminalId strings');
+      }
       validateTimeout(value.timeoutMs, false);
       return;
     case 'output': {
@@ -229,7 +239,8 @@ export function validateWatchSpec(spec: unknown): asserts spec is WatchSpec {
 export function buildWatchArgs(spec: WatchSpec): string[] {
   validateWatchSpec(spec);
   if (spec.mode === 'agent') {
-    const args = ['agent', 'wait', spec.target];
+    // A resolved snapshot pins the waiter to that pane, not a reusable name.
+    const args = ['agent', 'wait', spec.identity?.paneId ?? spec.target];
     for (const until of spec.until ?? []) args.push('--until', until);
     if (spec.timeoutMs !== undefined) {
       args.push('--timeout', String(spec.timeoutMs));

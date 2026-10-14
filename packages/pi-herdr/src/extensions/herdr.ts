@@ -23,11 +23,27 @@ import { createJevOpener } from '../jev.js';
 import { fetchCodexQuota } from '../quota.js';
 import { decideDelivery, type DeliveryDecision } from '../policy.js';
 import {
+  compareIdentity,
+  findRecord,
+  formatIdentity,
+  formatObservedWorker,
+  liveAgentFrom,
+  lookupAgent,
+  observeWorkers,
+  readWorkerRecords,
+  resultAgent,
+  WORKER_ENTRY_TYPE,
+  type AgentIdentity,
+  type ClaimEntry,
+  type ReleaseEntry,
+} from '../owned-workers.js';
+import {
   formatQuotaLine,
   formatStatusChip,
   formatWatchCard,
   formatWatchLine,
   summarizeCommand,
+  type WatchIdentityVerdict,
 } from '../render.js';
 import {
   formatSelection,
@@ -49,6 +65,7 @@ const ORCHESTRATOR_TOOL_NAMES = [
   'herdr_watch',
   'herdr_unwatch',
   'herdr_watches',
+  'herdr_workers',
 ] as const;
 const ORCHESTRATOR_TOOL_NAME_SET: ReadonlySet<string> = new Set(ORCHESTRATOR_TOOL_NAMES);
 
@@ -94,6 +111,26 @@ const UnwatchParams = Type.Object({
   id: Type.Optional(Type.Number({ description: 'Watch ID to stop' })),
   all: Type.Optional(Type.Boolean({ description: 'Stop every armed watch' })),
 });
+
+const WorkersParams = Type.Object({
+  action: StringEnum(['list', 'claim', 'release'] as const),
+  target: Type.Optional(
+    Type.String({ description: 'claim only: live agent name or pane ID of the worker you own' }),
+  ),
+  task: Type.Optional(
+    Type.String({ description: 'claim: short task summary; required on the first claim' }),
+  ),
+  report: Type.Optional(Type.String({ description: 'claim: report path the worker will write' })),
+  model: Type.Optional(
+    Type.String({ description: 'claim: model you launched it with (recorded as declared)' }),
+  ),
+  worker: Type.Optional(
+    Type.Number({ description: 'release only: worker number shown by list or claim' }),
+  ),
+});
+
+const WORKERS_DESCRIPTION =
+  'Record which Herdr workers this orchestrator owns. claim right after a successful `herdr agent start` (before the substantive prompt), or to adopt an existing worker you are authorized to control; list to reconcile recorded workers against live Herdr state; release after a verified quit or handoff. Launches nothing and quits nothing; release is not quit, and herdr_unwatch is not release. Records survive reload/resume of this conversation only; a crash between launch and claim leaves the worker unrecorded.';
 
 const SELECT_DESCRIPTION =
   "Ask Jev who should do a piece of work: you inline, or a new worker (harness + model). Call it BEFORE deciding to do a task inline or delegate it, and before EVERY new worker launch. Supply facts only: the task brief, relevant context, purpose, and for review/discussion/debate the models that authored the work or position (provenance). Follow the result. Override only when outcome is 'failed' (Jev unavailable, tool error); cannot_select and needs_context are valid answers, not failures. Starts no worker and polls nothing. Never include secrets.";
@@ -398,7 +435,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
   };
 
   const OFF_DISCLOSURE =
-    'workers were NOT stopped and conversation history is unchanged; resolve any outstanding supervision deliberately.';
+    'workers were NOT stopped and conversation history is unchanged; recorded worker claims are kept; resolve any outstanding supervision deliberately.';
 
   const buildGuidance = (): string => {
     const skill = loadOrchestrationSkill();
@@ -447,26 +484,44 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       }
 
       let tail: string | undefined;
-      if (config.includeTailLines > 0 && record.spec.mode === 'agent' && outcome.kind === 'fired') {
-        const tailResult = await runHerdr(
-          [
-            'agent',
-            'read',
-            record.spec.target,
-            '--source',
-            'recent-unwrapped',
-            '--lines',
-            String(config.includeTailLines),
-          ],
-          { timeoutMs: 5_000 },
-        );
-        if (tailResult.exitCode === 0) {
-          tail = extractTail(tailResult.json, tailResult.stdout);
+      let identityVerdict: WatchIdentityVerdict | undefined;
+      if (record.spec.mode === 'agent' && outcome.kind === 'fired') {
+        // The waited-on pane may now host a different agent. Attribute state and read the tail
+        // only after both the wait result and a fresh lookup match the arm-time snapshot.
+        const snapshot = record.spec.identity;
+        let verdict = compareIdentity(snapshot, liveAgentFrom(resultAgent(outcome.json))?.identity);
+        if (verdict === 'match' && config.includeTailLines > 0) {
+          const current = await lookupAgent(snapshot!.paneId);
+          verdict = current.ok ? compareIdentity(snapshot, current.agent.identity) : 'unverified';
+          if (verdict === 'match') {
+            // Residual race: the pane can still change between this lookup and the read.
+            const tailResult = await runHerdr(
+              [
+                'agent',
+                'read',
+                snapshot!.paneId,
+                '--source',
+                'recent-unwrapped',
+                '--lines',
+                String(config.includeTailLines),
+              ],
+              { timeoutMs: 5_000 },
+            );
+            if (tailResult.exitCode === 0) {
+              tail = extractTail(tailResult.json, tailResult.stdout);
+            }
+          }
         }
+        // Independent of tail configuration: only a verified identity gets state, tail, or toast.
+        identityVerdict = verdict === 'match' ? 'verified' : verdict;
       }
       if (record.spec.mode === 'command') {
         tail = lastLines([outcome.stdout, outcome.stderr].filter(Boolean).join('\n'), 10);
-      } else if (tail === undefined && outcome.json === undefined) {
+      } else if (
+        tail === undefined &&
+        outcome.json === undefined &&
+        identityVerdict === undefined
+      ) {
         tail = lastLines(outcome.stdout || outcome.stderr, 10);
       }
 
@@ -489,12 +544,18 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       });
       wakesUsed = delivery.wakesUsedAfter;
       telemetrySnapshot = { delivery, wakeBudget: config.wakeBudget };
-      const content = formatWatchCard(record, outcome, tail, {
-        reason: delivery.reason,
-        wakesUsedAfter: delivery.wakesUsedAfter,
-        wakeBudget: config.wakeBudget,
-        countsAsWake: delivery.countsAsWake,
-      });
+      const content = formatWatchCard(
+        record,
+        outcome,
+        tail,
+        {
+          reason: delivery.reason,
+          wakesUsedAfter: delivery.wakesUsedAfter,
+          wakeBudget: config.wakeBudget,
+          countsAsWake: delivery.countsAsWake,
+        },
+        identityVerdict,
+      );
       pi.sendMessage(
         {
           customType: WATCH_MESSAGE_TYPE,
@@ -527,12 +588,19 @@ export default function herdrExtension(pi: ExtensionAPI): void {
         } catch {
           // Exhaustion notifications are best-effort; the latch stays set.
         }
+        // The session may have been replaced during that I/O; deliver nothing more to it.
+        if (generation !== sessionGeneration) {
+          writeTelemetry(record, outcome, telemetrySnapshot);
+          telemetryWritten = true;
+          return;
+        }
       }
 
       const state = record.spec.mode === 'agent' ? extractAgentState(outcome.json) : undefined;
       if (
         record.spec.mode === 'agent' &&
         outcome.kind === 'fired' &&
+        identityVerdict === 'verified' &&
         state !== undefined &&
         config.toastOn.includes(state)
       ) {
@@ -583,7 +651,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     name: 'herdr_orchestrate',
     label: 'Herdr Orchestrate',
     description:
-      "Activate herdr orchestration for this session: enables herdr_select/herdr_watch/herdr_unwatch/herdr_watches and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
+      "Activate herdr orchestration for this session: enables herdr_select/herdr_watch/herdr_unwatch/herdr_watches/herdr_workers and returns the orchestration workflow to follow. Call this ONLY when the user explicitly asks you to act as the orchestrator (e.g. 'you are the orchestrator', 'dispatch this to workers'). Never call it on your own initiative or because a worker brief mentions orchestration. Activation starts no workers.",
     parameters: Type.Object({}),
     executionMode: 'sequential',
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -622,11 +690,45 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     ],
     parameters: WatchParams,
     executionMode: 'sequential',
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (manager === undefined) throw new Error('no active session');
+      const mode = params.mode ?? 'agent';
+      let identity: AgentIdentity | undefined;
+      let claimNote: string | undefined;
+      if (mode === 'agent' && params.target?.trim()) {
+        // Snapshot identity once; a failed lookup still arms the watch as before.
+        const generation = sessionGeneration;
+        const lookup = await lookupAgent(params.target, signal);
+        // Cancellation is not a lookup failure: never start a waiter for a cancelled call.
+        if (signal?.aborted) throw new Error('herdr_watch cancelled; watch not armed');
+        if (generation !== sessionGeneration || manager === undefined) {
+          throw new Error('session changed while resolving the watch target; watch not armed');
+        }
+        if (lookup.ok) {
+          identity = lookup.agent.identity;
+          const claimed = readWorkerRecords(
+            ctx.sessionManager.getEntries(),
+            ctx.sessionManager.getSessionId(),
+          ).some(
+            (record) =>
+              !record.released &&
+              record.identity.terminalId === identity!.terminalId &&
+              (record.identity.session === undefined ||
+                record.identity.session === identity!.session),
+          );
+          if (!claimed) {
+            claimNote = 'not a claimed worker; claim it with herdr_workers if you own it.';
+          }
+        } else {
+          claimNote = `identity lookup failed (${lookup.error}); claim status unknown${
+            config.includeTailLines > 0 ? ' and the fired card will omit the tail' : ''
+          }.`;
+        }
+      }
       const specInput = {
-        mode: params.mode ?? 'agent',
+        mode,
         ...(params.target === undefined ? {} : { target: params.target }),
+        ...(identity === undefined ? {} : { identity }),
         ...(params.until === undefined ? {} : { until: params.until }),
         ...(params.match === undefined ? {} : { match: params.match }),
         ...(params.regex === undefined ? {} : { regex: params.regex }),
@@ -648,7 +750,9 @@ export default function herdrExtension(pi: ExtensionAPI): void {
         content: [
           {
             type: 'text',
-            text: `watch #${record.id} armed on ${armedOn} — ${deliveryPromise}`,
+            text: `watch #${record.id} armed on ${armedOn} — ${deliveryPromise}${
+              claimNote ? `\n${claimNote}` : ''
+            }`,
           },
         ],
         details: { watchId: record.id },
@@ -708,6 +812,165 @@ export default function herdrExtension(pi: ExtensionAPI): void {
           wakesUsed,
           wakeBudget: config.wakeBudget,
           exhausted: config.wakeBudget > 0 && wakesUsed >= config.wakeBudget,
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: 'herdr_workers',
+    label: 'Herdr Workers',
+    description: WORKERS_DESCRIPTION,
+    promptSnippet: 'Claim, list, or release the Herdr workers this orchestrator owns',
+    parameters: WorkersParams,
+    executionMode: 'sequential',
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (manager === undefined) throw new Error('no active session');
+      const sessionId = ctx.sessionManager.getSessionId();
+      const readRecords = () => readWorkerRecords(ctx.sessionManager.getEntries(), sessionId);
+
+      if (params.action === 'claim') {
+        const target = params.target?.trim();
+        if (!target) throw new Error('claim requires target: the worker agent name or pane ID');
+        const generation = sessionGeneration;
+        const lookup = await lookupAgent(target, signal);
+        // Never append into a session that replaced the one this claim started in.
+        if (generation !== sessionGeneration) {
+          throw new Error('session changed during the Herdr lookup; nothing recorded');
+        }
+        if (!lookup.ok) {
+          throw new Error(`could not resolve ${target}: ${lookup.error}; nothing recorded`);
+        }
+        const identity = lookup.agent.identity;
+        const records = readRecords();
+        const existing = findRecord(records, identity);
+        const task = params.task?.trim();
+        if (!task && !existing?.task) {
+          throw new Error('task is required on the first claim; nothing recorded');
+        }
+        const report = params.report?.trim();
+        const model = params.model?.trim();
+        const entry: ClaimEntry = {
+          action: 'claim',
+          sessionId,
+          at: new Date().toISOString(),
+          ...identity,
+          ...(task ? { task } : {}),
+          ...(report ? { report } : {}),
+          ...(model ? { model } : {}),
+        };
+        pi.appendEntry(WORKER_ENTRY_TYPE, entry);
+        const updated = readRecords();
+        const record = findRecord(updated, identity)!;
+        const others = updated.filter(
+          (other) =>
+            other !== record &&
+            !other.released &&
+            (other.identity.paneId === identity.paneId ||
+              other.identity.terminalId === identity.terminalId),
+        );
+        const verb =
+          existing === undefined ? 'claimed' : existing.released ? 'reclaimed' : 'updated';
+        const lines = [
+          `${verb} worker #${record.id}: ${formatIdentity(identity)}`,
+          ...(identity.session
+            ? []
+            : [
+                'session unverified: Herdr reported no session, so this record can never verify as a full match.',
+              ]),
+          `task: ${record.task ?? '(none recorded)'}`,
+          ...(record.report ? [`report: ${record.report}`] : []),
+          `declared model: ${record.model ?? 'unknown'}`,
+          ...others.map(
+            (other) =>
+              `#${other.id} (a different identity on this pane or terminal) stays recorded until released.`,
+          ),
+          'Ownership only: nothing was launched, prompted, or watched.',
+        ];
+        return {
+          content: [{ type: 'text', text: lines.join('\n') }],
+          details: { worker: record },
+        };
+      }
+
+      if (params.action === 'release') {
+        const id = params.worker;
+        if (id === undefined) {
+          throw new Error('release requires worker: the number shown by herdr_workers list');
+        }
+        const record = readRecords().find((candidate) => candidate.id === id);
+        if (record === undefined) throw new Error(`no recorded worker #${id} in this conversation`);
+        if (record.released) {
+          return {
+            content: [{ type: 'text', text: `worker #${id} was already released` }],
+            details: { worker: record },
+          };
+        }
+        const entry: ReleaseEntry = {
+          action: 'release',
+          sessionId,
+          at: new Date().toISOString(),
+          terminalId: record.identity.terminalId,
+          ...(record.identity.session ? { session: record.identity.session } : {}),
+        };
+        pi.appendEntry(WORKER_ENTRY_TYPE, entry);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `released worker #${id} (${formatIdentity(record.identity)}). It was NOT quit and its watches were not stopped; this conversation no longer records owning it.`,
+            },
+          ],
+          details: { worker: { ...record, released: true } },
+        };
+      }
+
+      const records = readRecords();
+      const released = records.filter((record) => record.released).length;
+      const generation = sessionGeneration;
+      const observed = await observeWorkers(records, signal);
+      // Never report one conversation's records, or another session's watches, as this one's.
+      if (generation !== sessionGeneration) {
+        throw new Error('session changed during the Herdr lookup; list discarded');
+      }
+      const armed = (manager?.list() ?? []).filter(
+        (watch) => watch.status === 'armed' && watch.spec.mode === 'agent',
+      );
+      const watchesFor = (identity: AgentIdentity): number[] =>
+        armed
+          .filter((watch) => {
+            if (watch.spec.mode !== 'agent') return false;
+            const snapshot = watch.spec.identity;
+            if (snapshot === undefined) return watch.spec.target === identity.paneId;
+            return (
+              snapshot.terminalId === identity.terminalId &&
+              (identity.session === undefined || snapshot.session === identity.session)
+            );
+          })
+          .map((watch) => watch.id);
+      const hidden = released > 0 ? ` (${released} released, not shown)` : '';
+      const lines =
+        observed.workers.length === 0
+          ? [`no recorded workers in this conversation${hidden}`]
+          : [
+              `${observed.workers.length} recorded worker${observed.workers.length === 1 ? '' : 's'} in this conversation${hidden}. Observations come from one Herdr lookup now; they are not delivery evidence, and never-claimed workers are not listed.`,
+              ...(observed.lookup === 'failed'
+                ? ['Herdr lookup failed: every observation is unknown, not absent.']
+                : []),
+              ...observed.workers.map((worker) =>
+                formatObservedWorker(worker, watchesFor(worker.record.identity)),
+              ),
+            ];
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+        details: {
+          lookup: observed.lookup,
+          released,
+          workers: observed.workers.map((worker) => ({
+            ...worker.record,
+            observation: worker.observation,
+            watches: watchesFor(worker.record.identity),
+          })),
         },
       };
     },
@@ -933,11 +1196,16 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       promoted = state.own.active;
       setOrchestratorToolsActive(promoted);
       if (promoted) {
-        recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone and workers dispatched earlier are not being supervised until you verify them and re-arm.`;
+        // Records restore; their live identity and supervision do not.
+        const recorded = readWorkerRecords(ctx.sessionManager.getEntries(), sessionId).filter(
+          (record) => !record.released,
+        ).length;
+        const workers = `${recorded} recorded worker${recorded === 1 ? '' : 's'}; supervision not restored; run herdr_workers list`;
+        recoveryNote = `Orchestration was restored for this session (${reason}); any watches armed before that point are gone. ${workers} and verify identity and reports before re-arming.`;
         if (firstNotice) {
           notify(
             ctx,
-            `orchestration restored for this session (${reason}): armed watches were NOT restored; reconcile owned workers before re-arming.`,
+            `orchestration restored for this session (${reason}): armed watches were NOT restored; ${workers}.`,
             'warning',
           );
         }

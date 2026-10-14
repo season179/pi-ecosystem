@@ -4,8 +4,8 @@ Read before reconciling after reload/resume/fork, handling missing evidence, pau
 
 ## Reconcile before acting
 
-1. Read the current conversation and any saved handoff for scope and authorization. Historical work is not fresh authority. Reload/resume may restore the role, but never assume watches or worker ownership were restored. New sessions and forks do not inherit owned work.
-2. Match each previously owned worker's recorded pane **and session identity** against live Herdr state. Pane visibility, labels and idle badges alone do not establish identity or delivery. Reusing an available shell is distinct from adopting a running worker.
+1. Read the current conversation and any saved handoff for scope and authorization. Historical work is not fresh authority. Reload/resume restores the role and recorded worker claims, never watches, supervision, or verified identity. New sessions and forks do not inherit owned work.
+2. Start from `herdr_workers list`: it matches each recorded worker's terminal **and session identity** against live Herdr state. Only `match` is verified; `session unverified`, `unknown`, `replaced` and `absent` need independent evidence or stay unresolved. The list cannot discover workers that were never claimed (for example, a crash between launch and claim), and it cannot grant a new conversation ownership; adopt only with authorization, by explicit claim. Pane visibility, labels and idle badges alone do not establish identity or delivery. Reusing an available shell is distinct from adopting a running worker.
 3. Read bounded report/artifact evidence. If a report has expired or disappeared, state that evidence is missing; preserve unfinished changes and recover from actual artifacts where possible. Do not invent completion or silently repeat the task.
 4. For confirmed owned work that is still authorized to continue, deliberately rearm the appropriate watch. Otherwise preserve and hand off, or gracefully quit only when authorized. Never claim supervision until the watch is armed, and never restart work after a user pause/stop.
 5. Resume the authorized delivery step: verify artifacts, integrate serially where permitted, and communicate the usable result. Do not stop merely because a worker report exists.
@@ -17,7 +17,7 @@ Before a pause/reload or deadline, stop starting work early enough to verify and
 ```text
 Task and current authorization:
 Checkout/branch and edit ownership:
-Owned workers: pane ID + harness/session identity
+Owned workers: from herdr_workers list (number, pane/terminal/session, observation, task, report)
 Reports and artifacts: paths; missing/unverified items
 State: implemented / checked / applied / blocked / awaiting decision
 Unresolved decision:

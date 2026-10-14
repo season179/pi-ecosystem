@@ -55,14 +55,14 @@ An agent becomes the orchestrator when you explicitly ask it, for example:
 
 > You are the orchestrator — dispatch this to the workers.
 
-Use `/orchestrate` as the single entry point. It activates the bundled [workflow](skills/orchestration/SKILL.md), `herdr_select`, `herdr_watch`, `herdr_unwatch`, and `herdr_watches`, without starting a model turn or launching workers. Repeating it is idempotent. Unknown arguments are rejected.
+Use `/orchestrate` as the single entry point. It activates the bundled [workflow](skills/orchestration/SKILL.md), `herdr_select`, `herdr_watch`, `herdr_unwatch`, `herdr_watches`, and `herdr_workers`, without starting a model turn or launching workers. Repeating it is idempotent. Unknown arguments are rejected.
 
 Natural-language requests use the always-active `herdr_orchestrate` tool through the same activation path; this depends on the model following its explicit-request instruction. The tool returns immediate workflow guidance; subsequent agent runs receive scoped system-prompt guidance while active. The skill is hidden from automatic model invocation so installation does not assign every worker the orchestrator role. It uses progressive disclosure: only the compact core workflow is injected; recovery procedures live in a `references/` file with explicit read-when triggers. Injected guidance includes the skill's absolute directory so reference links work from any project cwd. Reference bodies are never eagerly injected.
 
 - `PI_HERDR_ORCHESTRATOR=1 pi` remains an explicit opt-in for scripted orchestrator starts, including genuinely new sessions in that process. A saved `off` wins for its conversation; forks/parent-linked sessions ignore this default. Never propagate it into worker launches.
-- `/orchestrate off` removes active guidance/tools and stops armed watches, including running command-watch children. It **does not quit workers** or erase prior conversation history. Resolve outstanding supervision deliberately.
+- `/orchestrate off` removes active guidance/tools and stops armed watches, including running command-watch children. It **does not quit workers**, erase recorded worker claims, or erase prior conversation history. Resolve outstanding supervision deliberately.
 - Reload/resume of the same conversation restores activation. A new conversation starts inactive unless explicitly configured; forks do not inherit activation or worker ownership. This replaces the old process-wide promotion behavior.
-- **Restored role is not restored supervision.** Watches are not persisted. After reload/resume, reconcile actual worker identity and report evidence before rearming; do not assume all visible panes are owned.
+- **Restored role is not restored supervision.** Watches are not persisted. Recorded worker claims restore, but their live identity is not re-verified until `herdr_workers list`. Reconcile actual worker identity and report evidence before rearming; do not assume all visible panes are owned.
 
 Activation grants no operational permission beyond the user's request. No automatic worker launch, Git integration, task restart, push, or deployment is implemented.
 
@@ -109,11 +109,13 @@ Routing policies, `herdr_route`, `/limits` and quota caches were removed. Legacy
 
 `herdr_watch` defaults to `mode: "agent"`. Every mode accepts optional `note` and `wake` fields; `wake` defaults to `true`. A wake-disabled watch still delivers a card but never starts an idle turn.
 
-- **`agent`** — requires a unique live agent name or pane ID in `target`. `until` defaults to Herdr's settled states (`idle`, `done`, or `blocked`). `timeoutMs` is optional; omitting it waits indefinitely.
+- **`agent`** — requires a unique live agent name or pane ID in `target`. `until` defaults to Herdr's settled states (`idle`, `done`, or `blocked`). `timeoutMs` is optional; omitting it waits indefinitely. Arming resolves the target once with `herdr agent get` (bounded) and snapshots its pane, terminal, and session; the waiter then targets that pane, not the name. If resolution fails, the watch still arms on the original target without a snapshot; if the tool call is cancelled during resolution, nothing is armed. The arm response adds one nonblocking line when the agent is not claimed by this conversation, or when the lookup failed.
 - **`output`** — requires a pane ID in `target` and exactly one string `match` or Rust-syntax `regex`. Herdr searches its default recent snapshot immediately, so existing output can match. `timeoutMs` is optional. pi-herdr does not expose Herdr's snapshot-source, line-count, or raw-ANSI options.
 - **`command`** — requires a non-empty shell `command` and a required `timeoutMs`. It runs as `/bin/sh -c` and inherits the Pi process's cwd and environment; there are no per-watch overrides. Any numeric exit code, including non-zero, is a completed outcome. Timeout or stop sends SIGTERM, then SIGKILL after a five-second grace period.
 
 Every supplied timeout must be a positive integer no greater than 2,147,483,647 milliseconds.
+
+**Identity on fire.** A fired agent watch compares the identity in the `herdr agent wait` result with the snapshot; with `includeTailLines` > 0, a fresh `herdr agent get` must also match before the tail is read by pane ID. Only a verified identity (terminal and session equal on every check) gets its settled state, tail, and `toastOn` notification attributed to the original worker, whatever `includeTailLines` is. If the pane now hosts a different agent, the card says so. A missing snapshot, session, or wait identity, or a failed lookup, makes the card say the identity is unverified and its state is not attributed; the tail is omitted. Nothing more is delivered for a watch whose session was replaced while its card or notifications were in flight. A residual race remains: the pane can change between that lookup and the read, so this narrows misattribution rather than making it atomic. A tail is never delivery evidence.
 
 `herdr_unwatch` stops one watch ID or all armed watches. `herdr_watches` lists records retained for the current Pi session, armed first. `/watches` provides an interactive list/stop picker when a UI is available. Watches do not survive a Pi session replacement or shutdown.
 
@@ -129,6 +131,18 @@ Prefer command mode for CI, builds, and deploys because it reports the exit code
 ```bash
 some-command; printf '\n__TAG_%s__\n' "$?"
 ```
+
+## Worker Ledger
+
+`herdr_workers` records which workers this orchestrator owns. It launches, prompts, watches, and quits nothing.
+
+- `claim` — `target` (agent name or pane ID), `task` (required on the first claim), optional `report` and `model`. One `herdr agent get` captures pane, terminal, and session identity; an unresolvable target records nothing. Claim right after `herdr agent start`, before the substantive prompt, or to adopt an existing worker you are authorized to control. Reclaiming the same identity merges supplied fields and never blanks omitted ones; a different identity on the same pane or terminal becomes a separate record.
+- `list` — joins unreleased records with one `herdr agent list`: `match` (terminal and session equal), `session unverified` (terminal equal, no session recorded), `replaced` (a different agent now holds the terminal or pane), `absent` (Herdr lists no agent there), or `unknown` (lookup failed, or any listed agent lacks pane/terminal identity, or the live session is missing; never treated as absent). A list whose session was replaced during the lookup is discarded rather than reported. It shows recorded task, report, declared model, and currently armed watches for each worker. Observations are computed, never stored, and are not delivery evidence.
+- `release` — `worker` number from `list`/`claim`. Release only relinquishes the record: it does **not** quit the worker or stop its watches, and `herdr_unwatch` does not release.
+
+Herdr lookups (claim, list, arm, and the select fact) are hard-bounded: three seconds, then the CLI is killed and the result is settled within a short grace even if a descendant still holds its output pipes; a timed-out lookup counts as failed, never as absent. Claims and lists never write into or report for a session that replaced the one they started in.
+
+Records are custom session entries of this conversation: reload/resume restores them; `/tree` navigation and `/orchestrate off` keep them; forks, clones, and new conversations see none. Identity is weak: Herdr exposes no launch-time token, and a worker without a reported session can never verify as a full match. A crash between `herdr agent start` and `claim` leaves the worker unrecorded. The declared model is what the orchestrator said, not a verified runtime model.
 
 ## Command Privacy
 
@@ -150,8 +164,8 @@ Optional `~/.pi/agent/herdr.json`; unknown or mistyped fields fail loudly:
 
 - `maxWatches` — maximum concurrently armed watches.
 - `wakeBudget` — maximum consecutive attempted idle wakes without interactive or RPC input; that input resets the counter. `0` disables automatic idle wakes, not card delivery.
-- `includeTailLines` — lines requested from `herdr agent read` after a fired agent watch; `0` disables that fetch. Rendering is capped at 20 lines. This does not disable command tails or raw CLI-error fallback tails.
-- `toastOn` — agent lifecycle states that request a best-effort Herdr notification after a fired agent watch; default `blocked`.
+- `includeTailLines` — lines requested from `herdr agent read` after a fired agent watch whose identity verified; `0` disables that fetch. Rendering is capped at 20 lines. This does not disable command tails or raw CLI-error fallback tails.
+- `toastOn` — agent lifecycle states that request a best-effort Herdr notification after a fired agent watch whose identity verified; default `blocked`.
 - `telemetryPath` — best-effort JSONL sink for every watch-child outcome, including timeout, error, stop, and stale-session outcomes; `""` disables it. A leading `~/` is expanded. Command text and output are omitted, but agent/output targets are recorded.
 
 When a positive wake budget is exhausted, cards continue to arrive without starting an idle turn. The footer and `herdr_watches` show the budget state. The first suppressed idle wake after session start or the latest interactive/RPC input requests one best-effort Herdr notification.

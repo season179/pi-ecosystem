@@ -7,69 +7,74 @@
  */
 
 /** A watch waits on an agent, pane output, or a bounded command. */
-export type WatchMode = "agent" | "output" | "command";
+export type WatchMode = 'agent' | 'output' | 'command';
 
 interface WatchSpecShared {
-	note?: string; // orchestrator's reminder, echoed in the wake card
-	wake: boolean; // may this watch triggerTurn an idle agent?
+  note?: string; // orchestrator's reminder, echoed in the wake card
+  wake: boolean; // may this watch triggerTurn an idle agent?
+}
+
+/** Herdr identity of one agent: where it runs and which conversation it is. */
+export interface AgentIdentity {
+  paneId: string;
+  terminalId: string;
+  session?: string; // normalized agent_session; absent when Herdr reports none
 }
 
 /** Wait for a herdr agent lifecycle state. */
 export interface AgentWatchSpec extends WatchSpecShared {
-	mode: "agent";
-	target: string;
-	until?: string[]; // herdr defaults if absent
-	timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
-	match?: never;
-	regex?: never;
-	command?: never;
+  mode: 'agent';
+  target: string;
+  identity?: AgentIdentity; // snapshot resolved at arm time; the waiter targets its pane
+  until?: string[]; // herdr defaults if absent
+  timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
+  match?: never;
+  regex?: never;
+  command?: never;
 }
 
 interface OutputWatchSpecShared extends WatchSpecShared {
-	mode: "output";
-	target: string;
-	timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
-	until?: never;
-	command?: never;
+  mode: 'output';
+  target: string;
+  timeoutMs?: number; // passed to herdr --timeout; absent = indefinite
+  until?: never;
+  command?: never;
 }
 
 /** Wait for exactly one literal or Rust-regex condition in pane output. */
 export type OutputWatchSpec = OutputWatchSpecShared &
-	(
-		| { match: string; regex?: never }
-		| { match?: never; regex: string }
-	);
+  ({ match: string; regex?: never } | { match?: never; regex: string });
 
 /** Run a bounded POSIX-shell command and fire whenever it exits. */
 export interface CommandWatchSpec extends WatchSpecShared {
-	mode: "command";
-	command: string;
-	timeoutMs: number;
-	target?: never;
-	until?: never;
-	match?: never;
-	regex?: never;
+  mode: 'command';
+  command: string;
+  timeoutMs: number;
+  target?: never;
+  until?: never;
+  match?: never;
+  regex?: never;
 }
 
 /** Declarative description of one non-blocking watch. */
 export type WatchSpec = AgentWatchSpec | OutputWatchSpec | CommandWatchSpec;
 
 /** Lifecycle of a watch record as seen by the orchestrator. */
-export type WatchStatus = "armed" | "fired" | "stopped";
+export type WatchStatus = 'armed' | 'fired' | 'stopped';
 
 /**
  * The public, immutable view of a watch (no handles to the child process).
  * Handed to renderers, commands, and the delivery policy.
  */
 export interface WatchRecordPublic {
-	id: number;
-	spec: WatchSpec;
-	startedAt: number; // epoch ms
-	status: WatchStatus;
+  id: number;
+  spec: WatchSpec;
+  startedAt: number; // epoch ms
+  status: WatchStatus;
 }
 
 /** Why a watch's child exited: natural fire, timeout, kill, or error. */
-export type OutcomeKind = "fired" | "timeout" | "killed" | "error";
+export type OutcomeKind = 'fired' | 'timeout' | 'killed' | 'error';
 
 /**
  * Result of a watch's child process closing. `onOutcome` receives this for
@@ -77,14 +82,14 @@ export type OutcomeKind = "fired" | "timeout" | "killed" | "error";
  * emitted JSON so downstream code never re-parses.
  */
 export interface WatchOutcome {
-	kind: OutcomeKind;
-	exitCode: number | null;
-	signal?: NodeJS.Signals; // present when the child closed because of a signal
-	durationMs: number;
-	stdout: string; // raw CLI stdout (may be JSON)
-	stderr: string;
-	json?: unknown; // parsed stdout JSON when parseable
-	errorJson?: unknown; // parsed stderr JSON when parseable
+  kind: OutcomeKind;
+  exitCode: number | null;
+  signal?: NodeJS.Signals; // present when the child closed because of a signal
+  durationMs: number;
+  stdout: string; // raw CLI stdout (may be JSON)
+  stderr: string;
+  json?: unknown; // parsed stdout JSON when parseable
+  errorJson?: unknown; // parsed stderr JSON when parseable
 }
 
 /**
@@ -92,28 +97,28 @@ export interface WatchOutcome {
  * keys or wrong types are rejected loudly via `ConfigError`.
  */
 export interface HerdrConfig {
-	maxWatches: number; // default 8
-	wakeBudget: number; // default 20; 0 disables auto-wake
-	includeTailLines: number; // default 20; 0 disables tail fetch
-	toastOn: string[]; // default ["blocked"]
-	telemetryPath: string; // default "~/.pi/agent/herdr-telemetry.jsonl", "" disables
+  maxWatches: number; // default 8
+  wakeBudget: number; // default 20; 0 disables auto-wake
+  includeTailLines: number; // default 20; 0 disables tail fetch
+  toastOn: string[]; // default ["blocked"]
+  telemetryPath: string; // default "~/.pi/agent/herdr-telemetry.jsonl", "" disables
 }
 
 /** One reported rate-limit window (5-hour, weekly, …) as OpenAI shaped it. */
 export interface QuotaWindow {
-	usedPercent: number;
-	windowSeconds: number;
-	resetAfterSeconds: number;
+  usedPercent: number;
+  windowSeconds: number;
+  resetAfterSeconds: number;
 }
 
 /** Usage fields safe to return from the Codex check. */
 export interface QuotaSnapshot {
-	checkedAt: string; // ISO 8601
-	allowed: boolean;
-	limitReached: boolean;
-	primary?: QuotaWindow;
-	secondary?: QuotaWindow;
-	planType?: string;
+  checkedAt: string; // ISO 8601
+  allowed: boolean;
+  limitReached: boolean;
+  primary?: QuotaWindow;
+  secondary?: QuotaWindow;
+  planType?: string;
 }
 
 /** Thrown by `loadHerdrConfig` for unknown keys, wrong types, or bad JSON. */

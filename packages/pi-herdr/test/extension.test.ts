@@ -21,6 +21,7 @@ const ENV_KEYS = [
   'FAKE_HERDR_NOTIFICATION_LOG',
   'FAKE_HERDR_NOTIFICATION_DELAY_MS',
   'FAKE_HERDR_NOTIFICATION_EXIT_CODE',
+  'FAKE_HERDR_AGENTS_FILE',
   'TYPESAFE_API_KEY',
 ] as const;
 
@@ -157,6 +158,8 @@ async function createHarness(
     sessionId?: string;
     parentSession?: string;
     reason?: string;
+    includeTailLines?: number;
+    toastOn?: string[];
   } = {},
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'pi-herdr-extension-'));
@@ -167,8 +170,8 @@ async function createHarness(
     JSON.stringify({
       maxWatches: 20,
       wakeBudget,
-      includeTailLines: 0,
-      toastOn: [],
+      includeTailLines: options.includeTailLines ?? 0,
+      toastOn: options.toastOn ?? [],
       telemetryPath,
     }),
   );
@@ -184,6 +187,8 @@ async function createHarness(
   process.env.FAKE_HERDR_NOTIFICATION_LOG = notificationPath;
   process.env.FAKE_HERDR_NOTIFICATION_DELAY_MS = String(options.notificationDelayMs ?? 0);
   delete process.env.FAKE_HERDR_NOTIFICATION_EXIT_CODE;
+  process.env.FAKE_HERDR_AGENTS_FILE = join(dir, 'agents.json');
+  writeFileSync(process.env.FAKE_HERDR_AGENTS_FILE, JSON.stringify({ agents: [] }));
 
   const pi = new FakePi();
   if (options.entries) pi.entries = [...options.entries];
@@ -204,7 +209,13 @@ async function injectedPrompt(current: Harness): Promise<string | undefined> {
   return results.find((result) => result?.systemPrompt !== undefined)?.systemPrompt;
 }
 
-const ORCHESTRATOR_TOOLS = ['herdr_select', 'herdr_watch', 'herdr_unwatch', 'herdr_watches'];
+const ORCHESTRATOR_TOOLS = [
+  'herdr_select',
+  'herdr_watch',
+  'herdr_unwatch',
+  'herdr_watches',
+  'herdr_workers',
+];
 
 function activeOrchestratorTools(current: Harness): string[] {
   return current.pi
@@ -388,7 +399,7 @@ describe.sequential('herdr extension attendance epochs', () => {
     assert.match(enabled.response.content[0].text, /you will be woken when it fires/u);
     assert.match(
       disabled.response.content[0].text,
-      /report will be delivered without starting a turn$/u,
+      /report will be delivered without starting a turn$/mu,
     );
     assert.doesNotMatch(disabled.response.content[0].text, /you will be woken/u);
   });
@@ -700,6 +711,262 @@ describe.sequential('herdr orchestration activation lifecycle', () => {
     assert.deepEqual(current.pi.messages, [], 'no quota messages are generated');
     const delivered = await arm(current);
     assert.equal(delivered.message.message.customType, 'pi-herdr-watch');
+  });
+});
+
+interface FakeAgentState {
+  agents: Array<Record<string, unknown>>;
+  lookup?: 'fail';
+  lookupDelayMs?: number;
+  wait?: Record<string, unknown>;
+  read?: string;
+}
+
+function setAgents(state: FakeAgentState): void {
+  writeFileSync(process.env.FAKE_HERDR_AGENTS_FILE!, JSON.stringify(state));
+}
+
+function liveAgent(
+  name: string,
+  pane: string,
+  terminal: string,
+  session?: string,
+  status = 'idle',
+): Record<string, unknown> {
+  return {
+    agent: 'pi',
+    name,
+    pane_id: pane,
+    terminal_id: terminal,
+    agent_status: status,
+    ...(session
+      ? { agent_session: { agent: 'pi', kind: 'path', source: 'herdr:pi', value: session } }
+      : {}),
+  };
+}
+
+function workerEntries(current: Harness): unknown[] {
+  return current.pi.entries.filter((entry) => entry.customType === 'pi-herdr-worker');
+}
+
+async function listWorkers(current: Harness): Promise<any> {
+  return current.pi.execute('herdr_workers', { action: 'list' });
+}
+
+const observations = (result: any): Record<number, string> =>
+  Object.fromEntries(result.details.workers.map((worker: any) => [worker.id, worker.observation]));
+
+describe.sequential('herdr worker ledger', () => {
+  const SOL = liveAgent('sol', 'w1:p2', 'term-a', '/s/a.jsonl');
+
+  it('keeps ownership across /orchestrate off, tree navigation and resume, but not into a fork', async () => {
+    const current = await createHarness(0);
+    setAgents({ agents: [SOL] });
+    await current.pi.execute('herdr_workers', { action: 'claim', target: 'sol', task: 'Fix X' });
+    const command = current.pi.commands.get('orchestrate')!;
+    await command.handler('off', current.pi.ctx);
+    await command.handler('', current.pi.ctx);
+    assert.deepEqual(observations(await listWorkers(current)), { 1: 'match' });
+
+    (current.pi.ctx as any).sessionManager.getBranch = () => [];
+    await current.pi.emit('session_start', { reason: 'resume' });
+    assert.deepEqual(observations(await listWorkers(current)), { 1: 'match' });
+    assert.match(
+      (await injectedPrompt(current))!,
+      /1 recorded worker; supervision not restored; run herdr_workers list/u,
+    );
+
+    current.pi.sessionId = 'session-fork';
+    current.pi.parentSession = '/saved/session-a.jsonl';
+    await current.pi.emit('session_start', { reason: 'fork' });
+    await command.handler('', current.pi.ctx);
+    const forked = await listWorkers(current);
+    assert.equal(forked.content[0].text, 'no recorded workers in this conversation');
+  });
+
+  it('claims, merges reclaims without blanking intent, and releases without quitting', async () => {
+    const current = await createHarness(0);
+    setAgents({ agents: [SOL] });
+    await assert.rejects(
+      current.pi.execute('herdr_workers', { action: 'claim', target: 'sol' }),
+      /task is required on the first claim; nothing recorded/u,
+    );
+    await assert.rejects(
+      current.pi.execute('herdr_workers', { action: 'claim', target: 'ghost', task: 'T' }),
+      /could not resolve ghost: agent target ghost not found; nothing recorded/u,
+    );
+    assert.equal(workerEntries(current).length, 0);
+
+    const claimed = await current.pi.execute('herdr_workers', {
+      action: 'claim',
+      target: 'sol',
+      task: 'Fix X',
+      report: '/tmp/a.md',
+      model: 'openai-codex/gpt-6.1-sol',
+    });
+    assert.match(claimed.content[0].text, /^claimed worker #1: pane w1:p2, terminal term-a/u);
+    const updated = await current.pi.execute('herdr_workers', {
+      action: 'claim',
+      target: 'w1:p2',
+      report: '/tmp/b.md',
+    });
+    assert.match(updated.content[0].text, /^updated worker #1/u);
+    assert.deepEqual(
+      [updated.details.worker.task, updated.details.worker.report, updated.details.worker.model],
+      ['Fix X', '/tmp/b.md', 'openai-codex/gpt-6.1-sol'],
+    );
+
+    const released = await current.pi.execute('herdr_workers', { action: 'release', worker: 1 });
+    assert.match(released.content[0].text, /It was NOT quit/u);
+    assert.equal(
+      (await listWorkers(current)).content[0].text,
+      'no recorded workers in this conversation (1 released, not shown)',
+    );
+    const reclaimed = await current.pi.execute('herdr_workers', { action: 'claim', target: 'sol' });
+    assert.match(reclaimed.content[0].text, /^reclaimed worker #1/u);
+    assert.equal(reclaimed.details.worker.task, 'Fix X');
+  });
+
+  it(
+    'distinguishes match, session unverified, replaced, absent and failed lookups',
+    { timeout: 15_000 },
+    async () => {
+      const current = await createHarness(0);
+      const plain = liveAgent('plain', 'w1:p3', 'term-b');
+      const reused = liveAgent('reused', 'w1:p4', 'term-c', '/s/c.jsonl');
+      const gone = liveAgent('gone', 'w1:p5', 'term-d', '/s/d.jsonl');
+      setAgents({ agents: [SOL, plain, reused, gone] });
+      for (const target of ['sol', 'plain', 'reused', 'gone']) {
+        await current.pi.execute('herdr_workers', { action: 'claim', target, task: target });
+      }
+      // Same terminal, new conversation: a replacement, not the claimed worker.
+      setAgents({
+        agents: [SOL, plain, liveAgent('reused', 'w1:p4', 'term-c', '/s/other.jsonl')],
+      });
+      assert.deepEqual(observations(await listWorkers(current)), {
+        1: 'match',
+        2: 'session unverified',
+        3: 'replaced',
+        4: 'absent',
+      });
+
+      setAgents({ agents: [SOL], lookup: 'fail' });
+      const failed = await listWorkers(current);
+      assert.deepEqual(observations(failed), {
+        1: 'unknown',
+        2: 'unknown',
+        3: 'unknown',
+        4: 'unknown',
+      });
+      assert.match(
+        failed.content[0].text,
+        /lookup failed: every observation is unknown, not absent/u,
+      );
+      const allUnknown = { 1: 'unknown', 2: 'unknown', 3: 'unknown', 4: 'unknown' };
+
+      // An incomplete list (a member without terminal identity) cannot prove absence.
+      setAgents({ agents: [SOL, { pane_id: 'w1:p5', agent_session: { value: '/s/d.jsonl' } }] });
+      assert.deepEqual(observations(await listWorkers(current)), allUnknown);
+
+      // A lookup whose descendant keeps the pipes open still settles near its bound, and a
+      // timed-out lookup is unknown even when the parent already exited 0 with valid output.
+      for (const lookup of ['hold-pipes', 'hold-pipes-exited']) {
+        setAgents({ agents: [SOL], lookup });
+        const started = Date.now();
+        assert.deepEqual(observations(await listWorkers(current)), allUnknown, lookup);
+        assert.ok(Date.now() - started < 4_500, `${lookup} took ${Date.now() - started}ms`);
+      }
+    },
+  );
+
+  it('never acts on a lookup that outlived its session or its cancellation', async () => {
+    const current = await createHarness(0);
+    setAgents({ agents: [SOL] });
+    await current.pi.execute('herdr_workers', { action: 'claim', target: 'sol', task: 'Fix X' });
+    setAgents({ agents: [SOL], lookupDelayMs: 300 });
+    const claim = current.pi.execute('herdr_workers', {
+      action: 'claim',
+      target: 'sol',
+      task: 'Other',
+    });
+    const list = current.pi.execute('herdr_workers', { action: 'list' });
+    current.pi.sessionId = 'session-b';
+    await current.pi.emit('session_start', { reason: 'new' });
+    await Promise.all([
+      assert.rejects(claim, /session changed during the Herdr lookup; nothing recorded/u),
+      assert.rejects(list, /session changed during the Herdr lookup; list discarded/u),
+    ]);
+    assert.equal(workerEntries(current).length, 1);
+
+    const controller = new AbortController();
+    const arming = current.pi.execute(
+      'herdr_watch',
+      { target: 'sol', mode: 'agent' },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 30);
+    await assert.rejects(arming, /cancelled; watch not armed/u);
+    assert.equal((await watchDetails(current)).count, 0);
+  });
+
+  it('omits the tail and does not attribute state when the watched pane hosts a different agent', async () => {
+    const current = await createHarness(0, { includeTailLines: 5 });
+    const replacement = liveAgent('sol', 'w1:p2', 'term-z', '/s/z.jsonl', 'blocked');
+    setAgents({ agents: [SOL], wait: replacement, read: 'SECRET TAIL' });
+    const armed = await current.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    assert.match(armed.content[0].text, /not a claimed worker; claim it with herdr_workers/u);
+    await waitFor(() => current.pi.messages.length === 1, 'replaced watch card');
+    const card = current.pi.messages[0]!.message.content as string;
+    assert.match(card, /pane w1:p2 now hosts a different agent/u);
+    assert.doesNotMatch(card, /SECRET TAIL|settled \(blocked\)/u);
+
+    // The same identity on both checks permits the tail.
+    await current.pi.execute('herdr_workers', { action: 'claim', target: 'sol', task: 'Fix X' });
+    setAgents({ agents: [SOL], wait: SOL, read: 'VERIFIED TAIL' });
+    const again = await current.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    assert.doesNotMatch(again.content[0].text, /claim/u);
+    await waitFor(() => current.pi.messages.length === 2, 'verified watch card');
+    const verified = current.pi.messages[1]!.message.content as string;
+    assert.match(verified, /settled \(idle\)[\s\S]*VERIFIED TAIL/u);
+
+    // Tails disabled: identity still governs state attribution and toasts.
+    await current.pi.emit('session_shutdown');
+    rmSync(current.dir, { recursive: true, force: true });
+    const toasting = await createHarness(1, { toastOn: ['blocked'], notificationDelayMs: 300 });
+    const toasts = (): string[] => {
+      try {
+        return readFileSync(toasting.notificationPath, 'utf8')
+          .split('\n')
+          .filter((line) => line.includes('sol blocked'));
+      } catch {
+        return [];
+      }
+    };
+    const blocked = liveAgent('sol', 'w1:p2', 'term-a', '/s/a.jsonl', 'blocked');
+    setAgents({ agents: [SOL], wait: liveAgent('sol', 'w1:p2', 'term-a', undefined, 'blocked') });
+    await toasting.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    await waitFor(() => toasting.pi.messages.length === 1, 'unverified watch card');
+    const unverified = toasting.pi.messages[0]!.message.content as string;
+    assert.match(unverified, /identity unverified, so its state is not attributed/u);
+    assert.doesNotMatch(unverified, /settled/u);
+
+    // A session replaced during exhaustion-notification I/O gets no late toast.
+    setAgents({ agents: [SOL], wait: blocked });
+    await toasting.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    await waitFor(
+      () => notificationCount(toasting.notificationPath) === 1,
+      'pending exhaustion notification',
+    );
+    toasting.pi.sessionId = 'session-b';
+    await toasting.pi.emit('session_start', { reason: 'new' });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.deepEqual(toasts(), [], 'no toast after the session was replaced');
+
+    // A verified identity in a live session does get its toast.
+    await toasting.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    await waitFor(() => toasts().length > 0, 'verified toast');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(toasts().length, 1);
   });
 });
 
