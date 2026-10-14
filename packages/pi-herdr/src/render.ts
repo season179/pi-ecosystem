@@ -143,6 +143,12 @@ export function formatWatchCard(
         if (matched) lines.push(`match: ${truncate(firstLine(matched), MAX_MATCH_CHARS)}`);
       }
       break;
+    case 'startup-quiet':
+      lines.push(`${header} startup window ended after ${duration}`);
+      lines.push(
+        'No working/blocked activity observed during the startup window; the prompt may not have started or may already have finished.',
+      );
+      break;
     case 'timeout':
       lines.push(`${header} timed out after ${duration}`);
       break;

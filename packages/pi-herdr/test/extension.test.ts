@@ -748,7 +748,7 @@ interface FakeAgentState {
   agents: Array<Record<string, unknown>>;
   lookup?: 'fail';
   lookupDelayMs?: number;
-  wait?: Record<string, unknown>;
+  wait?: Record<string, unknown> | 'current';
   read?: string;
 }
 
@@ -1133,6 +1133,33 @@ describe.sequential('herdr worker ledger', () => {
     assert.equal((await watchDetails(current)).count, 0);
   });
 
+  it('waits for an initially idle agent to work and finish before reporting completion', async () => {
+    const current = await createHarness(1);
+    setAgents({ agents: [SOL], wait: 'current' });
+    await current.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    await waitFor(
+      () =>
+        metadataEvents().some((event) => event.phase === 'waiting') ||
+        current.pi.messages.length > 0,
+      'startup wait or premature completion',
+    );
+    assert.equal(current.pi.messages.length, 0, 'initial idle must not report completion');
+
+    setAgents({ agents: [{ ...SOL, agent_status: 'working' }], wait: 'current' });
+    await waitFor(
+      () =>
+        metadataEvents().filter((event) => event.phase === 'wait').length === 2 ||
+        current.pi.messages.length > 0,
+      'settled wait after activity',
+    );
+    assert.equal(current.pi.messages.length, 0, 'working must not report completion');
+
+    setAgents({ agents: [SOL], wait: 'current' });
+    await waitFor(() => current.pi.messages.length === 1, 'finished watch card');
+    assert.match(current.pi.messages[0]!.message.content as string, /settled \(idle\)/u);
+    assert.equal((await watchDetails(current)).count, 1);
+  });
+
   it('omits the tail and does not attribute state when the watched pane hosts a different agent', async () => {
     const current = await createHarness(0, { includeTailLines: 5 });
     const replacement = liveAgent('sol', 'w1:p2', 'term-z', '/s/z.jsonl', 'blocked');
@@ -1147,7 +1174,11 @@ describe.sequential('herdr worker ledger', () => {
     // The same identity on both checks permits the tail.
     await current.pi.execute('herdr_workers', { action: 'claim', target: 'sol', task: 'Fix X' });
     setAgents({ agents: [SOL], wait: SOL, read: 'VERIFIED TAIL' });
-    const again = await current.pi.execute('herdr_watch', { target: 'sol', mode: 'agent' });
+    const again = await current.pi.execute('herdr_watch', {
+      target: 'sol',
+      mode: 'agent',
+      until: ['idle'],
+    });
     assert.doesNotMatch(again.content[0].text, /claim/u);
     await waitFor(() => current.pi.messages.length === 2, 'verified watch card');
     const verified = current.pi.messages[1]!.message.content as string;

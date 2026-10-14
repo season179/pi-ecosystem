@@ -73,12 +73,12 @@ export interface WatchRecordPublic {
   status: WatchStatus;
 }
 
-/** Why a watch's child exited: natural fire, timeout, kill, or error. */
-export type OutcomeKind = 'fired' | 'timeout' | 'killed' | 'error';
+/** Why a watch settled: natural fire, quiet startup, timeout, kill, or error. */
+export type OutcomeKind = 'fired' | 'startup-quiet' | 'timeout' | 'killed' | 'error';
 
 /**
- * Result of a watch's child process closing. `onOutcome` receives this for
- * every close, including kills. `json`/`errorJson` are parsed when the CLI
+ * Final result of a logical watch (agent watches may have two child phases).
+ * `onOutcome` receives this once, including kills. `json`/`errorJson` are parsed when the CLI
  * emitted JSON so downstream code never re-parses.
  */
 export interface WatchOutcome {

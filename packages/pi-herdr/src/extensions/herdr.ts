@@ -554,6 +554,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       } else if (
         tail === undefined &&
         outcome.json === undefined &&
+        outcome.kind !== 'startup-quiet' &&
         identityVerdict === undefined
       ) {
         tail = lastLines(outcome.stdout || outcome.stderr, 10);
@@ -728,6 +729,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
       if (manager === undefined) throw new Error('no active session');
       const mode = params.mode ?? 'agent';
       let identity: AgentIdentity | undefined;
+      let initialStatus: string | undefined;
       let claimNote: string | undefined;
       if (mode === 'agent' && params.target?.trim()) {
         // Snapshot identity once; a failed lookup still arms the watch as before.
@@ -740,6 +742,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
         }
         if (lookup.ok) {
           identity = lookup.agent.identity;
+          initialStatus = lookup.agent.status;
           const claimed = readWorkerRecords(
             ctx.sessionManager.getEntries(),
             ctx.sessionManager.getSessionId(),
@@ -771,7 +774,7 @@ export default function herdrExtension(pi: ExtensionAPI): void {
         ...(params.note === undefined ? {} : { note: params.note }),
         wake: params.wake ?? true,
       };
-      const record = manager.start(specInput as WatchSpec);
+      const record = manager.start(specInput as WatchSpec, { initialStatus });
       updateFooter();
       const armedOn =
         record.spec.mode === 'command'

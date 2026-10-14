@@ -142,7 +142,30 @@ if (agentsFile && agentCommand) {
     if (agentCommand === 'read') {
       console.log(state.read);
     } else if (agentCommand === 'wait') {
-      console.log(JSON.stringify({ result: { agent: state.wait, type: 'agent_wait' } }));
+      let agent = state.wait;
+      if (state.wait === 'current') {
+        logMetadata('wait');
+        const until = args.flatMap((arg, i) => (arg === '--until' ? [args[i + 1]] : []));
+        const states = until.length ? until : ['idle', 'done', 'blocked'];
+        const timeoutIndex = args.indexOf('--timeout');
+        const deadline = timeoutIndex < 0 ? Infinity : Date.now() + Number(args[timeoutIndex + 1]);
+        let waiting = false;
+        while (true) {
+          const current = JSON.parse(readFileSync(agentsFile, 'utf8'));
+          agent = current.agents?.find((a) => a.name === args[2] || a.pane_id === args[2]);
+          if (states.includes(agent?.agent_status)) break;
+          if (!waiting) {
+            logMetadata('waiting');
+            waiting = true;
+          }
+          if (Date.now() >= deadline) {
+            console.error(JSON.stringify({ error: { code: 'wait_timeout' } }));
+            process.exit(1);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      console.log(JSON.stringify({ result: { agent, type: 'agent_wait' } }));
     } else if (state.lookup === 'hold-pipes') {
       // Hang, with a descendant that keeps the inherited pipes open after a kill.
       spawn(process.execPath, ['-e', 'setTimeout(() => {}, 6000)'], { stdio: ['ignore', 1, 2] });

@@ -1,11 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { herdrCommand } from './herdr-cli.js';
+import { liveAgentFrom, resultAgent } from './owned-workers.js';
 import type { WatchOutcome, WatchRecordPublic, WatchSpec } from './types.js';
 
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const GROUP_POLL_MS = 25;
+const STARTUP_WINDOW_MS = 5_000;
 
 type TerminationCause = 'none' | 'timeout' | 'stopped';
 
@@ -122,6 +124,10 @@ interface WatchEntry {
   exit?: { code: number | null; signal: NodeJS.Signals | null };
   /** Set once the grace expired: the group got SIGKILL and is no longer waited on. */
   killed: boolean;
+  /** Default waits armed on idle/done first look for working or blocked. */
+  startup: boolean;
+  /** Shared by both phases; absent means no overall timeout. */
+  deadline?: number;
   timeoutTimer?: NodeJS.Timeout;
   /**
    * One grace period per watch, armed once when the watch begins to end: by cancellation, or by
@@ -278,7 +284,10 @@ export class WatchManager {
     this.killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   }
 
-  start(spec: WatchSpec, options: { cwd?: string } = {}): WatchRecordPublic {
+  start(
+    spec: WatchSpec,
+    options: { cwd?: string; initialStatus?: string } = {},
+  ): WatchRecordPublic {
     if (this.isShutdown) throw new Error('watch manager is shut down');
     validateWatchSpec(spec);
     const armedCount = [...this.live.values()].filter(
@@ -294,6 +303,12 @@ export class WatchManager {
       startedAt: Date.now(),
       status: 'armed',
     };
+    const startup =
+      spec.mode === 'agent' &&
+      !spec.until?.length &&
+      (options.initialStatus === 'idle' || options.initialStatus === 'done');
+    const deadline =
+      startup && spec.timeoutMs !== undefined ? record.startedAt + spec.timeoutMs : undefined;
     const child =
       spec.mode === 'command'
         ? spawn('/bin/sh', ['-c', spec.command], {
@@ -302,11 +317,26 @@ export class WatchManager {
             shell: false,
             stdio: ['ignore', 'pipe', 'pipe'],
           })
-        : spawn(this.command, buildWatchArgs(spec), {
-            detached: true,
-            shell: false,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          });
+        : spawn(
+            this.command,
+            buildWatchArgs(
+              startup && spec.mode === 'agent'
+                ? {
+                    ...spec,
+                    until: ['working', 'blocked'],
+                    timeoutMs: Math.min(
+                      STARTUP_WINDOW_MS,
+                      deadline === undefined ? Infinity : Math.max(1, deadline - Date.now()),
+                    ),
+                  }
+                : spec,
+            ),
+            {
+              detached: true,
+              shell: false,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            },
+          );
     let resolveClose = (): void => undefined;
     const closePromise = new Promise<void>((resolve) => {
       resolveClose = resolve;
@@ -320,12 +350,33 @@ export class WatchManager {
       drained: false,
       terminationCause: 'none',
       killed: false,
+      startup,
+      deadline,
       closePromise,
       resolveClose,
     };
     this.records.set(record.id, record);
     this.live.set(record.id, entry);
 
+    this.observeChild(entry);
+    if (spec.mode === 'command' || deadline !== undefined) {
+      entry.timeoutTimer = setTimeout(
+        () => {
+          // A gated watch owns one deadline, including the inter-phase cleanup.
+          if (deadline !== undefined && entry.record.status === 'armed') {
+            entry.terminationCause = 'timeout';
+          }
+          this.terminate(entry, 'timeout');
+        },
+        deadline === undefined ? spec.timeoutMs : Math.max(1, deadline - Date.now()),
+      );
+    }
+
+    return copyRecord(record);
+  }
+
+  private observeChild(entry: WatchEntry): void {
+    const child = entry.child;
     child.stdout?.on('data', (chunk: Buffer | string) => entry.stdout.append(chunk));
     child.stderr?.on('data', (chunk: Buffer | string) => entry.stderr.append(chunk));
     child.once('error', (error) => {
@@ -341,11 +392,6 @@ export class WatchManager {
       entry.drained = true;
       this.reconcile(entry);
     });
-    if (spec.mode === 'command') {
-      entry.timeoutTimer = setTimeout(() => this.terminate(entry, 'timeout'), spec.timeoutMs);
-    }
-
-    return copyRecord(record);
   }
 
   /** Stops armed watches and resolves once every selected live watch has settled. */
@@ -445,19 +491,61 @@ export class WatchManager {
 
   private finish(entry: WatchEntry): void {
     if (entry.closed) return;
+    const stdout = entry.stdout.toString();
+    const stderr = entry.stderr.toString();
+    const json = parseJson(stdout);
+    const errorJson = parseJson(stderr);
+    const { code: exitCode, signal } = entry.exit ?? { code: null, signal: null };
+    if (
+      entry.deadline !== undefined &&
+      Date.now() >= entry.deadline &&
+      entry.record.status === 'armed'
+    ) {
+      entry.terminationCause = 'timeout';
+    }
+    let kind = this.classify(entry, exitCode, stderr, errorJson);
+    if (entry.startup && entry.record.status === 'armed' && entry.terminationCause === 'none') {
+      const state = liveAgentFrom(resultAgent(json))?.status;
+      if (kind === 'fired' && state === 'working' && !this.isShutdown) {
+        // The old group and pipes are settled. Keep the record, deadline and close promise.
+        if (entry.killGraceTimer !== undefined) clearTimeout(entry.killGraceTimer);
+        if (entry.groupPollTimer !== undefined) clearTimeout(entry.groupPollTimer);
+        entry.killGraceTimer = undefined;
+        entry.groupPollTimer = undefined;
+        entry.startup = false;
+        entry.stdout = new TailBuffer();
+        entry.stderr = new TailBuffer();
+        entry.exit = undefined;
+        entry.drained = false;
+        entry.killed = false;
+        const spec = entry.record.spec;
+        entry.child = spawn(
+          this.command,
+          buildWatchArgs({
+            ...spec,
+            ...(entry.deadline === undefined
+              ? {}
+              : { timeoutMs: Math.max(1, entry.deadline - Date.now()) }),
+          }),
+          {
+            detached: true,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        this.observeChild(entry);
+        return;
+      }
+      if (kind === 'timeout') kind = 'startup-quiet';
+      else if (kind === 'fired' && state !== 'blocked') kind = 'error';
+    }
     entry.closed = true;
     if (entry.timeoutTimer !== undefined) clearTimeout(entry.timeoutTimer);
     if (entry.killGraceTimer !== undefined) clearTimeout(entry.killGraceTimer);
     if (entry.groupPollTimer !== undefined) clearTimeout(entry.groupPollTimer);
     if (entry.record.status === 'armed') entry.record.status = 'fired';
-    const { code: exitCode, signal } = entry.exit ?? { code: null, signal: null };
-
-    const stdout = entry.stdout.toString();
-    const stderr = entry.stderr.toString();
-    const json = parseJson(stdout);
-    const errorJson = parseJson(stderr);
     const outcome: WatchOutcome = {
-      kind: this.classify(entry, exitCode, stderr, errorJson),
+      kind,
       exitCode,
       ...(signal == null ? {} : { signal }),
       durationMs: Date.now() - entry.record.startedAt,
