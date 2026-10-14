@@ -18,6 +18,7 @@ import {
   type JevSession,
   type OpenJev,
 } from './jev.js';
+import type { Observation, WorkerObservations } from './owned-workers.js';
 import type { QuotaSnapshot } from './types.js';
 import {
   compareModels,
@@ -50,7 +51,24 @@ const TASK_MAX_CHARS = 6_000;
 const CONTEXT_MAX_CHARS = 4_000;
 const NOTE_MAX_CHARS = 1_000;
 const MAX_LABELS = 20;
+/** Local cap on the claimed-worker lookup; never more than a quarter of the deadline. */
+const CLAIMED_LOOKUP_MS = 5_000;
 const DIFFICULTY = ['easy', 'medium', 'hard', 'insufficient_context'] as const;
+const CLAIMED_OBSERVATION: Record<Observation, string> = {
+  match: 'match: verified live',
+  'session unverified': 'uncertain: terminal matches, session unverified',
+  replaced: 'replaced: verified not this worker',
+  absent: 'absent: verified not running',
+  unknown: 'unknown: identity could not be verified',
+};
+/** Presentation order when the claimed list is truncated: verified-live first. */
+const CLAIMED_PRIORITY: Observation[] = [
+  'match',
+  'session unverified',
+  'unknown',
+  'replaced',
+  'absent',
+];
 
 export interface SelectRequest {
   task: string;
@@ -84,6 +102,8 @@ export interface SelectDeps {
   fetchCodexQuota(signal: AbortSignal): Promise<QuotaSnapshot>;
   fetchClaudeQuota(signal: AbortSignal): Promise<ClaudeQuotaSnapshot>;
   fetchZaiQuota(signal: AbortSignal): Promise<ZaiQuotaSnapshot>;
+  /** This orchestrator's claimed workers with live observations; omitted means unknown. */
+  observeClaimedWorkers?(signal: AbortSignal): Promise<WorkerObservations>;
   now?: () => number;
   deadlineMs?: number;
 }
@@ -412,7 +432,7 @@ function allocationQuestion(options: OptionState[]): Questions {
           "Inline work is not free: it uses the orchestrator's own context and time (`options.inline`). It suits work the orchestrator can finish in a few minutes.",
           'Quota in `quotaGroups`: used and remaining percent, reset time, time left and how much of each window has elapsed. Options in the same quota group share its limits. Plentiful capacity that resets soon is worth using; little remaining capacity with a long time to reset is worth conserving. Unknown quota is unknown, not empty.',
           'Scarce capacity across every subscription is not a reason for cannot_select while some capacity remains.',
-          'Known demand in `activeWorkers` and `queuedDemand`, when supplied.',
+          'Known demand in `claimedWorkers`, `activeWorkers` and `queuedDemand`, when supplied. `claimedWorkers` lists only workers this orchestrator claimed (`[]` means none claimed here, not that nothing else runs); their models are declared, not verified, and only `match` entries are verified live. `claimedOnThisModel` counts those verified-live claimed workers by declared model, including any beyond the listed entries (`claimedWorkersOmitted` gives how many were not listed). `activeWorkers` covers other running workers not claimed by this orchestrator.',
           'When `task.purpose` is review, discussion or debate, an independent perspective matters: prefer an option whose model family differs from `provenance`, if it is capable enough.',
           'User preferences in each option and in `userPreferences`.',
         ],
@@ -622,6 +642,7 @@ function optionFacts(
   quota: Record<QuotaGroupId, QuotaGroupFact>,
   env: SelectEnvironment,
   activeCounts?: Map<string, number>,
+  claimedCounts?: Map<string, number>,
 ): Record<string, unknown> {
   const quotaFacts =
     option.quotaGroup === undefined
@@ -646,6 +667,7 @@ function optionFacts(
         }
       : {}),
     ...(activeCounts ? { activeWorkersOnThisModel: activeCounts.get(option.id) ?? 0 } : {}),
+    ...(claimedCounts ? { claimedOnThisModel: claimedCounts.get(option.id) ?? 0 } : {}),
   };
   if (option.id === INLINE_OPTION) {
     return {
@@ -732,10 +754,11 @@ export async function runSelection(
     };
   }
 
+  const deadlineMs = deps.deadlineMs ?? SELECT_DEADLINE_MS;
   const deadline = new AbortController();
   const timer = setTimeout(
     () => deadline.abort(new JevError('timeout', 'selection deadline exceeded')),
-    deps.deadlineMs ?? SELECT_DEADLINE_MS,
+    deadlineMs,
   );
   const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
   const settleQuota = <T>(
@@ -750,6 +773,22 @@ export async function runSelection(
     settleQuota(deps.fetchClaudeQuota, claudeFacts),
     settleQuota(deps.fetchZaiQuota, zaiFacts),
   ]).then(([codex, claude, zai]) => ({ codex, claude, zai }));
+  // Runs concurrently with quota under a local budget inside the deadline. It settles
+  // as failed (unknown, never []) on rejection, cancellation or budget exhaustion, even
+  // if the lookup ignores its signal, so it can never fail or stall selection.
+  const observeClaimed = deps.observeClaimedWorkers;
+  const claimedPromise: Promise<WorkerObservations | undefined> = observeClaimed
+    ? new Promise<WorkerObservations>((resolve) => {
+        const failed = (): void => resolve({ lookup: 'failed', workers: [] });
+        const budget = Math.min(CLAIMED_LOOKUP_MS, Math.floor(deadlineMs / 4));
+        const lookupSignal = AbortSignal.any([combined, AbortSignal.timeout(budget)]);
+        if (lookupSignal.aborted) return failed();
+        lookupSignal.addEventListener('abort', failed, { once: true });
+        Promise.resolve()
+          .then(() => observeClaimed(lookupSignal))
+          .then(resolve, failed);
+      })
+    : Promise.resolve(undefined);
   const jevReport: NonNullable<SelectResult['jev']> = {};
   const base = (): Pick<SelectResult, 'options' | 'provenance' | 'jev'> => ({
     options: options.map(report),
@@ -821,22 +860,57 @@ export async function runSelection(
       return { ...base(), quota, outcome: 'cannot_select', decidedBy: 'code' };
     }
 
+    const known = new Set(env.knownModels.map((model) => modelIdentity(model).key));
+    const workerOption = (label: string): OptionState | undefined => {
+      const identity = modelIdentity(label);
+      return options.find(
+        (option) =>
+          option.candidate &&
+          option.identity &&
+          compareModels(identity, option.identity, known) === 'same',
+      );
+    };
     let activeCounts: Map<string, number> | undefined;
     let activeState: unknown = 'unknown';
     if (request.activeWorkers !== undefined) {
       activeCounts = new Map();
-      const known = new Set(env.knownModels.map((model) => modelIdentity(model).key));
       activeState = boundedList(request.activeWorkers).map((label) => {
-        const identity = modelIdentity(label);
-        const match = options.find(
-          (option) =>
-            option.candidate &&
-            option.identity &&
-            compareModels(identity, option.identity, known) === 'same',
-        );
+        const match = workerOption(label);
         if (match) activeCounts!.set(match.id, (activeCounts!.get(match.id) ?? 0) + 1);
         return { model: label, ...(match ? { option: match.id } : {}) };
       });
+    }
+    // Already settled or bounded by its local budget; a lookup failure never fails selection.
+    const claimed = await claimedPromise;
+    let claimedCounts: Map<string, number> | undefined;
+    let claimedState: unknown = 'unknown';
+    let claimedOmitted = 0;
+    if (claimed?.lookup === 'failed') {
+      claimedState = 'unknown: the Herdr lookup failed';
+    } else if (claimed !== undefined) {
+      const counts = new Map<string, number>();
+      // Count every record; only the presented list is bounded.
+      const entries = claimed.workers.map(({ record, observation }) => {
+        const declaredModel = record.model ? sanitizeLabel(record.model) : undefined;
+        // Only verified-live workers with a declared model count toward an option.
+        const match =
+          observation === 'match' && declaredModel ? workerOption(declaredModel) : undefined;
+        if (match) counts.set(match.id, (counts.get(match.id) ?? 0) + 1);
+        return {
+          rank: CLAIMED_PRIORITY.indexOf(observation),
+          fact: {
+            observation: CLAIMED_OBSERVATION[observation],
+            declaredModel: declaredModel ?? 'unknown',
+            ...(match ? { option: match.id } : {}),
+          },
+        };
+      });
+      claimedCounts = counts;
+      claimedState = entries
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, MAX_LABELS)
+        .map(({ fact }) => fact);
+      claimedOmitted = Math.max(0, entries.length - MAX_LABELS);
     }
     const quotaState = Object.fromEntries(
       Object.entries(quota).map(([group, fact]) => [
@@ -875,9 +949,14 @@ export async function runSelection(
           }
         : {}),
       options: Object.fromEntries(
-        candidates.map((option) => [option.id, optionFacts(option, quota, env, activeCounts)]),
+        candidates.map((option) => [
+          option.id,
+          optionFacts(option, quota, env, activeCounts, claimedCounts),
+        ]),
       ),
       quotaGroups: quotaState,
+      claimedWorkers: claimedState,
+      ...(claimedOmitted > 0 ? { claimedWorkersOmitted: claimedOmitted } : {}),
       activeWorkers: activeState,
       queuedDemand: request.queuedDemand?.trim()
         ? excerpt(sanitizeLabel(request.queuedDemand, NOTE_MAX_CHARS), NOTE_MAX_CHARS).text

@@ -13,6 +13,7 @@ import {
   type SelectEnvironment,
   type SelectRequest,
 } from '../src/select.js';
+import type { Observation } from '../src/owned-workers.js';
 import type { QuotaSnapshot } from '../src/types.js';
 import { compareModels, modelIdentity } from '../src/workers.js';
 import type { ZaiQuotaSnapshot } from '../src/zai-quota.js';
@@ -324,6 +325,87 @@ describe('herdr_select selection', () => {
         new RegExp(`unknown allowedOptions ${option}`),
       );
     }
+  });
+
+  it('counts every verified-live claimed worker with a declared model; lookup failure or timeout stays unknown', async () => {
+    const claimedWorker = (id: number, observation: Observation, model?: string) => ({
+      record: {
+        id,
+        identity: { paneId: `w1:p${id}`, terminalId: `term-${id}` },
+        task: 'task',
+        ...(model ? { model } : {}),
+        released: false,
+      },
+      observation,
+    });
+    const selectWith = async (
+      observeClaimedWorkers: SelectDeps['observeClaimedWorkers'],
+      overrides: Partial<SelectDeps> = {},
+    ) => {
+      const jev = fakeJev((labels) => choice(labels, 'inline'));
+      const result = await runSelection(
+        TASK,
+        environment(),
+        deps(jev.openJev, { observeClaimedWorkers, ...overrides }),
+      );
+      assert.equal(result.outcome, 'selected');
+      return jev.asks[1]!.state;
+    };
+
+    const state = await selectWith(async () => ({
+      lookup: 'ok',
+      workers: [
+        claimedWorker(1, 'match', 'claude-opus-5-5'),
+        claimedWorker(2, 'match'),
+        claimedWorker(3, 'session unverified', 'claude-opus-5-5'),
+        claimedWorker(4, 'replaced', 'claude-opus-5-5'),
+        claimedWorker(5, 'unknown', 'openai-codex/gpt-6.1-sol'),
+      ],
+    }));
+    assert.equal(state.options.claude_code_opus_5_5.claimedOnThisModel, 1);
+    assert.equal(state.options.pi_gpt_6_1_sol.claimedOnThisModel, 0);
+    assert.deepEqual(
+      state.claimedWorkers.map((worker: any) => [worker.observation, worker.declaredModel]),
+      [
+        ['match: verified live', 'claude-opus-5-5'],
+        ['match: verified live', 'unknown'],
+        ['uncertain: terminal matches, session unverified', 'claude-opus-5-5'],
+        ['unknown: identity could not be verified', 'openai-codex/gpt-6.1-sol'],
+        ['replaced: verified not this worker', 'claude-opus-5-5'],
+      ],
+    );
+    assert.equal(state.claimedWorkersOmitted, undefined);
+
+    // A ledger longer than the listed facts still counts every record and discloses the rest.
+    const large = await selectWith(async () => ({
+      lookup: 'ok',
+      workers: [
+        ...Array.from({ length: 20 }, (_, i) => claimedWorker(i + 1, 'absent', 'claude-opus-5-5')),
+        claimedWorker(21, 'match', 'claude-opus-5-5'),
+      ],
+    }));
+    assert.equal(large.options.claude_code_opus_5_5.claimedOnThisModel, 1);
+    assert.equal(large.claimedWorkers.length, 20);
+    assert.equal(large.claimedWorkers[0].observation, 'match: verified live');
+    assert.equal(large.claimedWorkersOmitted, 1);
+
+    assert.deepEqual(
+      (await selectWith(async () => ({ lookup: 'ok', workers: [] }))).claimedWorkers,
+      [],
+    );
+    for (const failing of [
+      async () => ({ lookup: 'failed' as const, workers: [claimedWorker(1, 'unknown')] }),
+      async () => {
+        throw new Error('herdr unavailable');
+      },
+    ]) {
+      const failed = await selectWith(failing);
+      assert.match(failed.claimedWorkers, /^unknown/u);
+      assert.equal(failed.options.claude_code_opus_5_5.claimedOnThisModel, undefined);
+    }
+    // A lookup that ignores its signal times out locally instead of failing selection.
+    const stalled = await selectWith(() => new Promise<never>(() => {}), { deadlineMs: 200 });
+    assert.match(stalled.claimedWorkers, /^unknown/u);
   });
 
   it('returns cannot_select as a valid non-overridable answer', async () => {

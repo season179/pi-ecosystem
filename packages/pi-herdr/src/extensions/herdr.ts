@@ -176,7 +176,7 @@ const SelectParams = Type.Object({
   activeWorkers: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        'Models of workers currently running, if known (e.g. claude-opus-5-5). Omit when unknown.',
+        'Models of running workers NOT claimed by this orchestrator, if known (e.g. claude-opus-5-5). Claimed workers are supplied automatically; by convention do not list them again. Omit when unknown.',
     }),
   ),
   queuedDemand: Type.Optional(
@@ -1003,6 +1003,14 @@ export default function herdrExtension(pi: ExtensionAPI): void {
                 getApiKey: () => ctx.modelRegistry.getApiKeyForProvider('zai'),
                 signal: quotaSignal,
               }),
+            observeClaimedWorkers: (lookupSignal) =>
+              observeWorkers(
+                readWorkerRecords(
+                  ctx.sessionManager.getEntries(),
+                  ctx.sessionManager.getSessionId(),
+                ),
+                lookupSignal,
+              ),
           },
           signal,
         );
