@@ -228,13 +228,19 @@ async function createHarness(
   return harness;
 }
 
-async function injectedPrompt(current: Harness): Promise<string | undefined> {
-  const results = (await current.pi.emit('before_agent_start', {
+// Guidance must travel in structured prompt options: providers such as pi-claude-bridge
+// rebuild the prompt from them and drop a returned whole-prompt override.
+async function injectedPrompt(current: Harness, baseAppend = ''): Promise<string | undefined> {
+  const options = { cwd: process.cwd(), appendSystemPrompt: baseAppend };
+  const results = await current.pi.emit('before_agent_start', {
     prompt: 'go',
     systemPrompt: 'BASE PROMPT',
-    systemPromptOptions: { cwd: process.cwd() },
-  })) as Array<{ systemPrompt?: string } | undefined>;
-  return results.find((result) => result?.systemPrompt !== undefined)?.systemPrompt;
+    systemPromptOptions: options,
+  });
+  for (const result of results) {
+    assert.equal((result as { systemPrompt?: string } | undefined)?.systemPrompt, undefined);
+  }
+  return options.appendSystemPrompt || undefined;
 }
 
 const ORCHESTRATOR_TOOLS = [
@@ -541,7 +547,7 @@ describe.sequential('herdr orchestration activation lifecycle', () => {
     assert.equal(current.pi.notices.at(-1)!.level, 'info');
 
     const prompt = await injectedPrompt(current);
-    assert.ok(prompt?.startsWith('BASE PROMPT\n\n# Herdr orchestration'));
+    assert.ok(prompt?.startsWith('# Herdr orchestration'));
     assert.match(prompt!, /Own the outcome, not every pane/u, 'skill body injected');
     assert.ok(
       prompt!.includes(
@@ -560,6 +566,19 @@ describe.sequential('herdr orchestration activation lifecycle', () => {
     await command.handler('  ', current.pi.ctx);
     assert.equal(current.pi.orchestrationEntries().length, 1, 'idempotent: no duplicate entry');
     assert.match(current.pi.notices.at(-1)!.message, /already active/u);
+  });
+
+  it("keeps the user's appended prompt and adds guidance only while active", async () => {
+    const current = await createHarness(0, { promoted: false });
+    const command = current.pi.commands.get('orchestrate')!;
+    await command.handler('', current.pi.ctx);
+    assert.ok(
+      (await injectedPrompt(current, 'USER APPEND'))?.startsWith(
+        'USER APPEND\n\n# Herdr orchestration',
+      ),
+    );
+    await command.handler('off', current.pi.ctx);
+    assert.equal(await injectedPrompt(current, 'USER APPEND'), 'USER APPEND');
   });
 
   it('herdr_orchestrate uses the same path and returns the workflow immediately', async () => {

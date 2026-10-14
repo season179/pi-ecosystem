@@ -1247,9 +1247,15 @@ export default function herdrExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // Append through the structured options rather than returning a whole-prompt override:
+  // providers such as pi-claude-bridge rebuild the prompt from these options and drop an
+  // override. Pi copies the options for each run, so inactive runs need no cleanup.
   pi.on('before_agent_start', (event) => {
-    if (!promoted) return undefined;
-    return { systemPrompt: `${event.systemPrompt}\n\n${buildGuidance()}` };
+    if (!promoted) return;
+    const options = event.systemPromptOptions;
+    options.appendSystemPrompt = [options.appendSystemPrompt, buildGuidance()]
+      .filter(Boolean)
+      .join('\n\n');
   });
 
   pi.on('input', (event, ctx) => {
